@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="ru" data-lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>WhisperNet — Безопасный мессенджер</title>
+  <meta name="description" content="Минималистичный мессенджер с сквозным шифрованием на базе Signal Protocol">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+  <link rel="icon" type="image/png" href="../public/icons/icon-192.png">
+</head>
+<body>
+  <!-- Ambient background -->
+  <div class="ambient">
+    <div class="ambient-orb ambient-orb-1"></div>
+    <div class="ambient-orb ambient-orb-2"></div>
+    <div class="ambient-orb ambient-orb-3"></div>
+  </div>
+
+  <!-- Navigation -->
+  <nav class="nav">
+    <div class="nav-inner">
+      <a href="#" class="nav-logo">
+        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          <circle cx="12" cy="10" r="1" fill="currentColor" stroke="none"/>
+          <circle cx="8" cy="10" r="1" fill="currentColor" stroke="none"/>
+          <circle cx="16" cy="10" r="1" fill="currentColor" stroke="none"/>
+        </svg>
+        <span>WhisperNet</span>
+      </a>
+      <div class="nav-links">
+        <a href="#features" data-ru="Возможности" data-en="Features">Возможности</a>
+        <a href="#security" data-ru="Безопасность" data-en="Security">Безопасность</a>
+        <a href="#download" data-ru="Скачать" data-en="Download">Скачать</a>
+        <a href="#docs" data-ru="Документация" data-en="Docs">Документация</a>
+        <a href="#faq" data-ru="Вопросы" data-en="FAQ">Вопросы</a>
+      </div>
+      <button class="lang-toggle" id="langToggle">EN</button>
+    </div>
+  </nav>
+
+  <!-- Hero -->
+  <section class="hero">
+    <div class="hero-badge glass">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      <span data-ru="Signal Protocol • Открытый код" data-en="Signal Protocol • Open Source">Signal Protocol • Открытый код</span>
+    </div>
+    <h1>
+      <span data-ru="Приватный" data-en="Private">Приватный</span>
+      <span class="gradient-text" data-ru="мессенджер" data-en="messenger">мессенджер</span>
+    </h1>
+    <p class="hero-sub" data-ru="Минималистичный, безопасный, с шифрованием уровня военных. Ваши сообщения — только ваши." data-en="Minimalist, secure, military-grade encryption. Your messages are yours alone.">Минималистичный, безопасный, с шифрованием уровня военных. Ваши сообщения — только ваши.</p>
+    <div class="hero-actions">
+      <a href="#download" class="btn btn-primary">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        <span data-ru="Скачать бесплатно" data-en="Download Free">Скачать бесплатно</span>
+      </a>
+      <a href="https://github.com/PupSenYaSha/whispernet" target="_blank" class="btn btn-glass">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/></svg>
+        <span data-ru="GitHub" data-en="GitHub">GitHub</span>
+      </a>
+    </div>
+    <div class="hero-stats">
+      <div class="stat glass">
+        <span class="stat-value">E2EE</span>
+        <span class="stat-label" data-ru="Сквозное шифрование" data-en="End-to-End Encryption">Сквозное шифрование</span>
+      </div>
+      <div class="stat glass">
+        <span class="stat-value">3</span>
+        <span class="stat-label" data-ru="Платформы" data-en="Platforms">Платформы</span>
+      </div>
+      <div class="stat glass">
+        <span class="stat-value">0</span>
+        <span class="stat-label" data-ru="Уязвимостей" data-en="Vulnerabilities">Уязвимостей</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features -->
+  <section id="features" class="section">
+    <div class="container">
+      <h2 class="section-title" data-ru="Возможности" data-en="Features">Возможности</h2>
+      <p class="section-sub" data-ru="Всё что нужно для безопасного общения — и ничего лишнего." data-en="Everything you need for secure communication — nothing more.">Всё что нужно для безопасного общения — и ничего лишнего.</p>
+      <div class="features-grid">
+        <div class="feature-card glass">
+          <div class="feature-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+          </div>
+          <h3 data-ru="Signal Protocol" data-en="Signal Protocol">Signal Protocol</h3>
+          <p data-ru="X3DH + Double Ratchet — тот же протокол, что используется в Signal, WhatsApp и Matrix." data-en="X3DH + Double Ratchet — the same protocol used in Signal, WhatsApp, and Matrix.">X3DH + Double Ratchet — тот же протокол, что используется в Signal, WhatsApp и Matrix.</p>
+        </div>
+        <div class="feature-card glass">
+          <div class="feature-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          </div>
+          <h3 data-ru="Forward Secrecy" data-en="Forward Secrecy">Forward Secrecy</h3>
+          <p data-ru="Компрометация долгосрочных ключей не раскрывает прошлые сообщения." data-en="Compromise of long-term keys does not expose past messages.">Компрометация долгосрочных ключей не раскрывает прошлые сообщения.</p>
+        </div>
+        <div class="feature-card glass">
+          <div class="feature-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          </div>
+          <h3 data-ru="Личные и групповые чаты" data-en="DMs & Group Chats">Личные и групповые чаты</h3>
+          <p data-ru="Приватные сообщения и общий чат — всё в одном приложении." data-en="Private messages and group chat — all in one app.">Приватные сообщения и общий чат — всё в одном приложении.</p>
+        </div>
+        <div class="feature-card glass">
+          <div class="feature-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+          </div>
+          <h3 data-ru="Медиа" data-en="Media">Медиа</h3>
+          <p data-ru="Отправляйте изображения и видео с шифрованием." data-en="Send images and videos with encryption.">Отправляйте изображения и видео с шифрованием.</p>
+        </div>
+        <div class="feature-card glass">
+          <div class="feature-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+          </div>
+          <h3 data-ru="Кроссплатформенность" data-en="Cross-Platform">Кроссплатформенность</h3>
+          <p data-ru="Web (PWA), Desktop (Electron/Windows), Mobile (Android)." data-en="Web (PWA), Desktop (Electron/Windows), Mobile (Android).">Web (PWA), Desktop (Electron/Windows), Mobile (Android).</p>
+        </div>
+        <div class="feature-card glass">
+          <div class="feature-icon">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+          </div>
+          <h3 data-ru="Темы и локализация" data-en="Themes & Localization">Темы и локализация</h3>
+          <p data-ru="8 цветовых акцентов, тёмная/светлая тема, русский и английский." data-en="8 accent colors, dark/light theme, Russian and English.">8 цветовых акцентов, тёмная/светлая тема, русский и английский.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Security -->
+  <section id="security" class="section section-alt">
+    <div class="container">
+      <h2 class="section-title" data-ru="Безопасность" data-en="Security">Безопасность</h2>
+      <p class="section-sub" data-ru="Как работает защита ваших сообщений." data-en="How your messages are protected.">Как работает защита ваших сообщений.</p>
+      <div class="security-grid">
+        <div class="security-card glass">
+          <div class="security-num">01</div>
+          <h3 data-ru="Обмен ключами X3DH" data-en="X3DH Key Agreement">Обмен ключами X3DH</h3>
+          <p data-ru="При первом сообщенииalice и bob обмениваются ключами через X3DH (Extended Triple Diffie-Hellman). Это позволяет установить зашифрованную сессию даже если получатель оффлайн." data-en="On the first message, Alice and Bob exchange keys via X3DH (Extended Triple Diffie-Hellman). This establishes an encrypted session even if the recipient is offline.">При первом сообщении alice и bob обмениваются ключами через X3DH (Extended Triple Diffie-Hellman). Это позволяет установить зашифрованную сессию даже если получатель оффлайн.</p>
+        </div>
+        <div class="security-card glass">
+          <div class="security-num">02</div>
+          <h3 data-ru="Двойнойatchet" data-en="Double Ratchet">Двойнойatchet</h3>
+          <p data-ru="Каждое сообщение шифруется уникальным ключом. Алгоритм Double Ratchet непрерывно обновляет ключи, обеспечивая forward secrecy." data-en="Each message is encrypted with a unique key. The Double Ratchet algorithm continuously updates keys, ensuring forward secrecy.">Каждое сообщение шифруется уникальным ключом. Алгоритм Double Ratchet непрерывно обновляет ключи, обеспечивая forward secrecy.</p>
+        </div>
+        <div class="security-card glass">
+          <div class="security-num">03</div>
+          <h3 data-ru="Pre-key Bundles" data-en="Pre-key Bundles">Pre-key Bundles</h3>
+          <p data-ru="Сервер хранит одноразовые ключи для асинхронной установки сессий. Даже если сервер скомпрометирован, это не раскрывает сообщения." data-en="The server stores one-time keys for asynchronous session setup. Even if the server is compromised, it cannot decrypt messages.">Сервер хранит одноразовые ключи для асинхронной установки сессий. Даже если сервер скомпрометирован, это не раскрывает сообщения.</p>
+        </div>
+        <div class="security-card glass">
+          <div class="security-num">04</div>
+          <h3 data-ru="Нулевой доступ сервера" data-en="Zero Server Access">Нулевой доступ сервера</h3>
+          <p data-ru="Сервер никогда не видит ваши сообщения в открытом виде. Шифрование происходит полностью на клиенте." data-en="The server never sees your plaintext messages. All encryption happens on the client side.">Сервер никогда не видит ваши сообщения в открытом виде. Шифрование происходит полностью на клиенте.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Download -->
+  <section id="download" class="section">
+    <div class="container">
+      <h2 class="section-title" data-ru="Скачать" data-en="Download">Скачать</h2>
+      <p class="section-sub" data-ru="Бесплатно, без рекламы, без подписки." data-en="Free, no ads, no subscription.">Бесплатно, без рекламы, без подписки.</p>
+      <div class="download-grid">
+        <a href="https://github.com/PupSenYaSha/whispernet/releases/download/v1.0.0/WhisperNet.1.0.0.exe" class="download-card glass" download>
+          <div class="download-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+          </div>
+          <h3>Windows</h3>
+          <p class="download-desc" data-ru="Портативный .exe — скачай и запусти" data-en="Portable .exe — download and run">Портативный .exe — скачай и запусти</p>
+          <span class="download-size">~67 MB</span>
+        </a>
+        <a href="https://github.com/PupSenYaSha/whispernet/releases/download/v1.0.0/WhisperNet.apk" class="download-card glass" download>
+          <div class="download-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12.01" y2="18"/></svg>
+          </div>
+          <h3>Android</h3>
+          <p class="download-desc" data-ru="APK файл для установки" data-en="APK file for installation">APK файл для установки</p>
+          <span class="download-size">~4 MB</span>
+        </a>
+        <a href="https://github.com/PupSenYaSha/whispernet/releases/download/v1.0.0/whispernet-1.0.0.tar.gz" class="download-card glass" download>
+          <div class="download-icon">
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          </div>
+          <h3>Linux</h3>
+          <p class="download-desc" data-ru="Tar.gz архив" data-en="Tar.gz archive">Tar.gz архив</p>
+          <span class="download-size">~89 MB</span>
+        </a>
+      </div>
+      <div class="download-source">
+        <span data-ru="Исходный код:" data-en="Source code:">Исходный код:</span>
+        <a href="https://github.com/PupSenYaSha/whispernet" target="_blank">github.com/PupSenYaSha/whispernet</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Documentation -->
+  <section id="docs" class="section section-alt">
+    <div class="container">
+      <h2 class="section-title" data-ru="Документация" data-en="Documentation">Документация</h2>
+      <p class="section-sub" data-ru="Как начать использовать WhisperNet." data-en="How to get started with WhisperNet.">Как начать использовать WhisperNet.</p>
+      <div class="docs-grid">
+        <div class="doc-card glass">
+          <h3 data-ru="Быстрый старт" data-en="Quick Start">Быстрый старт</h3>
+          <div class="doc-steps">
+            <div class="doc-step">
+              <span class="doc-step-num">1</span>
+              <p data-ru="Скачайте приложение для вашей платформы" data-en="Download the app for your platform">Скачайте приложение для вашей платформы</p>
+            </div>
+            <div class="doc-step">
+              <span class="doc-step-num">2</span>
+              <p data-ru="Зарегистрируйте аккаунт — nickname и пароль" data-en="Register an account — nickname and password">Зарегистрируйте аккаунт — nickname и пароль</p>
+            </div>
+            <div class="doc-step">
+              <span class="doc-step-num">3</span>
+              <p data-ru="Найдите собеседника по нику и начните общение" data-en="Find a contact by nickname and start chatting">Найдите собеседника по нику и начните общение</p>
+            </div>
+          </div>
+        </div>
+        <div class="doc-card glass">
+          <h3 data-ru="Сборка из исходников" data-en="Build from Source">Сборка из исходников</h3>
+          <div class="doc-code">
+            <pre><code><span class="code-comment"># Клонируйте репозиторий</span>
+git clone https://github.com/PupSenYaSha/whispernet.git
+cd whispernet
+
+<span class="code-comment"># Установите зависимости</span>
+npm install
+
+<span class="code-comment"># Соберите клиент</span>
+npx vite build
+
+<span class="code-comment"># Android (опционально)</span>
+npx cap sync android
+cd android && ./gradlew assembleDebug</code></pre>
+          </div>
+        </div>
+        <div class="doc-card glass">
+          <h3 data-ru="Как это работает" data-en="How It Works">Как это работает</h3>
+          <div class="doc-flow">
+            <div class="flow-item">
+              <div class="flow-dot"></div>
+              <p data-ru="При регистрации генерируется ключ Identity Key (X25519)" data-en="On registration, an Identity Key (X25519) is generated">При регистрации генерируется ключ Identity Key (X25519)</p>
+            </div>
+            <div class="flow-item">
+              <div class="flow-dot"></div>
+              <p data-ru="Создаются Signed Pre-Key и одноразовые Pre-Keys" data-en="Signed Pre-Key and one-time Pre-Keys are created">Создаются Signed Pre-Key и одноразовые Pre-Keys</p>
+            </div>
+            <div class="flow-item">
+              <div class="flow-dot"></div>
+              <p data-ru="Pre-key bundle отправляется серверу (только публичные ключи)" data-en="Pre-key bundle is sent to server (public keys only)">Pre-key bundle отправляется серверу (только публичные ключи)</p>
+            </div>
+            <div class="flow-item">
+              <div class="flow-dot"></div>
+              <p data-ru="При первом DM устанавливается X3DH сессия" data-en="On first DM, an X3DH session is established">При первом DM устанавливается X3DH сессия</p>
+            </div>
+            <div class="flow-item">
+              <div class="flow-dot"></div>
+              <p data-ru="Далее все сообщения шифруются Double Ratchet" data-en="All subsequent messages are encrypted with Double Ratchet">Далее все сообщения шифруются Double Ratchet</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section id="faq" class="section">
+    <div class="container">
+      <h2 class="section-title" data-ru="Частые вопросы" data-en="FAQ">Частые вопросы</h2>
+      <div class="faq-list">
+        <details class="faq-item glass">
+          <summary data-ru="Безопасен ли WhisperNet?" data-en="Is WhisperNet safe?">Безопасен ли WhisperNet?</summary>
+          <p data-ru="Да. WhisperNet использует Signal Protocol — тот же стандарт, что лежит в основе Signal, WhatsApp и Matrix. Шифрование происходит полностью на клиенте, сервер не имеет доступа к вашим сообщениям." data-en="Yes. WhisperNet uses Signal Protocol — the same standard behind Signal, WhatsApp, and Matrix. All encryption happens on the client side; the server has no access to your messages.">Да. WhisperNet использует Signal Protocol — тот же стандарт, что лежит в основе Signal, WhatsApp и Matrix. Шифрование происходит полностью на клиенте, сервер не имеет доступа к вашим сообщениям.</p>
+        </details>
+        <details class="faq-item glass">
+          <summary data-ru="Открытый ли код?" data-en="Is the code open source?">Открытый ли код?</summary>
+          <p data-ru="Клиентская часть полностью открыта на GitHub. Сервер закрытый, но это не влияет на безопасность — вся криптография происходит на клиенте." data-en="The client-side code is fully open on GitHub. The server is closed-source, but this doesn't affect security — all cryptography happens on the client.">Клиентская часть полностью открыта на GitHub. Сервер закрытый, но это не влияет на безопасность — вся криптография происходит на клиенте.</p>
+        </details>
+        <details class="faq-item glass">
+          <summary data-ru="Могу ли я использовать WhisperNet на нескольких устройствах?" data-en="Can I use WhisperNet on multiple devices?">Могу ли я использовать WhisperNet на нескольких устройствах?</summary>
+          <p data-ru="Да, но каждое устройство будет иметь свою пару ключей. Cross-device синхронизация пока не поддерживается." data-en="Yes, but each device has its own key pair. Cross-device sync is not yet supported.">Да, но каждое устройство будет иметь свою пару ключей. Cross-device синхронизация пока не поддерживается.</p>
+        </details>
+        <details class="faq-item glass">
+          <summary data-ru="Что произойдёт если сервер будет скомпрометирован?" data-en="What happens if the server is compromised?">Что произойдёт если сервер будет скомпрометирован?</summary>
+          <p data-ru="Сервер увидит только зашифрованные данные. Он не знает приватные ключи пользователей и не может расшифровать сообщения. Pre-key bundles содержат только публичные ключи." data-en="The server would only see encrypted data. It doesn't know users' private keys and cannot decrypt messages. Pre-key bundles contain only public keys.">Сервер увидит только зашифрованные данные. Он не знает приватные ключи пользователей и не может расшифровать сообщения. Pre-key bundles содержат только публичные ключи.</p>
+        </details>
+        <details class="faq-item glass">
+          <summary data-ru="Как установить на Android?" data-en="How to install on Android?">Как установить на Android?</summary>
+          <p data-ru="Скачайте APK файл, в настройках безопасности разрешите установку из неизвестных источников, откройте файл и установите." data-en="Download the APK file, allow installation from unknown sources in security settings, open the file and install.">Скачайте APK файл, в настройках безопасности разрешите установку из неизвестных источников, откройте файл и установите.</p>
+        </details>
+        <details class="faq-item glass">
+          <summary data-ru="Есть ли версия для iPhone?" data-en="Is there an iPhone version?">Есть ли версия для iPhone?</summary>
+          <p data-ru="Пока нет. В настоящее время поддерживаются Windows, Android и Linux. iOS может появиться в будущем." data-en="Not yet. Currently supported platforms are Windows, Android, and Linux. iOS may come in the future.">Пока нет. В настоящее время поддерживаются Windows, Android и Linux. iOS может появиться в будущем.</p>
+        </details>
+        <details class="faq-item glass">
+          <summary data-ru="Как это отличается от Signal?" data-en="How is this different from Signal?">Как это отличается от Signal?</summary>
+          <p data-ru="WhisperNet — это минималистичный мессенджер с тем же уровнем шифрования. Главные отличия: свой сервер, групповые чаты, кастомизация тем, открытый клиентский код." data-en="WhisperNet is a minimalist messenger with the same level of encryption. Key differences: own server, group chats, theme customization, open client code.">WhisperNet — это минималистичный мессенджер с тем же уровнем шифрования. Главные отличия: свой сервер, групповые чаты, кастомизация тем, открытый клиентский код.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="footer">
+    <div class="container">
+      <div class="footer-inner">
+        <div class="footer-brand">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
+          </svg>
+          <span>WhisperNet</span>
+        </div>
+        <div class="footer-links">
+          <a href="https://github.com/PupSenYaSha/whispernet" target="_blank">GitHub</a>
+          <a href="https://github.com/PupSenYaSha/whispernet/releases" target="_blank" data-ru="Релизы" data-en="Releases">Релизы</a>
+          <a href="https://github.com/PupSenYaSha/whispernet/issues" target="_blank" data-ru="Проблемы" data-en="Issues">Проблемы</a>
+        </div>
+        <div class="footer-copy">
+          <span data-ru="MIT License © 2026 PupSenYaSha" data-en="MIT License © 2026 PupSenYaSha">MIT License © 2026 PupSenYaSha</span>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>
