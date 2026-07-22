@@ -7,6 +7,7 @@ import {
   advanceReceivingChain,
   ratchetStep,
   createRatchetState,
+  MAX_SESSIONS,
 } from './ratchet';
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { sha256 } from '@noble/hashes/sha2.js';
@@ -37,23 +38,35 @@ export class SessionManager {
           this.sessions.set(id, s as Session);
         }
       }
-    } catch {}
+    } catch (e) {
+      console.error('Failed to load sessions from localStorage:', e);
+    }
   }
 
   save(): void {
-    const obj: Record<string, any> = {};
-    for (const [id, session] of this.sessions) {
-      const s: any = { ...session };
-      s.state = { ...s.state };
-      if (s.state.skippedMessageKeys instanceof Map) {
-        const entries: [number, Uint8Array][] = Array.from(s.state.skippedMessageKeys.entries());
-        s.state.skippedMessageKeys = Object.fromEntries(
-          entries.map(([k, v]) => [k, Array.from(v)])
-        );
+    try {
+      const obj: Record<string, any> = {};
+      for (const [id, session] of this.sessions) {
+        const s: any = { ...session };
+        s.state = { ...s.state };
+        if (s.state.skippedMessageKeys instanceof Map) {
+          const entries: [number, Uint8Array][] = Array.from(s.state.skippedMessageKeys.entries());
+          s.state.skippedMessageKeys = Object.fromEntries(
+            entries.map(([k, v]) => [k, Array.from(v)])
+          );
+        }
+        obj[id] = s;
       }
-      obj[id] = s;
+      localStorage.setItem(SESSIONS_KEY, JSON.stringify(obj));
+    } catch (e) {
+      console.error('Failed to save sessions:', e);
     }
-    localStorage.setItem(SESSIONS_KEY, JSON.stringify(obj));
+  }
+
+  private evictOldestSession(): void {
+    if (this.sessions.size < MAX_SESSIONS) return;
+    const firstKey = this.sessions.keys().next().value;
+    if (firstKey) this.sessions.delete(firstKey);
   }
 
   getSessionId(userId1: string, userId2: string): string {
@@ -71,13 +84,13 @@ export class SessionManager {
     remoteBundle: PreKeyBundle
   ): { session: Session; x3dhMessage: SignalPreKeyMessage; ratchetPublicKey: Uint8Array } {
     const sessionId = this.getSessionId(myId, remoteId);
-    const { sharedSecret, message: x3dhMessage } = x3dhInit(identityKey, remoteBundle);
+
+    const ratchetKeyPair = generateKeyPair();
+    const { sharedSecret, message: x3dhMessage } = x3dhInit(identityKey, remoteBundle, ratchetKeyPair.publicKey);
 
     const derived = hkdf(sha256, sharedSecret, new Uint8Array(32), INFO_ROOT, 64);
     const rootKey = derived.slice(0, 32);
     const chainKey = derived.slice(32, 64);
-
-    const ratchetKeyPair = generateKeyPair();
 
     const state = createRatchetState();
     state.rootKey = rootKey;
@@ -87,6 +100,7 @@ export class SessionManager {
     state.sendingMessageNumber = 0;
 
     const session: Session = { sessionId, state, version: 3 };
+    this.evictOldestSession();
     this.sessions.set(sessionId, session);
     this.save();
 
@@ -110,6 +124,7 @@ export class SessionManager {
     const { state } = initializeRatchetAsReceiver(sharedSecret, aliceRatchetPublicKey);
 
     const session: Session = { sessionId, state, version: 3 };
+    this.evictOldestSession();
     this.sessions.set(sessionId, session);
     this.save();
 
@@ -169,18 +184,7 @@ export class SessionManager {
       ratchetStep(session.state, ratchetPublicKey);
     }
 
-    let messageKey: Uint8Array | undefined;
-    if (
-      messageNumber === session.state.receivingMessageNumber &&
-      session.state.receivingChainKey
-    ) {
-      const result = advanceReceivingChain(session.state, messageNumber);
-      if (result) messageKey = result;
-    } else {
-      const result = advanceReceivingChain(session.state, messageNumber);
-      if (result) messageKey = result;
-    }
-
+    const messageKey = advanceReceivingChain(session.state, messageNumber);
     if (!messageKey) throw new Error('No message key available');
 
     const ivLength = ciphertext[0];

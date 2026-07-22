@@ -19,7 +19,8 @@ export interface X3DHInitResult {
 
 export function x3dhInit(
   identityKey: KeyPair,
-  remoteBundle: PreKeyBundle
+  remoteBundle: PreKeyBundle,
+  ratchetPublicKey: Uint8Array
 ): X3DHInitResult {
   const valid = ed25519.verify(
     remoteBundle.signedPreKey.signature,
@@ -42,7 +43,6 @@ export function x3dhInit(
   }
 
   const sharedSecret = deriveX3DHSecret(dh1, dh2, dh3, dh4);
-
   const messageKeys = deriveMessageKeys(sharedSecret);
 
   const message: SignalPreKeyMessage = {
@@ -52,9 +52,12 @@ export function x3dhInit(
       publicKey: remoteBundle.signedPreKey.publicKey,
     },
     baseKey: baseKey.publicKey,
+    oneTimePreKey: remoteBundle.oneTimePreKey
+      ? { keyId: remoteBundle.oneTimePreKey.keyId, publicKey: remoteBundle.oneTimePreKey.publicKey }
+      : undefined,
     message: {
       ciphertext: new Uint8Array(0),
-      ratchetPublicKey: baseKey.publicKey,
+      ratchetPublicKey,
       previousChainLength: 0,
       messageNumber: 0,
     },

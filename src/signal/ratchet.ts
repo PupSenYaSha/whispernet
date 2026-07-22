@@ -1,11 +1,12 @@
 import { x25519 } from '@noble/curves/ed25519.js';
 import { hkdf } from '@noble/hashes/hkdf.js';
+import { hmac } from '@noble/hashes/hmac.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import type { KeyPair, SessionState } from './types';
 
 const INFO_ROOT = new TextEncoder().encode('WhisperNetRoot');
-const INFO_MSGKEY = new TextEncoder().encode('WhisperNetMsgKey');
 const MAX_SKIP = 2000;
+const MAX_SESSIONS = 200;
 
 export function createRatchetState(): SessionState {
   return {
@@ -143,62 +144,12 @@ export function ratchetStep(
   return chainKey;
 }
 
-export async function encryptWithMessageKey(
-  messageKey: Uint8Array,
-  plaintext: Uint8Array
-): Promise<Uint8Array> {
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const key = await crypto.subtle.importKey(
-    'raw',
-    messageKey.buffer as ArrayBuffer,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt']
-  );
-  const buf = await crypto.subtle.encrypt(
-    { name: 'AES-GCM', iv },
-    key,
-    plaintext.buffer as ArrayBuffer
-  );
-  const result = new Uint8Array(4 + iv.length + buf.byteLength);
-  result[0] = iv.length;
-  result.set(iv, 1);
-  result.set(new Uint8Array(buf), 1 + iv.length);
-  return result;
-}
-
-export async function decryptWithMessageKey(
-  messageKey: Uint8Array,
-  ciphertext: Uint8Array
-): Promise<Uint8Array> {
-  const ivLength = ciphertext[0];
-  const iv = ciphertext.slice(1, 1 + ivLength);
-  const data = ciphertext.slice(1 + ivLength);
-
-  const key = await crypto.subtle.importKey(
-    'raw',
-    messageKey.buffer as ArrayBuffer,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['decrypt']
-  );
-
-  const decrypted = await crypto.subtle.decrypt(
-    { name: 'AES-GCM', iv },
-    key,
-    data
-  );
-
-  return new Uint8Array(decrypted);
-}
-
 function dhRatchet(
   rootKey: Uint8Array,
   privateKey: Uint8Array,
   remotePublicKey: Uint8Array
 ): { rootKey: Uint8Array; chainKey: Uint8Array } {
   const dh = x25519.getSharedSecret(privateKey, remotePublicKey);
-
   const derived = hkdf(sha256, dh, rootKey, INFO_ROOT, 64);
 
   return {
@@ -208,18 +159,9 @@ function dhRatchet(
 }
 
 function chainKDF(chainKey: Uint8Array): { nextChainKey: Uint8Array; messageKey: Uint8Array } {
-  const msgKeyInput = new Uint8Array(33);
-  msgKeyInput.set(chainKey);
-  msgKeyInput[32] = 0x01;
-
-  const nextChainInput = new Uint8Array(33);
-  nextChainInput.set(chainKey);
-  nextChainInput[32] = 0x02;
-
-  const msgKey = hkdf(sha256, msgKeyInput, new Uint8Array(32), INFO_MSGKEY, 32);
-  const nextChainKey = hkdf(sha256, nextChainInput, new Uint8Array(32), INFO_MSGKEY, 32);
-
-  return { nextChainKey, messageKey: msgKey };
+  const messageKey = hmac.create(sha256, chainKey).update(new Uint8Array([0x01])).digest();
+  const nextChainKey = hmac.create(sha256, chainKey).update(new Uint8Array([0x02])).digest();
+  return { nextChainKey, messageKey };
 }
 
 function generateRatchetKeyPair(): KeyPair {
@@ -227,3 +169,5 @@ function generateRatchetKeyPair(): KeyPair {
   const publicKey = x25519.getPublicKey(privateKey);
   return { privateKey, publicKey };
 }
+
+export { MAX_SESSIONS };

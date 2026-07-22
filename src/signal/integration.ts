@@ -53,12 +53,20 @@ export function createResponderSession(
   const identityKey: KeyPair = { privateKey: ik.privateKey, publicKey: ik.publicKey };
   const signedPreKey: KeyPair = { privateKey: spk.keyPair.privateKey, publicKey: spk.keyPair.publicKey };
 
+  let oneTimePreKey: KeyPair | null = null;
+  if (x3dhMessage.oneTimePreKey) {
+    const consumed = preKeyManager.consumeOneTimePreKey();
+    if (consumed) {
+      oneTimePreKey = { privateKey: consumed.keyPair.privateKey, publicKey: consumed.keyPair.publicKey };
+    }
+  }
+
   sessionManager.createResponderSessionFromMessage(
     myId,
     remoteId,
     identityKey,
     signedPreKey,
-    null,
+    oneTimePreKey,
     x3dhMessage,
     aliceRatchetPublicKey,
     new Uint8Array(0),
