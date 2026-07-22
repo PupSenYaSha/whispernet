@@ -3,6 +3,7 @@ import { createContext, useContext, useReducer, ReactNode } from 'react';
 import type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor } from './types';
 import { generateKeyPair, encryptMessage, decryptMessage, generateSafetyNumber } from './crypto';
 import { encryptPrivateKey, decryptPrivateKey, isEncryptedBundle, createBackup, downloadBackup, isKeyBackup, type EncryptedKeyBundle } from './crypto-keys';
+import { encryptPassword, decryptPassword } from './device-crypto';
 import { uploadImage } from './upload';
 
 declare const __APP_VERSION__: string;
@@ -670,7 +671,10 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               unreadCountRef.current = 0;
 
               if (authRef.current) {
-                sessionStorage.setItem('wn_auth', JSON.stringify({ nickname: authRef.current.nickname, password: authRef.current.password }));
+                {
+                  const enc = await encryptPassword(authRef.current.password);
+                  localStorage.setItem('wn_auth', JSON.stringify({ nickname: authRef.current.nickname, enc }));
+                }
               }
 
               if ('Notification' in window && Notification.permission === 'default') {
@@ -949,7 +953,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(() => {
     disconnect();
     dispatch({ type: 'RESET' });
-    sessionStorage.removeItem('wn_auth');
+    localStorage.removeItem('wn_auth');
     localStorage.removeItem('wn_settings');
     window.electronAPI?.setTitle('WhisperNet');
     document.title = 'WhisperNet';
@@ -1045,14 +1049,16 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   }, [buildEncryptKeys]);
 
   useEffect(() => {
-    const saved = sessionStorage.getItem('wn_auth');
+    const saved = localStorage.getItem('wn_auth');
     if (saved) {
-      try {
-        const { nickname, password } = JSON.parse(saved);
-        if (nickname && password) {
-          connect(nickname, password, false);
-        }
-      } catch {}
+      (async () => {
+        try {
+          const { nickname, enc } = JSON.parse(saved);
+          if (!nickname || !enc) return;
+          const password = await decryptPassword(enc);
+          if (password) connect(nickname, password, false);
+        } catch {}
+      })();
     }
   }, []);
 
