@@ -1069,6 +1069,19 @@ body {
   color: var(--fg-muted);
 }
 
+.web-demo-cta {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  margin-top: 32px;
+}
+
+.web-demo-cta-hint {
+  font-size: 13px;
+  color: var(--fg-muted);
+}
+
 /* Responsive */
 .nav-toggle {
   display: none;
