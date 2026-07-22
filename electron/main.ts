@@ -152,7 +152,7 @@ async function checkAndUpdate(win: BrowserWindow) {
   try {
     const baseUrl = process.env.UPDATE_URL || 'https://api.github.com/repos/PupSenYaSha/whispernet';
     const release = await fetchJson(`${baseUrl}/releases/latest`);
-    const latest = release.tag_tag?.replace(/^v/, '') || release.tag_name?.replace(/^v/, '');
+    const latest = release.tag_name?.replace(/^v/, '');
     const current = app.getVersion();
     logUpdater(`Latest: ${latest}, Current: ${current}`);
 

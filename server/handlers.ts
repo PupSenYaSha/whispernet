@@ -509,7 +509,9 @@ export function handleConnection(ws: WebSocket): void {
   async function handleDmContacts(userId: string, ws: WebSocket): Promise<void> {
     const contacts = await getDmContacts(userId);
     const publicKeys = await getAllPublicKeys();
-    send(ws, { type: 'dm_contacts', payload: { contacts, publicKeys }, timestamp: Date.now() });
+    const onlineIds = new Set(Array.from(clients.keys()));
+    const contactsWithOnline = contacts.map(c => ({ ...c, online: onlineIds.has(c.id) }));
+    send(ws, { type: 'dm_contacts', payload: { contacts: contactsWithOnline, publicKeys }, timestamp: Date.now() });
   }
 
   async function handleSearchUsers(userId: string, ws: WebSocket, payload: { query: string }): Promise<void> {

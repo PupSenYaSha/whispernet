@@ -73,9 +73,16 @@ export async function decryptMessage(
   return new TextDecoder().decode(decrypted);
 }
 
-export async function generateSafetyNumber(publicKey: JsonWebKey): Promise<string> {
-  const keyData = new TextEncoder().encode(JSON.stringify(publicKey));
-  const hash = await crypto.subtle.digest('SHA-256', keyData);
+export async function generateSafetyNumber(publicKey: JsonWebKey, otherKey?: JsonWebKey): Promise<string> {
+  let keyData: string;
+  if (otherKey) {
+    const a = JSON.stringify(publicKey);
+    const b = JSON.stringify(otherKey);
+    keyData = a < b ? a + b : b + a;
+  } else {
+    keyData = JSON.stringify(publicKey);
+  }
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(keyData));
   const bytes = new Uint8Array(hash);
   const groups: string[] = [];
   for (let i = 0; i < 24; i += 4) {

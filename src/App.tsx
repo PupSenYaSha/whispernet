@@ -3,6 +3,8 @@ import { createContext, useContext, useReducer, ReactNode } from 'react';
 import type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor } from './types';
 import { generateKeyPair, encryptMessage, decryptMessage, generateSafetyNumber } from './crypto';
 import { uploadImage } from './upload';
+
+declare const __APP_VERSION__: string;
 import {
   initializeSignal,
   getPreKeyBundleForServer,
@@ -156,6 +158,7 @@ interface ConnectionContextType {
   t: (key: string) => string;
   updateSettings: (settings: Partial<AppSettings>) => void;
   getMyPublicKey: () => JsonWebKey | null;
+  getPublicKey: (userId: string) => JsonWebKey | null;
 }
 
 const ConnectionContext = createContext<ConnectionContextType | null>(null);
@@ -892,6 +895,10 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     return publicKeyRef.current;
   }, []);
 
+  const getPublicKey = useCallback((userId: string): JsonWebKey | null => {
+    return publicKeysRef.current[userId] || null;
+  }, []);
+
   const sendMessage = useCallback(async (text: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !text.trim()) return;
     const trimmed = text.trim();
@@ -996,6 +1003,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
       t,
       updateSettings,
       getMyPublicKey,
+      getPublicKey,
     }}>
       {children}
     </ConnectionContext.Provider>
@@ -1579,7 +1587,7 @@ function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, onCon
 }
 
 function SettingsPanel({ onClose, closing }: { onClose: () => void; closing: boolean }) {
-  const { state, updateSettings, logout, getMyPublicKey, t } = useConnection();
+  const { state, updateSettings, logout, getMyPublicKey, getPublicKey, t } = useConnection();
   const [confirmAction, setConfirmAction] = useState<'logout' | 'clearData' | null>(null);
 
   useEffect(() => {
@@ -1643,7 +1651,8 @@ function SettingsPanel({ onClose, closing }: { onClose: () => void; closing: boo
           setShowSafety(true);
           return;
         }
-        const num = await generateSafetyNumber(pubKey);
+        const otherKey = state.activeChannel !== 'general' ? getPublicKey(state.activeChannel) : null;
+        const num = await generateSafetyNumber(pubKey, otherKey || undefined);
         setSafetyNum(num);
         setShowSafety(true);
       } catch (e: any) {
@@ -1813,7 +1822,7 @@ function SettingsPanel({ onClose, closing }: { onClose: () => void; closing: boo
 
           <Section title={t('sec_account')}>
             <Option label={state.nickname ? `@${state.nickname}` : ''} icon={<div className="w-9 h-9 rounded-xl bg-accent-primary/15 flex items-center justify-center text-[13px] font-bold text-accent-primary">{state.nickname ? getAvatarText(state.nickname) : ''}</div>}>
-              <span className="text-[12px] text-fg-muted">{t('version')} 1.0.0</span>
+              <span className="text-[12px] text-fg-muted">{t('version')} {__APP_VERSION__}</span>
             </Option>
           </Section>
         </div>
@@ -1860,7 +1869,7 @@ function SettingsPanel({ onClose, closing }: { onClose: () => void; closing: boo
 }
 
 function SettingsPanelInline() {
-  const { state, updateSettings, logout, getMyPublicKey, t } = useConnection();
+  const { state, updateSettings, logout, getMyPublicKey, getPublicKey, t } = useConnection();
   const [confirmAction, setConfirmAction] = useState<'logout' | 'clearData' | null>(null);
 
   const Toggle = ({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) => (
@@ -1919,7 +1928,8 @@ function SettingsPanelInline() {
           setShowSafety(true);
           return;
         }
-        const num = await generateSafetyNumber(pubKey);
+        const otherKey = state.activeChannel !== 'general' ? getPublicKey(state.activeChannel) : null;
+        const num = await generateSafetyNumber(pubKey, otherKey || undefined);
         setSafetyNum(num);
         setShowSafety(true);
       } catch (e: any) {
@@ -2081,7 +2091,7 @@ function SettingsPanelInline() {
 
         <Section title={t('sec_account')}>
           <Option label={state.nickname ? `@${state.nickname}` : ''} icon={<div className="w-9 h-9 rounded-xl bg-accent-primary/15 flex items-center justify-center text-[13px] font-bold text-accent-primary">{state.nickname ? getAvatarText(state.nickname) : ''}</div>}>
-            <span className="text-[12px] text-fg-muted">{t('version')} 1.0.0</span>
+            <span className="text-[12px] text-fg-muted">{t('version')} {__APP_VERSION__}</span>
           </Option>
         </Section>
       </div>
