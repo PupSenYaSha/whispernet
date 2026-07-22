@@ -101,7 +101,7 @@ Output: `dist/build/WhisperNet.exe`
 - **Pre-key bundles** — asynchronous session establishment without both parties online
 - **Server zero-knowledge** — server never sees plaintext DM content or long-term keys
 
-> The app runs via an official developer server. Backend source code is closed, but end-to-end encryption on the client side fully prevents the server from accessing your messages.
+> The app uses a self-hosted Node.js server. Both client and server source code are open and available in this repository. End-to-end encryption on the client side ensures the server never sees plaintext DM content.
 
 ## License
 

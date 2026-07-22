@@ -1,7 +1,6 @@
 node_modules/
 dist/
 build/
-server/
 android/.gradle/
 android/app/build/
 android/.idea/
@@ -16,3 +15,6 @@ Thumbs.db
 .env.local
 .env.*
 src/sw.js
+electron.log
+server.log
+server-err.log

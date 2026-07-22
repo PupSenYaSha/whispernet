@@ -4,6 +4,7 @@ import { fileURLToPath } from 'url';
 import { writeFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, rmdirSync, createWriteStream } from 'fs';
 import https from 'https';
 import http from 'http';
+import { execFile } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = join(__filename, '..');
@@ -142,7 +143,7 @@ function applyUpdateAndRestart(updateDir: string) {
     `del "%~f0"`,
   ].join('\r\n');
   writeFileSync(batPath, bat);
-  require('child_process').spawn('cmd.exe', ['/c', batPath], { detached: true, stdio: 'ignore' }).unref();
+  execFile('cmd.exe', ['/c', batPath], { detached: true, stdio: 'ignore' }).unref();
   app.quit();
 }
 
