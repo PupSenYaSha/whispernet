@@ -6,6 +6,9 @@
   "type": "module",
   "main": "dist/electron/main.js",
   "scripts": {
+    "start": "node scripts/start.js",
+    "start:server": "npx tsx server/index.ts",
+    "start:site": "node scripts/start.js --site-only",
     "dev": "node node_modules/vite/bin/vite.js",
     "build:client": "node node_modules/vite/bin/vite.js build",
     "build:electron": "node node_modules/tsx/dist/cli.mjs node_modules/typescript/bin/tsc -p electron/tsconfig.json",

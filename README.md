@@ -33,6 +33,8 @@ Pre-built binaries on [Releases](https://github.com/PupSenYaSha/whispernet/relea
 | Android | `WhisperNet.apk` |
 | Linux | `whispernet-1.0.0.tar.gz` |
 
+> **Web version** — try the messenger in your browser at [whispernet.app](https://unkindly-literate-wigeon.cloudpub.ru/)
+
 ### Windows
 
 Download `WhisperNet.1.0.0.exe` and run. First launch may trigger SmartScreen warning — click "More info" → "Run anyway".
@@ -50,6 +52,15 @@ cd whispernet-1.0.0
 ```
 
 ## Build from Source
+
+### Quick Start
+
+```bash
+npm install
+npm start
+```
+
+This launches both the messenger server (port 50025) and the landing page (port 3000).
 
 ### Client (Web/PWA)
 
