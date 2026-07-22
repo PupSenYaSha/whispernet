@@ -6,7 +6,7 @@ import { readFileSync, existsSync, statSync } from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
-const DIST_CLIENT = path.join(ROOT, 'dist', 'client');
+const SITE_DIR = path.join(ROOT, 'site');
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -30,16 +30,16 @@ function serveStatic(req, res) {
   let url = req.url.split('?')[0];
   if (url === '/') url = '/index.html';
 
-  const filePath = path.join(DIST_CLIENT, url);
+  const filePath = path.join(SITE_DIR, url);
 
-  if (!filePath.startsWith(DIST_CLIENT)) {
+  if (!filePath.startsWith(SITE_DIR)) {
     res.writeHead(403);
     res.end('Forbidden');
     return;
   }
 
   if (!existsSync(filePath) || !statSync(filePath).isFile()) {
-    const fallback = path.join(DIST_CLIENT, 'index.html');
+    const fallback = path.join(SITE_DIR, 'index.html');
     if (existsSync(fallback)) {
       const content = readFileSync(fallback);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });

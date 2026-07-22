@@ -7,6 +7,7 @@ android/app/build/
 android/.idea/
 ios/
 data/
+site/downloads/
 *.log
 *.js.map
 .DS_Store
