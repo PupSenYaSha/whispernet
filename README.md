@@ -15,12 +15,28 @@
 ## Features
 
 - **End-to-end encryption** — Signal Protocol (X3DH + Double Ratchet) for forward secrecy and break-in recovery
-- **Private & group messaging** — DMs and global chat
+- **Private and group messaging** — DMs and global chat
 - **Media sharing** — images and videos
 - **Cross-platform** — Web, Desktop (Electron), Mobile (Android)
 - **Session persistence** — auto-login on restart
 - **Customizable themes** — 8 accent colors, dark/light modes
 - **Russian/English localization**
+
+## Security
+
+- **Signal Protocol** — X3DH key agreement + Double Ratchet for DM encryption
+- **Forward secrecy** — compromise of long-term keys does not compromise past sessions
+- **Break-in recovery** — ratchet mechanism restores security after key compromise
+- **Pre-key bundles** — asynchronous session establishment without both parties online
+- **Server zero-knowledge** — server never sees plaintext DM content or long-term keys
+- **Keys encrypted at rest** — PBKDF2 (600K iterations) + AES-256-GCM, password-derived encryption of all stored private keys
+- **Key backup/export** — download encrypted JSON backup of your keys, restore on any device with password
+- **Multi-device key setup** — new device requires explicit key import or conscious new key generation with warning
+- **Session management** — view and revoke connected devices from settings
+- **Screenshot protection** — optional toggle to block screen capture, right-click, and text selection
+- **Safety numbers** — verify contact identity by comparing keys (both users' keys combined)
+
+> Both client and server source code are fully open in this repository. End-to-end encryption ensures the server never sees plaintext DM content or long-term keys.
 
 ## Download
 
@@ -92,16 +108,6 @@ npx electron-builder --win
 ```
 
 Output: `dist/build/WhisperNet.exe`
-
-## Security
-
-- **Signal Protocol** — X3DH key agreement + Double Ratchet for DM encryption
-- **Forward secrecy** — compromise of long-term keys does not compromise past sessions
-- **Break-in recovery** — ratchet mechanism restores security after key compromise
-- **Pre-key bundles** — asynchronous session establishment without both parties online
-- **Server zero-knowledge** — server never sees plaintext DM content or long-term keys
-
-> The app uses a self-hosted Node.js server. Both client and server source code are open and available in this repository. End-to-end encryption on the client side ensures the server never sees plaintext DM content.
 
 ## License
 
