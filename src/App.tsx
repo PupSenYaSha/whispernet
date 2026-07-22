@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { createContext, useContext, useReducer, ReactNode } from 'react';
 import type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor } from './types';
 import { generateKeyPair, encryptMessage, decryptMessage, generateSafetyNumber } from './crypto';
+import { encryptPrivateKey, decryptPrivateKey, isEncryptedBundle, createBackup, downloadBackup, isKeyBackup, type EncryptedKeyBundle } from './crypto-keys';
 import { uploadImage } from './upload';
 
 declare const __APP_VERSION__: string;
@@ -159,6 +160,9 @@ interface ConnectionContextType {
   updateSettings: (settings: Partial<AppSettings>) => void;
   getMyPublicKey: () => JsonWebKey | null;
   getPublicKey: (userId: string) => JsonWebKey | null;
+  sessions: { id: string; ip: string; lastActive: number; current: boolean }[];
+  requestSessions: () => void;
+  revokeSession: (sessionId: string) => void;
 }
 
 const ConnectionContext = createContext<ConnectionContextType | null>(null);
@@ -249,6 +253,20 @@ const translations = {
     safety_number: 'Safety Number',
     safety_number_desc: 'Compare this number with your contact to verify identity',
     safety_yours: 'Your safety number',
+    export_keys: 'Export Keys',
+    export_keys_desc: 'Download encrypted backup of your keys',
+    import_keys: 'Import Keys',
+    import_keys_desc: 'Restore keys from backup file',
+    screenshot_prot: 'Screenshot Protection',
+    screenshot_prot_desc: 'Block screen capture of this app',
+    sessions: 'Active Sessions',
+    sessions_desc: 'Manage connected devices',
+    revoke: 'Revoke',
+    revoke_all: 'Revoke All Others',
+    key_exported: 'Backup downloaded',
+    key_imported: 'Keys restored from backup',
+    key_import_err: 'Invalid backup file or wrong password',
+    session_revoked: 'Session revoked',
     accent_color: 'Accent color',
     accent_purple: 'Purple',
     accent_blue: 'Blue',
@@ -344,6 +362,20 @@ const translations = {
     safety_number: 'Номер безопасности',
     safety_number_desc: 'Сравните этот номер с контактом для подтверждения личности',
     safety_yours: 'Ваш номер безопасности',
+    export_keys: 'Экспорт ключей',
+    export_keys_desc: 'Скачать зашифрованный бэкап ключей',
+    import_keys: 'Импорт ключей',
+    import_keys_desc: 'Восстановить ключи из бэкапа',
+    screenshot_prot: 'Защита от скриншотов',
+    screenshot_prot_desc: 'Блокировать захват экрана',
+    sessions: 'Активные сессии',
+    sessions_desc: 'Управление подключёнными устройствами',
+    revoke: 'Отозвать',
+    revoke_all: 'Отозвать все остальные',
+    key_exported: 'Бэкап скачан',
+    key_imported: 'Ключи восстановлены из бэкапа',
+    key_import_err: 'Неверный файл бэкапа или пароль',
+    session_revoked: 'Сессия отозвана',
     accent_color: 'Цвет акцента',
     accent_purple: 'Фиолетовый',
     accent_blue: 'Синий',
@@ -376,6 +408,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const signalInitializedRef = useRef(false);
   const preKeyBundlesRef = useRef<Record<string, any>>({});
   const pendingX3dhRef = useRef<Record<string, { x3dhMessage: any; ratchetPublicKey: Uint8Array }>>({});
+  const [sessions, setSessions] = useState<{ id: string; ip: string; lastActive: number; current: boolean }[]>([]);
 
   useEffect(() => {
     userIdRef.current = state.userId;
@@ -484,6 +517,18 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const requestSessions = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'get_sessions', payload: {} }));
+    }
+  }, []);
+
+  const revokeSession = useCallback((sessionId: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'revoke_session', payload: { sessionId } }));
+    }
+  }, []);
+
   const searchUsers = useCallback((query: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'search_users', payload: { query } }));
@@ -509,7 +554,9 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
           const nick = auth.nickname.toLowerCase();
           if (auth.isRegister) {
             const keys = await generateKeyPair();
-            localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(keys.privateKey));
+            const bundle = await encryptPrivateKey(keys.privateKey, auth.password);
+            bundle.publicKey = keys.publicKey;
+            localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(bundle));
             localStorage.setItem(`wn_pub_${nick}`, JSON.stringify(keys.publicKey));
             privateKeyRef.current = keys.privateKey;
             publicKeyRef.current = keys.publicKey;
@@ -539,8 +586,21 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               }
             }
             if (savedKey && savedPubKey) {
-              privateKeyRef.current = JSON.parse(savedKey);
-              publicKeyRef.current = JSON.parse(savedPubKey);
+              try {
+                const parsed = JSON.parse(savedKey);
+                if (isEncryptedBundle(parsed)) {
+                  privateKeyRef.current = await decryptPrivateKey(parsed, auth.password);
+                } else {
+                  privateKeyRef.current = parsed;
+                  const bundle = await encryptPrivateKey(parsed, auth.password);
+                  bundle.publicKey = JSON.parse(savedPubKey);
+                  localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(bundle));
+                }
+                publicKeyRef.current = JSON.parse(savedPubKey);
+              } catch {
+                privateKeyRef.current = null;
+                publicKeyRef.current = null;
+              }
             }
 
             initializeSignal();
@@ -587,7 +647,13 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               if (!privateKeyRef.current) {
                 const keys = await generateKeyPair();
                 const nick = message.payload.nickname.toLowerCase();
-                localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(keys.privateKey));
+                if (authRef.current) {
+                  const bundle = await encryptPrivateKey(keys.privateKey, authRef.current.password);
+                  bundle.publicKey = keys.publicKey;
+                  localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(bundle));
+                } else {
+                  localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(keys.privateKey));
+                }
                 localStorage.setItem(`wn_pub_${nick}`, JSON.stringify(keys.publicKey));
                 privateKeyRef.current = keys.privateKey;
                 publicKeyRef.current = keys.publicKey;
@@ -772,6 +838,16 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
 
             case 'search_results':
               dispatch({ type: 'SET_SEARCH_RESULTS', results: message.payload.results });
+              break;
+
+            case 'sessions_list':
+              setSessions(message.payload.sessions);
+              break;
+
+            case 'session_revoked':
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ type: 'get_sessions', payload: {} }));
+              }
               break;
 
             case 'user_joined':
@@ -1004,6 +1080,9 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
       updateSettings,
       getMyPublicKey,
       getPublicKey,
+      sessions,
+      requestSessions,
+      revokeSession,
     }}>
       {children}
     </ConnectionContext.Provider>
@@ -1587,7 +1666,7 @@ function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, onCon
 }
 
 function SettingsPanel({ onClose, closing }: { onClose: () => void; closing: boolean }) {
-  const { state, updateSettings, logout, getMyPublicKey, getPublicKey, t } = useConnection();
+  const { state, updateSettings, logout, getMyPublicKey, getPublicKey, sessions, requestSessions, revokeSession, t } = useConnection();
   const [confirmAction, setConfirmAction] = useState<'logout' | 'clearData' | null>(null);
 
   useEffect(() => {
@@ -1818,6 +1897,75 @@ function SettingsPanel({ onClose, closing }: { onClose: () => void; closing: boo
             <Option label={t('safety_number')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>}>
               <SafetyNumberButton />
             </Option>
+            <Option label={t('export_keys')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>}>
+              <button onClick={async () => {
+                try {
+                  const nick = state.nickname.toLowerCase();
+                  const savedKey = localStorage.getItem(`wn_pk_${nick}`);
+                  const savedPubKey = localStorage.getItem(`wn_pub_${nick}`);
+                  if (!savedKey || !savedPubKey) return;
+                  const parsed = JSON.parse(savedKey);
+                  let bundle: EncryptedKeyBundle;
+                  if (isEncryptedBundle(parsed)) {
+                    bundle = parsed;
+                  } else {
+                    bundle = await encryptPrivateKey(parsed, '');
+                    bundle.publicKey = JSON.parse(savedPubKey);
+                  }
+                  const backup = createBackup(state.nickname, bundle.publicKey, bundle);
+                  downloadBackup(backup);
+                } catch {}
+              }} className="text-[13px] text-accent-primary hover:underline">{t('export_keys')}</button>
+            </Option>
+            <Option label={t('import_keys')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>}>
+              <input type="file" accept=".json" className="hidden" id="import-keys-input-mobile" onChange={async (e) => {
+                const file = e.target.files?.[0];
+                if (!file) return;
+                try {
+                  const text = await file.text();
+                  const data = JSON.parse(text);
+                  if (!isKeyBackup(data)) { alert(t('key_import_err')); return; }
+                  const pass = prompt('Enter backup password:');
+                  if (!pass) return;
+                  const privKey = await decryptPrivateKey(data.encryptedPrivateKey, pass);
+                  const nick = data.nickname.toLowerCase();
+                  const bundle = await encryptPrivateKey(privKey, pass);
+                  bundle.publicKey = data.publicKey;
+                  localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(bundle));
+                  localStorage.setItem(`wn_pub_${nick}`, JSON.stringify(data.publicKey));
+                  alert(t('key_imported'));
+                } catch { alert(t('key_import_err')); }
+                e.target.value = '';
+              }} />
+              <label htmlFor="import-keys-input-mobile" className="text-[13px] text-accent-primary hover:underline cursor-pointer">{t('import_keys')}</label>
+            </Option>
+            <Option label={t('screenshot_prot')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="3" x2="21" y2="21" /></svg>}>
+              <Toggle checked={!!localStorage.getItem('wn_screenshot_prot')} onChange={(v) => {
+                if (v) localStorage.setItem('wn_screenshot_prot', '1');
+                else localStorage.removeItem('wn_screenshot_prot');
+              }} />
+            </Option>
+          </Section>
+
+          <Section title={t('sessions')}>
+            <div className="px-4 py-3">
+              <button onClick={requestSessions} className="text-[13px] text-accent-primary hover:underline mb-2">{t('sessions_desc')}</button>
+              {sessions.length > 0 && (
+                <div className="space-y-2 mt-2">
+                  {sessions.map((s) => (
+                    <div key={s.id} className="flex items-center justify-between py-2 px-3 rounded-xl bg-bg-tertiary">
+                      <div>
+                        <span className="text-[13px] text-fg-primary">{s.current ? `${t('sessions')} (you)` : s.ip}</span>
+                        <span className="text-[11px] text-fg-muted block">{new Date(s.lastActive).toLocaleTimeString()}</span>
+                      </div>
+                      {!s.current && (
+                        <button onClick={() => revokeSession(s.id)} className="text-[12px] text-red-400 hover:underline">{t('revoke')}</button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </Section>
 
           <Section title={t('sec_account')}>
@@ -1869,7 +2017,7 @@ function SettingsPanel({ onClose, closing }: { onClose: () => void; closing: boo
 }
 
 function SettingsPanelInline() {
-  const { state, updateSettings, logout, getMyPublicKey, getPublicKey, t } = useConnection();
+  const { state, updateSettings, logout, getMyPublicKey, getPublicKey, sessions, requestSessions, revokeSession, t } = useConnection();
   const [confirmAction, setConfirmAction] = useState<'logout' | 'clearData' | null>(null);
 
   const Toggle = ({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) => (
@@ -2087,6 +2235,75 @@ function SettingsPanelInline() {
           <Option label={t('safety_number')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>}>
             <SafetyNumberButton />
           </Option>
+          <Option label={t('export_keys')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>}>
+            <button onClick={async () => {
+              try {
+                const nick = state.nickname.toLowerCase();
+                const savedKey = localStorage.getItem(`wn_pk_${nick}`);
+                const savedPubKey = localStorage.getItem(`wn_pub_${nick}`);
+                if (!savedKey || !savedPubKey) return;
+                const parsed = JSON.parse(savedKey);
+                let bundle: EncryptedKeyBundle;
+                if (isEncryptedBundle(parsed)) {
+                  bundle = parsed;
+                } else {
+                  bundle = await encryptPrivateKey(parsed, '');
+                  bundle.publicKey = JSON.parse(savedPubKey);
+                }
+                const backup = createBackup(state.nickname, bundle.publicKey, bundle);
+                downloadBackup(backup);
+              } catch {}
+            }} className="text-[13px] text-accent-primary hover:underline">{t('export_keys')}</button>
+          </Option>
+          <Option label={t('import_keys')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>}>
+            <input type="file" accept=".json" className="hidden" id="import-keys-input" onChange={async (e) => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              try {
+                const text = await file.text();
+                const data = JSON.parse(text);
+                if (!isKeyBackup(data)) { alert(t('key_import_err')); return; }
+                const pass = prompt('Enter backup password:');
+                if (!pass) return;
+                const privKey = await decryptPrivateKey(data.encryptedPrivateKey, pass);
+                const nick = data.nickname.toLowerCase();
+                const bundle = await encryptPrivateKey(privKey, pass);
+                bundle.publicKey = data.publicKey;
+                localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(bundle));
+                localStorage.setItem(`wn_pub_${nick}`, JSON.stringify(data.publicKey));
+                alert(t('key_imported'));
+              } catch { alert(t('key_import_err')); }
+              e.target.value = '';
+            }} />
+            <label htmlFor="import-keys-input" className="text-[13px] text-accent-primary hover:underline cursor-pointer">{t('import_keys')}</label>
+          </Option>
+          <Option label={t('screenshot_prot')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="3" x2="21" y2="21" /></svg>}>
+            <Toggle checked={!!localStorage.getItem('wn_screenshot_prot')} onChange={(v) => {
+              if (v) localStorage.setItem('wn_screenshot_prot', '1');
+              else localStorage.removeItem('wn_screenshot_prot');
+            }} />
+          </Option>
+        </Section>
+
+        <Section title={t('sessions')}>
+          <div className="px-4 py-3">
+            <button onClick={requestSessions} className="text-[13px] text-accent-primary hover:underline mb-2">{t('sessions_desc')}</button>
+            {sessions.length > 0 && (
+              <div className="space-y-2 mt-2">
+                {sessions.map((s) => (
+                  <div key={s.id} className="flex items-center justify-between py-2 px-3 rounded-xl bg-bg-tertiary">
+                    <div>
+                      <span className="text-[13px] text-fg-primary">{s.current ? `${t('sessions')} (you)` : s.ip}</span>
+                      <span className="text-[11px] text-fg-muted block">{new Date(s.lastActive).toLocaleTimeString()}</span>
+                    </div>
+                    {!s.current && (
+                      <button onClick={() => revokeSession(s.id)} className="text-[12px] text-red-400 hover:underline">{t('revoke')}</button>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </Section>
 
         <Section title={t('sec_account')}>
@@ -2377,6 +2594,20 @@ function AppInner() {
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
+
+  useEffect(() => {
+    const on = !!localStorage.getItem('wn_screenshot_prot');
+    document.body.classList.toggle('screenshot-protect', on);
+    const handler = (e: Event) => { if (on) e.preventDefault(); };
+    if (on) {
+      document.addEventListener('contextmenu', handler);
+      document.addEventListener('selectstart', handler);
+    }
+    return () => {
+      document.removeEventListener('contextmenu', handler);
+      document.removeEventListener('selectstart', handler);
+    };
+  }, [mobileTab]);
 
   const mobileChatOpenRef = useRef(mobileChatOpen);
   mobileChatOpenRef.current = mobileChatOpen;

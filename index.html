@@ -17,6 +17,10 @@
     <link rel="icon" type="image/png" href="./icons/icon-192.png" />
   </head>
   <body class="bg-bg-primary text-fg-primary antialiased">
+    <style>
+      .screenshot-protect { -webkit-user-select: none; user-select: none; }
+      .screenshot-protect img { -webkit-user-drag: none; pointer-events: none; }
+    </style>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
     <script>

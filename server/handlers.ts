@@ -210,6 +210,12 @@ export function handleConnection(ws: WebSocket): void {
           send(ws, { type: 'heartbeat_ack', payload: {}, timestamp: Date.now() });
         }
         break;
+      case 'get_sessions':
+        if (userId) handleGetSessions(userId, ws);
+        break;
+      case 'revoke_session':
+        if (userId) handleRevokeSession(userId, ws, message.payload);
+        break;
       default:
         send(ws, { type: 'error', payload: { code: 'UNKNOWN_MESSAGE', message: 'Unknown message type' }, timestamp: Date.now() });
     }
@@ -574,6 +580,32 @@ export function handleConnection(ws: WebSocket): void {
 
 function broadcastSystem(text: string, excludeUserId?: string): void {
   broadcast({ type: 'system_message', payload: { text }, timestamp: Date.now() }, excludeUserId);
+}
+
+function handleGetSessions(userId: string, ws: WebSocket): void {
+  const sessions: { id: string; ip: string; lastActive: number; current: boolean }[] = [];
+  for (const [uid, client] of clients) {
+    if (uid === userId) {
+      sessions.push({ id: uid, ip: client.ip, lastActive: client.lastHeartbeat, current: client.ws === ws });
+    }
+  }
+  send(ws, { type: 'sessions_list', payload: { sessions }, timestamp: Date.now() });
+}
+
+function handleRevokeSession(userId: string, ws: WebSocket, payload: { sessionId?: string }): void {
+  const targetId = payload?.sessionId || userId;
+  if (targetId === userId) {
+    send(ws, { type: 'error', payload: { code: 'CANNOT_REVOKE_SELF', message: 'Cannot revoke your own session' }, timestamp: Date.now() });
+    return;
+  }
+  const target = clients.get(targetId);
+  if (target) {
+    target.ws.close(4001, 'Session revoked');
+    clients.delete(targetId);
+    send(ws, { type: 'session_revoked', payload: { sessionId: targetId }, timestamp: Date.now() });
+  } else {
+    send(ws, { type: 'error', payload: { code: 'SESSION_NOT_FOUND', message: 'Session not found' }, timestamp: Date.now() });
+  }
 }
 
 export function startHeartbeatCheck(): void {
