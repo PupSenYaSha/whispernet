@@ -212,6 +212,19 @@ export function createApp(clientDir?: string) {
         return;
       }
 
+      if (origin) {
+        try {
+          const originHost = new URL(origin).host;
+          if (originHost !== host) {
+            ws.close(1008, 'Origin mismatch');
+            return;
+          }
+        } catch {
+          ws.close(1008, 'Invalid origin');
+          return;
+        }
+      }
+
       if (getTotalConnections() >= MAX_TOTAL_CONNECTIONS) {
         ws.close(1013, 'Server full');
         return;

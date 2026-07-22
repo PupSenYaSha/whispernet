@@ -279,8 +279,9 @@ export function handleConnection(ws: WebSocket): void {
 
     const existingClient = clients.get(user.id);
     if (existingClient && existingClient.ws !== ws) {
-      send(ws, { type: 'auth_failure', payload: { reason: 'Already logged in from another device' }, timestamp: Date.now() });
-      return;
+      existingClient.ws.close(4001, 'Logged in from another device');
+      clients.delete(user.id);
+      logSecurity('SESSION_KICKED', { nickname: cleanNick, ip, oldIp: existingClient.ip });
     }
 
     currentUserId = user.id;
@@ -585,11 +586,9 @@ function broadcastSystem(text: string, excludeUserId?: string): void {
 }
 
 function handleGetSessions(userId: string, ws: WebSocket): void {
-  const sessions: { id: string; ip: string; lastActive: number; current: boolean }[] = [];
+  const sessions: { id: string; nickname: string; ip: string; lastActive: number; current: boolean }[] = [];
   for (const [uid, client] of clients) {
-    if (uid === userId) {
-      sessions.push({ id: uid, ip: client.ip, lastActive: client.lastHeartbeat, current: client.ws === ws });
-    }
+    sessions.push({ id: uid, nickname: client.nickname, ip: client.ip, lastActive: client.lastHeartbeat, current: uid === userId });
   }
   send(ws, { type: 'sessions_list', payload: { sessions }, timestamp: Date.now() });
 }

@@ -10,9 +10,9 @@ let DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
 let USERS_FILE = path.join(DATA_DIR, 'users.json');
 let MESSAGES_FILE = path.join(DATA_DIR, 'messages.json');
 
-let usersMutex = false;
-let messagesMutex = false;
-let preKeysMutex = false;
+let usersMutex = { v: false };
+let messagesMutex = { v: false };
+let preKeysMutex = { v: false };
 
 async function withMutex<T>(flag: { v: boolean }, fn: () => Promise<T>): Promise<T> {
   while (flag.v) await new Promise(r => setTimeout(r, 5));
@@ -92,7 +92,7 @@ async function savePreKeyBundles(): Promise<void> {
 }
 
 export async function setPreKeyBundle(userId: string, bundle: any): Promise<void> {
-  await withMutex({ v: preKeysMutex }, async () => {
+  await withMutex(preKeysMutex, async () => {
     await loadPreKeyBundles();
     preKeyBundles[userId] = bundle;
     await savePreKeyBundles();
@@ -108,7 +108,7 @@ export async function getAllPreKeyBundles(): Promise<Record<string, any>> {
 }
 
 export async function createUser(nickname: string, password: string, publicKey?: any): Promise<{ id: string; nickname: string } | null> {
-  return withMutex({ v: usersMutex }, async () => {
+  return withMutex(usersMutex, async () => {
     const users = await loadUsers();
     const passwordHash = await bcrypt.hash(password, 12);
     const id = crypto.randomUUID();
@@ -155,7 +155,7 @@ export async function getUserById(id: string): Promise<{ id: string; nickname: s
 }
 
 export async function updatePublicKey(userId: string, publicKey: any): Promise<void> {
-  await withMutex({ v: usersMutex }, async () => {
+  await withMutex(usersMutex, async () => {
     const users = await loadUsers();
     const user = users.find(u => u.id === userId);
     if (user) {
@@ -184,7 +184,7 @@ export async function saveMessage(
   fileKey?: Record<string, string>,
   sealed?: string
 ): Promise<void> {
-  await withMutex({ v: messagesMutex }, async () => {
+  await withMutex(messagesMutex, async () => {
     const messages = await loadMessages();
     messages.push({ id, senderId, senderNickname, text, timestamp, encrypted: encrypted || null, channel, fileKey: fileKey || null, sealed: sealed || null });
     if (messages.length > 5000) messages.splice(0, messages.length - 5000);
@@ -229,7 +229,7 @@ export async function getDmContacts(userId: string): Promise<{ id: string; nickn
 }
 
 export async function deleteGeneralMessages(): Promise<number> {
-  return withMutex({ v: messagesMutex }, async () => {
+  return withMutex(messagesMutex, async () => {
     const messages = await loadMessages();
     const generalCount = messages.filter(m => !m.channel || m.channel === 'general').length;
     const remaining = messages.filter(m => m.channel && m.channel !== 'general');

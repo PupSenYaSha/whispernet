@@ -767,7 +767,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
                   const { ciphertext, ratchetPublicKey, messageNumber } = message.payload.signalEncrypted;
                   msgText = await decryptWithSignal(sessionId, ciphertext, ratchetPublicKey, messageNumber);
                 } catch (e) {
-                  console.error('Signal decrypt failed:', e);
+                  console.error('Decryption failed');
                   msgText = '[encrypted]';
                 }
               } else if (message.payload.encrypted && privateKeyRef.current && userIdRef.current) {
@@ -986,7 +986,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     const trimmed = text.trim();
     const recipientKey = publicKeysRef.current[to];
     if (!privateKeyRef.current || !recipientKey) {
-      console.error('Cannot send DM: encryption keys not available');
+      console.error('Encryption keys not available');
       return;
     }
     try {
@@ -1005,7 +1005,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         wsRef.current.send(JSON.stringify({ type: 'dm_send', payload: { to, text: '', encrypted } }));
       }
     } catch (e) {
-      console.error('Failed to encrypt DM:', e);
+      console.error('Encryption failed');
     }
   }, [buildEncryptKeys]);
 
@@ -1028,7 +1028,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     const text = `[${tag}]${url}[/${tag}]`;
     const recipientKey = publicKeysRef.current[to];
     if (!privateKeyRef.current || !recipientKey) {
-      console.error('Cannot send DM image: encryption keys not available');
+      console.error('Encryption keys not available');
       return;
     }
     try {
@@ -1044,7 +1044,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         wsRef.current.send(JSON.stringify({ type: 'dm_send', payload: { to, text: '', encrypted } }));
       }
     } catch (e) {
-      console.error('Failed to encrypt DM image:', e);
+      console.error('Image encryption failed');
     }
   }, [buildEncryptKeys]);
 
@@ -2089,7 +2089,7 @@ function SettingsPanel({ onClose, closing }: { onClose: () => void; closing: boo
           confirmLabel={t('confirm_clear')}
           cancelLabel={t('cancel')}
           danger
-          onConfirm={() => { localStorage.clear(); window.location.reload(); }}
+          onConfirm={() => { (() => { const keys = Object.keys(localStorage).filter(k => k.startsWith('wn_')); keys.forEach(k => localStorage.removeItem(k)); })(); window.location.reload(); }}
           onCancel={() => setConfirmAction(null)}
         />
       )}
@@ -2426,7 +2426,7 @@ function SettingsPanelInline() {
           confirmLabel={t('confirm_clear')}
           cancelLabel={t('cancel')}
           danger
-          onConfirm={() => { localStorage.clear(); window.location.reload(); }}
+          onConfirm={() => { (() => { const keys = Object.keys(localStorage).filter(k => k.startsWith('wn_')); keys.forEach(k => localStorage.removeItem(k)); })(); window.location.reload(); }}
           onCancel={() => setConfirmAction(null)}
         />
       )}
