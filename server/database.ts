@@ -31,34 +31,75 @@ export function setDataDir(dir: string): void {
   mkdirSync(DATA_DIR, { recursive: true });
 }
 
-async function loadUsers(): Promise<any[]> {
+interface StoredUser {
+  id: string;
+  nickname: string;
+  passwordHash: string;
+  publicKey: Record<string, any>;
+  createdAt?: number;
+}
+
+interface StoredMessage {
+  id: string;
+  senderId: string;
+  senderNickname: string;
+  text: string;
+  timestamp: number;
+  channel?: string;
+  encrypted?: any;
+  fileKey?: any;
+  sealed?: string;
+}
+
+function isValidUser(u: any): u is StoredUser {
+  return typeof u === 'object' && u !== null
+    && typeof u.id === 'string' && u.id.length > 0
+    && typeof u.nickname === 'string' && u.nickname.length > 0
+    && typeof u.passwordHash === 'string' && u.passwordHash.length > 0
+    && typeof u.publicKey === 'object' && u.publicKey !== null;
+}
+
+function isValidMessage(m: any): m is StoredMessage {
+  return typeof m === 'object' && m !== null
+    && typeof m.id === 'string' && m.id.length > 0
+    && typeof m.senderId === 'string'
+    && typeof m.senderNickname === 'string'
+    && typeof m.text === 'string'
+    && typeof m.timestamp === 'number' && m.timestamp > 0;
+}
+
+async function loadUsers(): Promise<StoredUser[]> {
   if (!existsSync(USERS_FILE)) return [];
   try {
     const data = await readFile(USERS_FILE, 'utf-8');
-    return JSON.parse(data);
+    const parsed = JSON.parse(data);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isValidUser);
   } catch {
     return [];
   }
 }
 
-async function saveUsers(users: any[]): Promise<void> {
+async function saveUsers(users: StoredUser[]): Promise<void> {
   const tmp = USERS_FILE + '.tmp';
   await writeFile(tmp, JSON.stringify(users, null, 2));
   const { renameSync } = await import('fs');
   renameSync(tmp, USERS_FILE);
 }
 
-async function loadMessages(): Promise<any[]> {
+async function loadMessages(): Promise<StoredMessage[]> {
   if (!existsSync(MESSAGES_FILE)) return [];
   try {
     const data = await readFile(MESSAGES_FILE, 'utf-8');
-    return JSON.parse(data);
+    const parsed = JSON.parse(data);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isValidMessage);
   } catch {
     return [];
   }
 }
 
-async function saveMessages(messages: any[]): Promise<void> {
+async function saveMessages(messages: StoredMessage[]): Promise<void> {
   const tmp = MESSAGES_FILE + '.tmp';
   await writeFile(tmp, JSON.stringify(messages, null, 2));
   const { renameSync } = await import('fs');
@@ -186,7 +227,7 @@ export async function saveMessage(
 ): Promise<void> {
   await withMutex(messagesMutex, async () => {
     const messages = await loadMessages();
-    messages.push({ id, senderId, senderNickname, text, timestamp, encrypted: encrypted || null, channel, fileKey: fileKey || null, sealed: sealed || null });
+    messages.push({ id, senderId, senderNickname, text, timestamp, encrypted: encrypted || null, channel, fileKey: fileKey || null, sealed: sealed || undefined });
     if (messages.length > 5000) messages.splice(0, messages.length - 5000);
     await saveMessages(messages);
   });

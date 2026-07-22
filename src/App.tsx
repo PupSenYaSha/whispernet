@@ -169,6 +169,7 @@ interface ConnectionContextType {
   sessions: { id: string; ip: string; lastActive: number; current: boolean }[];
   requestSessions: () => void;
   revokeSession: (sessionId: string) => void;
+  showImportModal: (data: any, mode: 'setup' | 'settings') => void;
 }
 
 const ConnectionContext = createContext<ConnectionContextType | null>(null);
@@ -277,6 +278,7 @@ const translations = {
     key_setup_desc: 'This device has no encryption keys. Import a backup to access your existing messages, or generate new keys (old messages will be unreadable).',
     key_setup_new: 'Generate New Keys',
     key_setup_new_confirm: 'Warning: old encrypted messages will be unreadable. Continue?',
+    enter_backup_password: 'Enter backup password:',
     accent_color: 'Accent color',
     accent_purple: 'Purple',
     accent_blue: 'Blue',
@@ -390,6 +392,7 @@ const translations = {
     key_setup_desc: 'На этом устройстве нет ключей шифрования. Импортируйте бэкап для доступа к сообщениям, или сгенерируйте новые ключи (старые сообщения будут недоступны).',
     key_setup_new: 'Сгенерировать новые ключи',
     key_setup_new_confirm: 'Внимание: старые зашифрованные сообщения будут недоступны. Продолжить?',
+    enter_backup_password: 'Введите пароль бэкапа:',
     accent_color: 'Цвет акцента',
     accent_purple: 'Фиолетовый',
     accent_blue: 'Синий',
@@ -423,6 +426,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const preKeyBundlesRef = useRef<Record<string, any>>({});
   const pendingX3dhRef = useRef<Record<string, { x3dhMessage: any; ratchetPublicKey: Uint8Array }>>({});
   const [sessions, setSessions] = useState<{ id: string; ip: string; lastActive: number; current: boolean }[]>([]);
+  const [importModal, setImportModal] = useState<{ data: any; mode: 'setup' | 'settings' } | null>(null);
 
   useEffect(() => {
     userIdRef.current = state.userId;
@@ -1085,25 +1089,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
                     const text = await file.text();
                     const data = JSON.parse(text);
                     if (!isKeyBackup(data)) { alert(t('key_import_err')); return; }
-                    const pass = prompt('Enter backup password:');
-                    if (!pass) return;
-                    const privKey = await decryptPrivateKey(data.encryptedPrivateKey, pass);
-                    const pubKey = data.publicKey;
-                    const nick = data.nickname.toLowerCase();
-                    const bundle = await encryptPrivateKey(privKey, authRef.current?.password || pass);
-                    bundle.publicKey = pubKey;
-                    localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(bundle));
-                    localStorage.setItem(`wn_pub_${nick}`, JSON.stringify(pubKey));
-                    privateKeyRef.current = privKey;
-                    publicKeyRef.current = pubKey;
-                    if (userIdRef.current) {
-                      publicKeysRef.current[userIdRef.current] = pubKey;
-                    }
-                    if (wsRef.current?.readyState === WebSocket.OPEN) {
-                      wsRef.current.send(JSON.stringify({ type: 'auth_update_key', payload: { publicKey: pubKey } }));
-                    }
-                    dispatch({ type: 'SET_KEY_SETUP_NEEDED', needed: false });
-                    dispatch({ type: 'SET_E2EE_READY', ready: true });
+                    setImportModal({ data, mode: 'setup' });
                   } catch { alert(t('key_import_err')); }
                   e.target.value = '';
                 }} />
@@ -1163,9 +1149,37 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
       sessions,
       requestSessions,
       revokeSession,
+      showImportModal: (data: any, mode: 'setup' | 'settings') => setImportModal({ data, mode }),
     }}>
       {children}
     </ConnectionContext.Provider>
+    {importModal && (
+      <PasswordModal title={t('enter_backup_password')} onCancel={() => setImportModal(null)} onConfirm={async (pass) => {
+        try {
+          const data = importModal.data;
+          const privKey = await decryptPrivateKey(data.encryptedPrivateKey, pass);
+          const pubKey = data.publicKey;
+          const nick = data.nickname.toLowerCase();
+          const bundle = await encryptPrivateKey(privKey, authRef.current?.password || pass);
+          bundle.publicKey = pubKey;
+          localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(bundle));
+          localStorage.setItem(`wn_pub_${nick}`, JSON.stringify(pubKey));
+          privateKeyRef.current = privKey;
+          publicKeyRef.current = pubKey;
+          if (userIdRef.current) {
+            publicKeysRef.current[userIdRef.current] = pubKey;
+          }
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            wsRef.current.send(JSON.stringify({ type: 'auth_update_key', payload: { publicKey: pubKey } }));
+          }
+          if (importModal.mode === 'setup') {
+            dispatch({ type: 'SET_KEY_SETUP_NEEDED', needed: false });
+          }
+          dispatch({ type: 'SET_E2EE_READY', ready: true });
+        } catch { alert(t('key_import_err')); }
+        setImportModal(null);
+      }} />
+    )}
     </>
   );
 }
@@ -1746,8 +1760,45 @@ function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, onCon
   );
 }
 
+function PasswordModal({ title, onConfirm, onCancel }: {
+  title: string; onConfirm: (password: string) => void; onCancel: () => void;
+}) {
+  const [password, setPassword] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+  useEffect(() => { inputRef.current?.focus(); }, []);
+  return (
+    <>
+      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60]" onClick={onCancel} />
+      <div className="fixed inset-0 z-[61] flex items-center justify-center p-4">
+        <div className="bg-bg-secondary border border-border-default rounded-2xl shadow-2xl max-w-sm w-full p-6" style={{ animation: 'scaleIn 0.2s cubic-bezier(0.22, 1, 0.36, 1)' }}>
+          <div className="w-14 h-14 rounded-2xl bg-accent-primary/15 flex items-center justify-center mx-auto mb-5">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+          </div>
+          <h3 className="text-center text-[17px] font-semibold text-fg-primary mb-4">{title}</h3>
+          <input ref={inputRef} type="password" value={password} onChange={(e) => setPassword(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter' && password) onConfirm(password); if (e.key === 'Escape') onCancel(); }}
+            className="w-full px-4 py-3 rounded-xl bg-bg-tertiary border border-border-default text-[15px] text-fg-primary placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary mb-4"
+            placeholder="Password" />
+          <div className="flex gap-3">
+            <button onClick={onCancel}
+              className="flex-1 py-3 rounded-2xl border border-border-default text-fg-primary text-[15px] font-medium hover:bg-bg-tertiary transition-colors">
+              Cancel
+            </button>
+            <button onClick={() => password && onConfirm(password)} disabled={!password}
+              className="flex-1 py-3 rounded-2xl bg-accent-primary text-accent-text text-[15px] font-semibold hover:opacity-90 transition-colors disabled:opacity-40">
+              OK
+            </button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+}
+
 function SettingsPanel({ onClose, closing }: { onClose: () => void; closing: boolean }) {
-  const { state, updateSettings, logout, getMyPublicKey, getPublicKey, sessions, requestSessions, revokeSession, t } = useConnection();
+  const { state, updateSettings, logout, getMyPublicKey, getPublicKey, sessions, requestSessions, revokeSession, showImportModal, t } = useConnection();
   const [confirmAction, setConfirmAction] = useState<'logout' | 'clearData' | null>(null);
 
   useEffect(() => {
@@ -2006,15 +2057,7 @@ function SettingsPanel({ onClose, closing }: { onClose: () => void; closing: boo
                   const text = await file.text();
                   const data = JSON.parse(text);
                   if (!isKeyBackup(data)) { alert(t('key_import_err')); return; }
-                  const pass = prompt('Enter backup password:');
-                  if (!pass) return;
-                  const privKey = await decryptPrivateKey(data.encryptedPrivateKey, pass);
-                  const nick = data.nickname.toLowerCase();
-                  const bundle = await encryptPrivateKey(privKey, pass);
-                  bundle.publicKey = data.publicKey;
-                  localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(bundle));
-                  localStorage.setItem(`wn_pub_${nick}`, JSON.stringify(data.publicKey));
-                  alert(t('key_imported'));
+                  showImportModal(data, 'settings');
                 } catch { alert(t('key_import_err')); }
                 e.target.value = '';
               }} />
@@ -2098,7 +2141,7 @@ function SettingsPanel({ onClose, closing }: { onClose: () => void; closing: boo
 }
 
 function SettingsPanelInline() {
-  const { state, updateSettings, logout, getMyPublicKey, getPublicKey, sessions, requestSessions, revokeSession, t } = useConnection();
+  const { state, updateSettings, logout, getMyPublicKey, getPublicKey, sessions, requestSessions, revokeSession, showImportModal, t } = useConnection();
   const [confirmAction, setConfirmAction] = useState<'logout' | 'clearData' | null>(null);
 
   const Toggle = ({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) => (
@@ -2344,15 +2387,7 @@ function SettingsPanelInline() {
                 const text = await file.text();
                 const data = JSON.parse(text);
                 if (!isKeyBackup(data)) { alert(t('key_import_err')); return; }
-                const pass = prompt('Enter backup password:');
-                if (!pass) return;
-                const privKey = await decryptPrivateKey(data.encryptedPrivateKey, pass);
-                const nick = data.nickname.toLowerCase();
-                const bundle = await encryptPrivateKey(privKey, pass);
-                bundle.publicKey = data.publicKey;
-                localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(bundle));
-                localStorage.setItem(`wn_pub_${nick}`, JSON.stringify(data.publicKey));
-                alert(t('key_imported'));
+                showImportModal(data, 'settings');
               } catch { alert(t('key_import_err')); }
               e.target.value = '';
             }} />
