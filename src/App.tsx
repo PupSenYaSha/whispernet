@@ -670,7 +670,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               unreadCountRef.current = 0;
 
               if (authRef.current) {
-                localStorage.setItem('wn_auth', JSON.stringify({ nickname: authRef.current.nickname, password: authRef.current.password }));
+                sessionStorage.setItem('wn_auth', JSON.stringify({ nickname: authRef.current.nickname, password: authRef.current.password }));
               }
 
               if ('Notification' in window && Notification.permission === 'default') {
@@ -949,7 +949,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(() => {
     disconnect();
     dispatch({ type: 'RESET' });
-    localStorage.removeItem('wn_auth');
+    sessionStorage.removeItem('wn_auth');
     localStorage.removeItem('wn_settings');
     window.electronAPI?.setTitle('WhisperNet');
     document.title = 'WhisperNet';
@@ -1045,7 +1045,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   }, [buildEncryptKeys]);
 
   useEffect(() => {
-    const saved = localStorage.getItem('wn_auth');
+    const saved = sessionStorage.getItem('wn_auth');
     if (saved) {
       try {
         const { nickname, password } = JSON.parse(saved);

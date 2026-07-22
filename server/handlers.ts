@@ -102,7 +102,14 @@ function releaseConnection(ip: string): void {
 }
 
 function sanitize(input: string): string {
-  return input.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '').trim();
+  return input
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '')
+    .replace(/[<>&"']/g, '')
+    .trim();
+}
+
+function isValidNickname(nick: string): boolean {
+  return /^[a-zA-Z0-9_-]{3,16}$/.test(nick);
 }
 
 function send(ws: WebSocket, message: ServerMessage): void {
@@ -236,8 +243,8 @@ export function handleConnection(ws: WebSocket): void {
     }
 
     const cleanNick = sanitize(nickname);
-    if (cleanNick.length < 3 || cleanNick.length > 16) {
-      send(ws, { type: 'auth_failure', payload: { reason: 'Invalid nickname' }, timestamp: Date.now() });
+    if (!isValidNickname(cleanNick)) {
+      send(ws, { type: 'auth_failure', payload: { reason: 'Invalid nickname: 3-16 chars, letters/numbers/_-' }, timestamp: Date.now() });
       return;
     }
 
@@ -303,13 +310,8 @@ export function handleConnection(ws: WebSocket): void {
     const cleanNick = sanitize(nickname);
     const cleanPass = password;
 
-    if (cleanNick.length < 3 || cleanNick.length > 16) {
-      send(ws, { type: 'auth_failure', payload: { reason: 'Nickname must be 3-16 characters' }, timestamp: Date.now() });
-      return;
-    }
-
-    if (!/^[a-zA-Z0-9_-]+$/.test(cleanNick)) {
-      send(ws, { type: 'auth_failure', payload: { reason: 'Nickname can only contain letters, numbers, underscore, hyphen' }, timestamp: Date.now() });
+    if (!isValidNickname(cleanNick)) {
+      send(ws, { type: 'auth_failure', payload: { reason: 'Nickname: 3-16 chars, letters/numbers/_-' }, timestamp: Date.now() });
       return;
     }
 
