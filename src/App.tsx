@@ -34,6 +34,7 @@ interface ConnectionState {
   reconnectAttempts: number;
   authError: string | null;
   e2eeReady: boolean;
+  needsKeySetup: boolean;
   activeChannel: ActiveChannel;
   contacts: Contact[];
   dmMessages: Record<string, Message[]>;
@@ -55,6 +56,7 @@ type ConnectionAction =
   | { type: 'SET_AUTH_ERROR'; error: string | null }
   | { type: 'UPDATE_SETTINGS'; settings: Partial<AppSettings> }
   | { type: 'SET_E2EE_READY'; ready: boolean }
+  | { type: 'SET_KEY_SETUP_NEEDED'; needed: boolean }
   | { type: 'SET_ACTIVE_CHANNEL'; channel: ActiveChannel }
   | { type: 'SET_CONTACTS'; contacts: Contact[] }
   | { type: 'SET_SEARCH_RESULTS'; results: { id: string; nickname: string; online: boolean }[] }
@@ -81,6 +83,7 @@ const initialState: ConnectionState = {
   reconnectAttempts: 0,
   authError: null,
   e2eeReady: false,
+  needsKeySetup: false,
   activeChannel: 'general',
   contacts: [],
   dmMessages: {},
@@ -130,6 +133,8 @@ function connectionReducer(state: ConnectionState, action: ConnectionAction): Co
       return { ...initialState, settings: state.settings };
     case 'SET_E2EE_READY':
       return { ...state, e2eeReady: action.ready };
+    case 'SET_KEY_SETUP_NEEDED':
+      return { ...state, needsKeySetup: action.needed };
     case 'SET_ACTIVE_CHANNEL':
       return { ...state, activeChannel: action.channel };
     case 'SET_CONTACTS':
@@ -267,6 +272,10 @@ const translations = {
     key_imported: 'Keys restored from backup',
     key_import_err: 'Invalid backup file or wrong password',
     session_revoked: 'Session revoked',
+    key_setup_title: 'No Encryption Keys Found',
+    key_setup_desc: 'This device has no encryption keys. Import a backup to access your existing messages, or generate new keys (old messages will be unreadable).',
+    key_setup_new: 'Generate New Keys',
+    key_setup_new_confirm: 'Warning: old encrypted messages will be unreadable. Continue?',
     accent_color: 'Accent color',
     accent_purple: 'Purple',
     accent_blue: 'Blue',
@@ -376,6 +385,10 @@ const translations = {
     key_imported: 'Ключи восстановлены из бэкапа',
     key_import_err: 'Неверный файл бэкапа или пароль',
     session_revoked: 'Сессия отозвана',
+    key_setup_title: 'Ключи шифрования не найдены',
+    key_setup_desc: 'На этом устройстве нет ключей шифрования. Импортируйте бэкап для доступа к сообщениям, или сгенерируйте новые ключи (старые сообщения будут недоступны).',
+    key_setup_new: 'Сгенерировать новые ключи',
+    key_setup_new_confirm: 'Внимание: старые зашифрованные сообщения будут недоступны. Продолжить?',
     accent_color: 'Цвет акцента',
     accent_purple: 'Фиолетовый',
     accent_blue: 'Синий',
@@ -645,24 +658,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
                 }
               }
               if (!privateKeyRef.current) {
-                const keys = await generateKeyPair();
-                const nick = message.payload.nickname.toLowerCase();
-                if (authRef.current) {
-                  const bundle = await encryptPrivateKey(keys.privateKey, authRef.current.password);
-                  bundle.publicKey = keys.publicKey;
-                  localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(bundle));
-                } else {
-                  localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(keys.privateKey));
-                }
-                localStorage.setItem(`wn_pub_${nick}`, JSON.stringify(keys.publicKey));
-                privateKeyRef.current = keys.privateKey;
-                publicKeyRef.current = keys.publicKey;
-                if (message.payload.userId) {
-                  publicKeysRef.current[message.payload.userId] = keys.publicKey;
-                }
-                if (ws.readyState === WebSocket.OPEN) {
-                  ws.send(JSON.stringify({ type: 'auth_update_key', payload: { publicKey: keys.publicKey } }));
-                }
+                dispatch({ type: 'SET_KEY_SETUP_NEEDED', needed: true });
               }
               dispatch({ type: 'SET_E2EE_READY', ready: !!privateKeyRef.current });
               if (message.payload.onlineUsers) {
@@ -1061,6 +1057,84 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   return (
+    <>
+      {state.needsKeySetup && (
+        <div className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-6">
+          <div className="bg-bg-secondary rounded-3xl border border-border-default p-6 max-w-sm w-full space-y-4">
+            <div className="w-14 h-14 rounded-2xl bg-amber-500/15 flex items-center justify-center mx-auto">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-amber-400">
+                <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                <line x1="12" y1="8" x2="12" y2="12" />
+                <line x1="12" y1="16" x2="12.01" y2="16" />
+              </svg>
+            </div>
+            <h2 className="text-lg font-semibold text-fg-primary text-center">{t('key_setup_title')}</h2>
+            <p className="text-[13px] text-fg-muted text-center leading-relaxed">{t('key_setup_desc')}</p>
+            <div className="space-y-2">
+              <label className="block">
+                <input type="file" accept=".json" className="hidden" id="key-setup-import" onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  try {
+                    const text = await file.text();
+                    const data = JSON.parse(text);
+                    if (!isKeyBackup(data)) { alert(t('key_import_err')); return; }
+                    const pass = prompt('Enter backup password:');
+                    if (!pass) return;
+                    const privKey = await decryptPrivateKey(data.encryptedPrivateKey, pass);
+                    const pubKey = data.publicKey;
+                    const nick = data.nickname.toLowerCase();
+                    const bundle = await encryptPrivateKey(privKey, authRef.current?.password || pass);
+                    bundle.publicKey = pubKey;
+                    localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(bundle));
+                    localStorage.setItem(`wn_pub_${nick}`, JSON.stringify(pubKey));
+                    privateKeyRef.current = privKey;
+                    publicKeyRef.current = pubKey;
+                    if (userIdRef.current) {
+                      publicKeysRef.current[userIdRef.current] = pubKey;
+                    }
+                    if (wsRef.current?.readyState === WebSocket.OPEN) {
+                      wsRef.current.send(JSON.stringify({ type: 'auth_update_key', payload: { publicKey: pubKey } }));
+                    }
+                    dispatch({ type: 'SET_KEY_SETUP_NEEDED', needed: false });
+                    dispatch({ type: 'SET_E2EE_READY', ready: true });
+                  } catch { alert(t('key_import_err')); }
+                  e.target.value = '';
+                }} />
+                <span className="flex items-center justify-center gap-2 w-full py-3 rounded-2xl bg-accent-primary text-accent-text font-medium hover:brightness-110 transition-all cursor-pointer">
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>
+                  {t('import_keys')}
+                </span>
+              </label>
+              <button onClick={async () => {
+                if (!confirm(t('key_setup_new_confirm'))) return;
+                const keys = await generateKeyPair();
+                const nick = authRef.current?.nickname.toLowerCase() || '';
+                if (authRef.current) {
+                  const bundle = await encryptPrivateKey(keys.privateKey, authRef.current.password);
+                  bundle.publicKey = keys.publicKey;
+                  localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(bundle));
+                } else {
+                  localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(keys.privateKey));
+                }
+                localStorage.setItem(`wn_pub_${nick}`, JSON.stringify(keys.publicKey));
+                privateKeyRef.current = keys.privateKey;
+                publicKeyRef.current = keys.publicKey;
+                if (userIdRef.current) {
+                  publicKeysRef.current[userIdRef.current] = keys.publicKey;
+                }
+                if (wsRef.current?.readyState === WebSocket.OPEN) {
+                  wsRef.current.send(JSON.stringify({ type: 'auth_update_key', payload: { publicKey: keys.publicKey } }));
+                }
+                dispatch({ type: 'SET_KEY_SETUP_NEEDED', needed: false });
+                dispatch({ type: 'SET_E2EE_READY', ready: true });
+              }} className="w-full py-3 rounded-2xl border border-border-default text-fg-primary font-medium hover:bg-bg-tertiary transition-all">
+                {t('key_setup_new')}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     <ConnectionContext.Provider value={{
       state,
       dispatch,
@@ -1086,6 +1160,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     }}>
       {children}
     </ConnectionContext.Provider>
+    </>
   );
 }
 
