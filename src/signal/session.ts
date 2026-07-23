@@ -14,36 +14,76 @@ import { sha256 } from '@noble/hashes/sha2.js';
 
 const SESSIONS_KEY = 'wn_signal_sessions';
 const INFO_ROOT = new TextEncoder().encode('WhisperNetRoot');
+const PBKDF2_ITER = 600_000;
+
+function bufToBase64(buf: ArrayBuffer): string {
+  return btoa(String.fromCharCode(...new Uint8Array(buf)));
+}
+
+function base64ToBuf(b64: string): ArrayBuffer {
+  const bin = atob(b64);
+  const buf = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
+  return buf.buffer;
+}
 
 export class SessionManager {
   private sessions: Map<string, Session> = new Map();
+  private encryptionKey: CryptoKey | null = null;
+  private saveTimeout: ReturnType<typeof setTimeout> | null = null;
 
-  constructor() {
-    this.load();
+  constructor() {}
+
+  async init(password: string): Promise<void> {
+    const salt = new Uint8Array(16);
+    const saltB64 = localStorage.getItem('wn_signal_sessions_salt');
+    if (saltB64) {
+      salt.set(new Uint8Array(base64ToBuf(saltB64)));
+    } else {
+      crypto.getRandomValues(salt);
+      localStorage.setItem('wn_signal_sessions_salt', bufToBase64(salt.buffer));
+    }
+    const passKey = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']
+    );
+    this.encryptionKey = await crypto.subtle.deriveKey(
+      { name: 'PBKDF2', salt: salt as unknown as ArrayBuffer, iterations: PBKDF2_ITER, hash: 'SHA-256' },
+      passKey, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
+    );
+    await this.loadEncrypted();
   }
 
-  private load(): void {
+  private async loadEncrypted(): Promise<void> {
     try {
-      const data = localStorage.getItem(SESSIONS_KEY);
-      if (data) {
-        const parsed = JSON.parse(data);
-        for (const [id, session] of Object.entries(parsed)) {
-          const s = session as any;
-          if (s.state.skippedMessageKeys && !(s.state.skippedMessageKeys instanceof Map)) {
-            const entries = Object.entries(s.state.skippedMessageKeys) as [string, number[]][];
-            s.state.skippedMessageKeys = new Map(
-              entries.map(([k, v]) => [parseInt(k), new Uint8Array(v)])
-            );
-          }
-          this.sessions.set(id, s as Session);
+      const raw = localStorage.getItem(SESSIONS_KEY);
+      if (!raw || !this.encryptionKey) return;
+      const { iv, data } = JSON.parse(raw);
+      const plaintext = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: new Uint8Array(base64ToBuf(iv)) },
+        this.encryptionKey, base64ToBuf(data)
+      );
+      const parsed = JSON.parse(new TextDecoder().decode(plaintext));
+      for (const [id, session] of Object.entries(parsed)) {
+        const s = session as any;
+        if (s.state.skippedMessageKeys && !(s.state.skippedMessageKeys instanceof Map)) {
+          const entries = Object.entries(s.state.skippedMessageKeys) as [string, number[]][];
+          s.state.skippedMessageKeys = new Map(
+            entries.map(([k, v]) => [parseInt(k), new Uint8Array(v)])
+          );
         }
+        this.sessions.set(id, s as Session);
       }
-    } catch (e) {
-      console.error('Failed to load sessions from localStorage:', e);
+    } catch {
+      localStorage.removeItem(SESSIONS_KEY);
     }
   }
 
   save(): void {
+    if (this.saveTimeout) clearTimeout(this.saveTimeout);
+    this.saveTimeout = setTimeout(() => this.doSave(), 500);
+  }
+
+  private async doSave(): Promise<void> {
     try {
       const obj: Record<string, any> = {};
       for (const [id, session] of this.sessions) {
@@ -57,9 +97,20 @@ export class SessionManager {
         }
         obj[id] = s;
       }
-      localStorage.setItem(SESSIONS_KEY, JSON.stringify(obj));
-    } catch (e) {
-      console.error('Failed to save sessions:', e);
+      const json = JSON.stringify(obj);
+      if (this.encryptionKey) {
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const ciphertext = await crypto.subtle.encrypt(
+          { name: 'AES-GCM', iv }, this.encryptionKey, new TextEncoder().encode(json)
+        );
+        localStorage.setItem(SESSIONS_KEY, JSON.stringify({
+          iv: bufToBase64(iv.buffer), data: bufToBase64(ciphertext)
+        }));
+      } else {
+        localStorage.setItem(SESSIONS_KEY, json);
+      }
+    } catch {
+      // silent
     }
   }
 

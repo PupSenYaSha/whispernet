@@ -278,3 +278,27 @@ export async function deleteGeneralMessages(): Promise<number> {
     return generalCount;
   });
 }
+
+const ONE_WEEK = 7 * 24 * 60 * 60 * 1000;
+
+export async function deleteOldGeneralMessages(): Promise<number> {
+  return withMutex(messagesMutex, async () => {
+    const messages = await loadMessages();
+    const cutoff = Date.now() - ONE_WEEK;
+    const deleted = messages.filter(m => (!m.channel || m.channel === 'general') && m.timestamp < cutoff).length;
+    const remaining = messages.filter(m => (m.channel && m.channel !== 'general') || m.timestamp >= cutoff);
+    await saveMessages(remaining);
+    return deleted;
+  });
+}
+
+export function startAutoCleanup(): void {
+  setInterval(async () => {
+    try {
+      const deleted = await deleteOldGeneralMessages();
+      if (deleted > 0) console.log(`Auto-cleaned ${deleted} old general messages`);
+    } catch (e) {
+      console.error('Auto-cleanup failed:', e);
+    }
+  }, ONE_WEEK);
+}

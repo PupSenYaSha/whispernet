@@ -5,6 +5,10 @@ import type { PreKeyBundle, KeyPair, SignalPreKeyMessage } from './types';
 const preKeyManager = new PreKeyManager();
 const sessionManager = new SessionManager();
 
+export async function initSessionManager(password: string): Promise<void> {
+  await sessionManager.init(password);
+}
+
 export function initializeSignal(): void {
   preKeyManager.initialize();
 }

@@ -9,6 +9,7 @@ import { uploadImage } from './upload';
 declare const __APP_VERSION__: string;
 import {
   initializeSignal,
+  initSessionManager,
   getPreKeyBundleForServer,
   createSessionWithRemote,
   createResponderSession,
@@ -580,6 +581,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
             publicKeyRef.current = keys.publicKey;
 
             initializeSignal();
+            await initSessionManager(auth.password);
             signalInitializedRef.current = true;
             const preKeyBundle = getPreKeyBundleForServer();
 
@@ -622,6 +624,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
             }
 
             initializeSignal();
+            await initSessionManager(auth.password);
             signalInitializedRef.current = true;
             const preKeyBundle = getPreKeyBundleForServer();
 

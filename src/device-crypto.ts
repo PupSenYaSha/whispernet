@@ -18,6 +18,10 @@ async function getDeviceFingerprint(): Promise<string> {
   parts.push(`${screen.width}x${screen.height}`);
   parts.push(Intl.DateTimeFormat().resolvedOptions().timeZone);
   parts.push(navigator.language);
+  parts.push(navigator.hardwareConcurrency?.toString() || '0');
+  parts.push((navigator as any).deviceMemory?.toString() || '0');
+  parts.push(navigator.platform);
+  parts.push(navigator.maxTouchPoints?.toString() || '0');
   try {
     const canvas = document.createElement('canvas');
     const ctx = canvas.getContext('2d');
@@ -34,6 +38,11 @@ async function getDeviceFingerprint(): Promise<string> {
       const dbg = gl.getExtension('WEBGL_debug_renderer_info');
       if (dbg) parts.push(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL));
     }
+  } catch {}
+  try {
+    parts.push(window.outerWidth.toString());
+    parts.push(window.outerHeight.toString());
+    parts.push(screen.pixelDepth.toString());
   } catch {}
   const raw = parts.join('|||');
   const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw));

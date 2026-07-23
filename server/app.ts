@@ -54,7 +54,8 @@ export function createApp(clientDir?: string) {
     reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
     reply.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
     reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-    reply.header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://img.n1ko.dev; connect-src 'self' wss:; font-src 'self'");
+    const host = req.headers.host || 'localhost';
+    reply.header('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://img.n1ko.dev; connect-src 'self' wss://${host}; font-src 'self'`);
   });
 
   app.register(fastifyWebsocket);
