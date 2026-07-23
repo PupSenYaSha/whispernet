@@ -268,6 +268,29 @@ export async function getDmContacts(userId: string): Promise<{ id: string; nickn
   return result.sort((a, b) => b.lastMessage - a.lastMessage);
 }
 
+export async function searchMessages(query: string, channel?: string, limit: number = 50): Promise<any[]> {
+  const messages = await loadMessages();
+  const q = query.toLowerCase();
+  return messages
+    .filter(m => {
+      if (channel && m.channel !== channel) return false;
+      if (!m.text || typeof m.text !== 'string') return false;
+      return m.text.toLowerCase().includes(q);
+    })
+    .slice(-limit);
+}
+
+export async function deleteMessage(messageId: string, userId: string): Promise<boolean> {
+  return withMutex(messagesMutex, async () => {
+    const messages = await loadMessages();
+    const idx = messages.findIndex(m => m.id === messageId && m.senderId === userId);
+    if (idx === -1) return false;
+    messages.splice(idx, 1);
+    await saveMessages(messages);
+    return true;
+  });
+}
+
 export async function deleteGeneralMessages(): Promise<number> {
   return withMutex(messagesMutex, async () => {
     const messages = await loadMessages();

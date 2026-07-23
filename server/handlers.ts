@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { getUserByNickname, saveMessage, getRecentMessages, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, searchMessages, deleteMessage } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { appendFileSync } from 'fs';
@@ -227,6 +227,12 @@ export function handleConnection(ws: WebSocket): void {
       case 'search_users':
         if (userId) await handleSearchUsers(userId, ws, message.payload);
         break;
+      case 'search_messages':
+        if (userId) await handleSearchMessages(userId, ws, message.payload);
+        break;
+      case 'delete_message':
+        if (userId) await handleDeleteMessage(userId, ws, message.payload);
+        break;
       case 'auth_update_key':
         if (userId) await handleAuthUpdateKey(userId, ws, message.payload);
         break;
@@ -411,7 +417,7 @@ export function handleConnection(ws: WebSocket): void {
   }
 
   async function handleChatMessage(senderId: string, ws: WebSocket, payload: { text: string; fileKey?: Record<string, string> }): Promise<void> {
-    if (!checkMessageRateLimit(ip)) {
+    if (!checkMessageRateLimit(ip) || !checkMessageRateLimit(senderId)) {
       logSecurity('RATE_LIMIT_MESSAGE', { ip, senderId });
       send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down. Max 1 message per second.' }, timestamp: Date.now() });
       return;
@@ -563,6 +569,30 @@ export function handleConnection(ws: WebSocket): void {
       .slice(0, 20)
       .map((u: { id: string; nickname: string }) => ({ id: u.id, nickname: u.nickname, online: onlineIds.has(u.id) }));
     send(ws, { type: 'search_results', payload: { results }, timestamp: Date.now() });
+  }
+
+  async function handleSearchMessages(userId: string, ws: WebSocket, payload: { query: string; channel?: string }): Promise<void> {
+    const query = sanitize(payload?.query || '');
+    if (query.length < 2) {
+      send(ws, { type: 'message_search_results', payload: { results: [] }, timestamp: Date.now() });
+      return;
+    }
+    const results = await searchMessages(query, payload.channel, 50);
+    send(ws, { type: 'message_search_results', payload: { results }, timestamp: Date.now() });
+  }
+
+  async function handleDeleteMessage(userId: string, ws: WebSocket, payload: { messageId: string }): Promise<void> {
+    if (!payload?.messageId || typeof payload.messageId !== 'string') {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'messageId required' }, timestamp: Date.now() });
+      return;
+    }
+    const deleted = await deleteMessage(payload.messageId, userId);
+    if (deleted) {
+      send(ws, { type: 'message_deleted', payload: { messageId: payload.messageId }, timestamp: Date.now() });
+      broadcast({ type: 'message_deleted', payload: { messageId: payload.messageId }, timestamp: Date.now() }, userId);
+    } else {
+      send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
+    }
   }
 
   async function handleAuthUpdateKey(userId: string, ws: WebSocket, payload: { publicKey: any }): Promise<void> {

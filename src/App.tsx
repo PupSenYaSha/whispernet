@@ -42,6 +42,7 @@ interface ConnectionState {
   contacts: Contact[];
   dmMessages: Record<string, Message[]>;
   searchResults: { id: string; nickname: string; online: boolean }[];
+  messageSearchResults: Message[];
 }
 
 type ConnectionAction =
@@ -63,6 +64,8 @@ type ConnectionAction =
   | { type: 'SET_ACTIVE_CHANNEL'; channel: ActiveChannel }
   | { type: 'SET_CONTACTS'; contacts: Contact[] }
   | { type: 'SET_SEARCH_RESULTS'; results: { id: string; nickname: string; online: boolean }[] }
+  | { type: 'SET_MESSAGE_SEARCH_RESULTS'; results: Message[] }
+  | { type: 'DELETE_MESSAGE'; messageId: string }
   | { type: 'RESET' };
 
 const defaultSettings: AppSettings = {
@@ -91,6 +94,7 @@ const initialState: ConnectionState = {
   contacts: [],
   dmMessages: {},
   searchResults: [],
+  messageSearchResults: [],
 };
 
 function loadSettings(): AppSettings {
@@ -144,6 +148,16 @@ function connectionReducer(state: ConnectionState, action: ConnectionAction): Co
       return { ...state, contacts: action.contacts };
     case 'SET_SEARCH_RESULTS':
       return { ...state, searchResults: action.results };
+    case 'SET_MESSAGE_SEARCH_RESULTS':
+      return { ...state, messageSearchResults: action.results };
+    case 'DELETE_MESSAGE':
+      return {
+        ...state,
+        messages: state.messages.filter(m => m.id !== action.messageId),
+        dmMessages: Object.fromEntries(
+          Object.entries(state.dmMessages).map(([ch, msgs]) => [ch, msgs.filter(m => m.id !== action.messageId)])
+        ),
+      };
     default:
       return state;
   }
@@ -164,6 +178,8 @@ interface ConnectionContextType {
   openGeneral: () => void;
   refreshContacts: () => void;
   searchUsers: (query: string) => void;
+  searchMessages: (query: string, channel?: string) => void;
+  deleteMessage: (messageId: string) => void;
   t: (key: string) => string;
   updateSettings: (settings: Partial<AppSettings>) => void;
   getMyPublicKey: () => JsonWebKey | null;
@@ -230,6 +246,9 @@ const translations = {
     online_users: 'Online',
     no_messages: 'No messages yet. Say hello!',
     no_dm_messages: 'No messages yet. Say hi!',
+    delete: 'Delete',
+    search_messages: 'Search messages',
+    search_messages_hint: 'Search in chat...',
     font_size: 'Font size',
     font_small: 'Small',
     font_normal: 'Normal',
@@ -344,6 +363,9 @@ const translations = {
     online_users: 'В сети',
     no_messages: 'Пока нет сообщений. Скажите привет!',
     no_dm_messages: 'Пока нет сообщений. Напишите привет!',
+    delete: 'Удалить',
+    search_messages: 'Поиск сообщений',
+    search_messages_hint: 'Поиск в чате...',
     font_size: 'Размер шрифта',
     font_small: 'Маленький',
     font_normal: 'Обычный',
@@ -552,6 +574,18 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const searchUsers = useCallback((query: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'search_users', payload: { query } }));
+    }
+  }, []);
+
+  const searchMessages = useCallback((query: string, channel?: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'search_messages', payload: { query, channel } }));
+    }
+  }, []);
+
+  const deleteMessage = useCallback((messageId: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'delete_message', payload: { messageId } }));
     }
   }, []);
 
@@ -848,6 +882,14 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
 
             case 'search_results':
               dispatch({ type: 'SET_SEARCH_RESULTS', results: message.payload.results });
+              break;
+
+            case 'message_search_results':
+              dispatch({ type: 'SET_MESSAGE_SEARCH_RESULTS', results: message.payload.results });
+              break;
+
+            case 'message_deleted':
+              dispatch({ type: 'DELETE_MESSAGE', messageId: message.payload.messageId });
               break;
 
             case 'sessions_list':
@@ -1148,6 +1190,8 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
       openGeneral,
       refreshContacts,
       searchUsers,
+      searchMessages,
+      deleteMessage,
       t,
       updateSettings,
       getMyPublicKey,
@@ -1214,7 +1258,7 @@ function formatTime(timestamp: number): string {
 }
 
 function MessageItem({ message, showAvatar = true }: { message: Message; showAvatar?: boolean }) {
-  const { state } = useConnection();
+  const { state, deleteMessage: deleteMsg, t } = useConnection();
   const isSystem = message.senderId === 'system';
   const isOwn = message.isOwn;
 
@@ -1251,12 +1295,21 @@ function MessageItem({ message, showAvatar = true }: { message: Message; showAva
         )}
 
         <div className={cn(
-          'px-3.5 py-2.5 leading-relaxed',
+          'px-3.5 py-2.5 leading-relaxed group relative',
           fontSizeClass,
           isOwn
             ? 'bg-bubble-mine text-bubble-mine-text rounded-2xl rounded-br-sm'
             : 'bg-bubble-other text-bubble-other-text border border-border-default rounded-2xl rounded-bl-sm'
         )}>
+          {isOwn && (
+            <button onClick={() => deleteMsg(message.id)}
+              className="absolute -top-2 -right-2 w-6 h-6 rounded-full bg-bg-tertiary border border-border-default flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hover:bg-status-error/20"
+              title={t('delete')}>
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-fg-muted">
+                <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              </svg>
+            </button>
+          )}
           {(() => {
             const mediaMatch = message.text.match(/^\[(image|video)\]([\s\S]*?)\[\/\1\]/);
             if (mediaMatch) {
