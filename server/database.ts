@@ -107,7 +107,6 @@ async function saveMessages(messages: StoredMessage[]): Promise<void> {
 }
 
 export function initializeDatabase() {
-  console.log('Database initialized at:', DATA_DIR);
 }
 
 let preKeyBundles: Record<string, any> = {};

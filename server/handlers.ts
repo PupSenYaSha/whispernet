@@ -112,6 +112,32 @@ function isValidNickname(nick: string): boolean {
   return /^[a-zA-Z0-9_-]{3,16}$/.test(nick);
 }
 
+function isValidPreKeyBundle(bundle: any): boolean {
+  if (typeof bundle !== 'object' || bundle === null) return false;
+  const MAX_BUNDLE_SIZE = 10000;
+  const str = JSON.stringify(bundle);
+  if (str.length > MAX_BUNDLE_SIZE) return false;
+  if ('__proto__' in bundle || 'constructor' in bundle || 'prototype' in bundle) return false;
+  if (typeof bundle.identityKey !== 'string') return false;
+  if (typeof bundle.signedPreKey !== 'object' || bundle.signedPreKey === null) return false;
+  if (typeof bundle.signedPreKey.publicKey !== 'string') return false;
+  if (!Array.isArray(bundle.signedPreKey.signature)) return false;
+  if (bundle.oneTimePreKey && typeof bundle.oneTimePreKey !== 'object') return false;
+  return true;
+}
+
+function isValidPublicKey(key: any): boolean {
+  if (typeof key !== 'object' || key === null) return false;
+  const MAX_KEY_SIZE = 5000;
+  const str = JSON.stringify(key);
+  if (str.length > MAX_KEY_SIZE) return false;
+  if ('__proto__' in key || 'constructor' in key || 'prototype' in key) return false;
+  if (key.kty !== 'RSA') return false;
+  if (key.alg !== 'RSA-OAEP' && key.alg !== 'RSA-OAEP-256') return false;
+  if (typeof key.n !== 'string' || typeof key.e !== 'string') return false;
+  return true;
+}
+
 function send(ws: WebSocket, message: ServerMessage): void {
   if (ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(message));
@@ -288,7 +314,7 @@ export function handleConnection(ws: WebSocket): void {
     const client: ConnectedClient = { ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip };
     clients.set(user.id, client);
 
-    if (payload.preKeyBundle && typeof payload.preKeyBundle === 'object') {
+    if (payload.preKeyBundle && isValidPreKeyBundle(payload.preKeyBundle)) {
       await setPreKeyBundle(user.id, payload.preKeyBundle);
     }
 
@@ -331,7 +357,7 @@ export function handleConnection(ws: WebSocket): void {
       return;
     }
 
-    if (payload.publicKey && (typeof payload.publicKey !== 'object' || payload.publicKey.kty !== 'RSA' || (payload.publicKey.alg !== 'RSA-OAEP' && payload.publicKey.alg !== 'RSA-OAEP-256'))) {
+    if (payload.publicKey && !isValidPublicKey(payload.publicKey)) {
       send(ws, { type: 'auth_failure', payload: { reason: 'Invalid public key' }, timestamp: Date.now() });
       return;
     }
@@ -342,7 +368,7 @@ export function handleConnection(ws: WebSocket): void {
       return;
     }
 
-    if (payload.preKeyBundle && typeof payload.preKeyBundle === 'object') {
+    if (payload.preKeyBundle && isValidPreKeyBundle(payload.preKeyBundle)) {
       await setPreKeyBundle(user.id, payload.preKeyBundle);
     }
 
@@ -540,7 +566,7 @@ export function handleConnection(ws: WebSocket): void {
   }
 
   async function handleAuthUpdateKey(userId: string, ws: WebSocket, payload: { publicKey: any }): Promise<void> {
-    if (payload?.publicKey && typeof payload.publicKey === 'object' && payload.publicKey.kty === 'RSA' && (payload.publicKey.alg === 'RSA-OAEP' || payload.publicKey.alg === 'RSA-OAEP-256')) {
+    if (payload?.publicKey && isValidPublicKey(payload.publicKey)) {
       await updatePublicKey(userId, payload.publicKey);
       send(ws, { type: 'key_updated', payload: {}, timestamp: Date.now() });
       broadcast({ type: 'public_key_updated', payload: { userId, publicKey: payload.publicKey }, timestamp: Date.now() }, userId);
@@ -548,24 +574,23 @@ export function handleConnection(ws: WebSocket): void {
   }
 
   async function handlePreKeyUpload(userId: string, ws: WebSocket, payload: { bundle: any }): Promise<void> {
-    if (payload?.bundle && typeof payload.bundle === 'object') {
+    if (payload?.bundle && isValidPreKeyBundle(payload.bundle)) {
       await setPreKeyBundle(userId, payload.bundle);
       send(ws, { type: 'prekey_uploaded', payload: {}, timestamp: Date.now() });
     }
   }
 
   async function handlePreKeyFetch(userId: string, ws: WebSocket, payload: { userIds?: string[] }): Promise<void> {
-    if (payload?.userIds && Array.isArray(payload.userIds)) {
-      const bundles: Record<string, any> = {};
-      for (const id of payload.userIds.slice(0, 100)) {
-        const bundle = await getPreKeyBundle(id);
-        if (bundle) bundles[id] = bundle;
-      }
-      send(ws, { type: 'prekey_bundles', payload: { bundles }, timestamp: Date.now() });
-    } else {
-      const allBundles = await getAllPreKeyBundles();
-      send(ws, { type: 'prekey_bundles', payload: { bundles: allBundles }, timestamp: Date.now() });
+    if (!payload?.userIds || !Array.isArray(payload.userIds) || payload.userIds.length === 0) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'userIds array required' }, timestamp: Date.now() });
+      return;
     }
+    const bundles: Record<string, any> = {};
+    for (const id of payload.userIds.slice(0, 100)) {
+      const bundle = await getPreKeyBundle(id);
+      if (bundle) bundles[id] = bundle;
+    }
+    send(ws, { type: 'prekey_bundles', payload: { bundles }, timestamp: Date.now() });
   }
 
   function handleDisconnect(userId: string | null): void {
@@ -586,17 +611,19 @@ function broadcastSystem(text: string, excludeUserId?: string): void {
 }
 
 function handleGetSessions(userId: string, ws: WebSocket): void {
-  const sessions: { id: string; nickname: string; ip: string; lastActive: number; current: boolean }[] = [];
+  const sessions: { id: string; nickname: string; lastActive: number; current: boolean }[] = [];
   for (const [uid, client] of clients) {
-    sessions.push({ id: uid, nickname: client.nickname, ip: client.ip, lastActive: client.lastHeartbeat, current: uid === userId });
+    if (uid === userId) {
+      sessions.push({ id: uid, nickname: client.nickname, lastActive: client.lastHeartbeat, current: true });
+    }
   }
   send(ws, { type: 'sessions_list', payload: { sessions }, timestamp: Date.now() });
 }
 
 function handleRevokeSession(userId: string, ws: WebSocket, payload: { sessionId?: string }): void {
   const targetId = payload?.sessionId || userId;
-  if (targetId === userId) {
-    send(ws, { type: 'error', payload: { code: 'CANNOT_REVOKE_SELF', message: 'Cannot revoke your own session' }, timestamp: Date.now() });
+  if (targetId !== userId) {
+    send(ws, { type: 'error', payload: { code: 'FORBIDDEN', message: 'Can only revoke your own sessions' }, timestamp: Date.now() });
     return;
   }
   const target = clients.get(targetId);

@@ -9,6 +9,10 @@ export async function initSessionManager(password: string): Promise<void> {
   await sessionManager.init(password);
 }
 
+export async function initPreKeyManager(password: string): Promise<void> {
+  await preKeyManager.init(password);
+}
+
 export function initializeSignal(): void {
   preKeyManager.initialize();
 }

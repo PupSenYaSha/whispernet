@@ -56,6 +56,15 @@ export function createApp(clientDir?: string) {
     reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     const host = req.headers.host || 'localhost';
     reply.header('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://img.n1ko.dev; connect-src 'self' wss://${host}; font-src 'self'`);
+    const origin = req.headers.origin;
+    if (origin) {
+      const allowedHost = new URL(origin).host;
+      if (allowedHost === host) {
+        reply.header('Access-Control-Allow-Origin', origin);
+        reply.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        reply.header('Access-Control-Allow-Headers', 'Content-Type');
+      }
+    }
   });
 
   app.register(fastifyWebsocket);

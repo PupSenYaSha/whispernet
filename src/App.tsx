@@ -10,6 +10,7 @@ declare const __APP_VERSION__: string;
 import {
   initializeSignal,
   initSessionManager,
+  initPreKeyManager,
   getPreKeyBundleForServer,
   createSessionWithRemote,
   createResponderSession,
@@ -167,7 +168,7 @@ interface ConnectionContextType {
   updateSettings: (settings: Partial<AppSettings>) => void;
   getMyPublicKey: () => JsonWebKey | null;
   getPublicKey: (userId: string) => JsonWebKey | null;
-  sessions: { id: string; ip: string; lastActive: number; current: boolean }[];
+  sessions: { id: string; lastActive: number; current: boolean }[];
   requestSessions: () => void;
   revokeSession: (sessionId: string) => void;
   showImportModal: (data: any, mode: 'setup' | 'settings') => void;
@@ -426,7 +427,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const signalInitializedRef = useRef(false);
   const preKeyBundlesRef = useRef<Record<string, any>>({});
   const pendingX3dhRef = useRef<Record<string, { x3dhMessage: any; ratchetPublicKey: Uint8Array }>>({});
-  const [sessions, setSessions] = useState<{ id: string; ip: string; lastActive: number; current: boolean }[]>([]);
+  const [sessions, setSessions] = useState<{ id: string; lastActive: number; current: boolean }[]>([]);
   const [importModal, setImportModal] = useState<{ data: any; mode: 'setup' | 'settings' } | null>(null);
 
   useEffect(() => {
@@ -582,6 +583,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
 
             initializeSignal();
             await initSessionManager(auth.password);
+            await initPreKeyManager(auth.password);
             signalInitializedRef.current = true;
             const preKeyBundle = getPreKeyBundleForServer();
 
@@ -625,6 +627,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
 
             initializeSignal();
             await initSessionManager(auth.password);
+            await initPreKeyManager(auth.password);
             signalInitializedRef.current = true;
             const preKeyBundle = getPreKeyBundleForServer();
 
@@ -1801,8 +1804,9 @@ function PasswordModal({ title, onConfirm, onCancel }: {
 }
 
 function SettingsPanel({ onClose, closing }: { onClose: () => void; closing: boolean }) {
-  const { state, updateSettings, logout, getMyPublicKey, getPublicKey, sessions, requestSessions, revokeSession, showImportModal, t } = useConnection();
+  const { state, updateSettings, logout, getMyPublicKey, getPublicKey, sessions, requestSessions, showImportModal, t } = useConnection();
   const [confirmAction, setConfirmAction] = useState<'logout' | 'clearData' | null>(null);
+  const [exportModal, setExportModal] = useState(false);
 
   useEffect(() => {
     document.body.style.overflow = 'hidden';
@@ -2033,24 +2037,7 @@ function SettingsPanel({ onClose, closing }: { onClose: () => void; closing: boo
               <SafetyNumberButton />
             </Option>
             <Option label={t('export_keys')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>}>
-              <button onClick={async () => {
-                try {
-                  const nick = state.nickname.toLowerCase();
-                  const savedKey = localStorage.getItem(`wn_pk_${nick}`);
-                  const savedPubKey = localStorage.getItem(`wn_pub_${nick}`);
-                  if (!savedKey || !savedPubKey) return;
-                  const parsed = JSON.parse(savedKey);
-                  let bundle: EncryptedKeyBundle;
-                  if (isEncryptedBundle(parsed)) {
-                    bundle = parsed;
-                  } else {
-                    bundle = await encryptPrivateKey(parsed, '');
-                    bundle.publicKey = JSON.parse(savedPubKey);
-                  }
-                  const backup = createBackup(state.nickname, bundle.publicKey, bundle);
-                  downloadBackup(backup);
-                } catch {}
-              }} className="text-[13px] text-accent-primary hover:underline">{t('export_keys')}</button>
+              <button onClick={() => setExportModal(true)} className="text-[13px] text-accent-primary hover:underline">{t('export_keys')}</button>
             </Option>
             <Option label={t('import_keys')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>}>
               <input type="file" accept=".json" className="hidden" id="import-keys-input-mobile" onChange={async (e) => {
@@ -2082,12 +2069,9 @@ function SettingsPanel({ onClose, closing }: { onClose: () => void; closing: boo
                   {sessions.map((s) => (
                     <div key={s.id} className="flex items-center justify-between py-2 px-3 rounded-xl bg-bg-tertiary">
                       <div>
-                        <span className="text-[13px] text-fg-primary">{s.current ? `${t('sessions')} (you)` : s.ip}</span>
+                        <span className="text-[13px] text-fg-primary">{t('sessions')} (you)</span>
                         <span className="text-[11px] text-fg-muted block">{new Date(s.lastActive).toLocaleTimeString()}</span>
                       </div>
-                      {!s.current && (
-                        <button onClick={() => revokeSession(s.id)} className="text-[12px] text-red-400 hover:underline">{t('revoke')}</button>
-                      )}
                     </div>
                   ))}
                 </div>
@@ -2138,14 +2122,36 @@ function SettingsPanel({ onClose, closing }: { onClose: () => void; closing: boo
           onConfirm={() => { (() => { const keys = Object.keys(localStorage).filter(k => k.startsWith('wn_')); keys.forEach(k => localStorage.removeItem(k)); })(); window.location.reload(); }}
           onCancel={() => setConfirmAction(null)}
         />
-      )}
+    )}
+    {exportModal && (
+      <PasswordModal title={t('enter_backup_password')} onCancel={() => setExportModal(false)} onConfirm={async (pass) => {
+        try {
+          const nick = state.nickname.toLowerCase();
+          const savedKey = localStorage.getItem(`wn_pk_${nick}`);
+          const savedPubKey = localStorage.getItem(`wn_pub_${nick}`);
+          if (!savedKey || !savedPubKey) return;
+          const parsed = JSON.parse(savedKey);
+          let bundle: EncryptedKeyBundle;
+          if (isEncryptedBundle(parsed)) {
+            bundle = parsed;
+          } else {
+            bundle = await encryptPrivateKey(parsed, pass);
+            bundle.publicKey = JSON.parse(savedPubKey);
+          }
+          const backup = createBackup(state.nickname, bundle.publicKey, bundle);
+          downloadBackup(backup);
+        } catch {}
+        setExportModal(false);
+      }} />
+    )}
     </>
   );
 }
 
 function SettingsPanelInline() {
-  const { state, updateSettings, logout, getMyPublicKey, getPublicKey, sessions, requestSessions, revokeSession, showImportModal, t } = useConnection();
+  const { state, updateSettings, logout, getMyPublicKey, getPublicKey, sessions, requestSessions, showImportModal, t } = useConnection();
   const [confirmAction, setConfirmAction] = useState<'logout' | 'clearData' | null>(null);
+  const [exportModal, setExportModal] = useState(false);
 
   const Toggle = ({ checked, onChange }: { checked: boolean; onChange: (v: boolean) => void }) => (
     <button
@@ -2363,24 +2369,7 @@ function SettingsPanelInline() {
             <SafetyNumberButton />
           </Option>
           <Option label={t('export_keys')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>}>
-            <button onClick={async () => {
-              try {
-                const nick = state.nickname.toLowerCase();
-                const savedKey = localStorage.getItem(`wn_pk_${nick}`);
-                const savedPubKey = localStorage.getItem(`wn_pub_${nick}`);
-                if (!savedKey || !savedPubKey) return;
-                const parsed = JSON.parse(savedKey);
-                let bundle: EncryptedKeyBundle;
-                if (isEncryptedBundle(parsed)) {
-                  bundle = parsed;
-                } else {
-                  bundle = await encryptPrivateKey(parsed, '');
-                  bundle.publicKey = JSON.parse(savedPubKey);
-                }
-                const backup = createBackup(state.nickname, bundle.publicKey, bundle);
-                downloadBackup(backup);
-              } catch {}
-            }} className="text-[13px] text-accent-primary hover:underline">{t('export_keys')}</button>
+            <button onClick={() => setExportModal(true)} className="text-[13px] text-accent-primary hover:underline">{t('export_keys')}</button>
           </Option>
           <Option label={t('import_keys')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>}>
             <input type="file" accept=".json" className="hidden" id="import-keys-input" onChange={async (e) => {
@@ -2412,12 +2401,9 @@ function SettingsPanelInline() {
                 {sessions.map((s) => (
                   <div key={s.id} className="flex items-center justify-between py-2 px-3 rounded-xl bg-bg-tertiary">
                     <div>
-                      <span className="text-[13px] text-fg-primary">{s.current ? `${t('sessions')} (you)` : s.ip}</span>
+                      <span className="text-[13px] text-fg-primary">{t('sessions')} (you)</span>
                       <span className="text-[11px] text-fg-muted block">{new Date(s.lastActive).toLocaleTimeString()}</span>
                     </div>
-                    {!s.current && (
-                      <button onClick={() => revokeSession(s.id)} className="text-[12px] text-red-400 hover:underline">{t('revoke')}</button>
-                    )}
                   </div>
                 ))}
               </div>
@@ -2467,6 +2453,27 @@ function SettingsPanelInline() {
           onConfirm={() => { (() => { const keys = Object.keys(localStorage).filter(k => k.startsWith('wn_')); keys.forEach(k => localStorage.removeItem(k)); })(); window.location.reload(); }}
           onCancel={() => setConfirmAction(null)}
         />
+      )}
+      {exportModal && (
+        <PasswordModal title={t('enter_backup_password')} onCancel={() => setExportModal(false)} onConfirm={async (pass) => {
+          try {
+            const nick = state.nickname.toLowerCase();
+            const savedKey = localStorage.getItem(`wn_pk_${nick}`);
+            const savedPubKey = localStorage.getItem(`wn_pub_${nick}`);
+            if (!savedKey || !savedPubKey) return;
+            const parsed = JSON.parse(savedKey);
+            let bundle: EncryptedKeyBundle;
+            if (isEncryptedBundle(parsed)) {
+              bundle = parsed;
+            } else {
+              bundle = await encryptPrivateKey(parsed, pass);
+              bundle.publicKey = JSON.parse(savedPubKey);
+            }
+            const backup = createBackup(state.nickname, bundle.publicKey, bundle);
+            downloadBackup(backup);
+          } catch {}
+          setExportModal(false);
+        }} />
       )}
     </div>
   );
