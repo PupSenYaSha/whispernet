@@ -84,6 +84,8 @@ export class PreKeyManager {
             privateKey: new Uint8Array(parsed.privateKey),
             publicKey: new Uint8Array(parsed.publicKey),
             registrationId: parsed.registrationId,
+            ed25519PublicKey: parsed.ed25519PublicKey ? new Uint8Array(parsed.ed25519PublicKey) : new Uint8Array(0),
+            ed25519PrivateKey: parsed.ed25519PrivateKey ? new Uint8Array(parsed.ed25519PrivateKey) : new Uint8Array(0),
           };
         }
       } else if (ikData) {
@@ -92,6 +94,8 @@ export class PreKeyManager {
           privateKey: new Uint8Array(parsed.privateKey),
           publicKey: new Uint8Array(parsed.publicKey),
           registrationId: parsed.registrationId,
+          ed25519PublicKey: parsed.ed25519PublicKey ? new Uint8Array(parsed.ed25519PublicKey) : new Uint8Array(0),
+          ed25519PrivateKey: parsed.ed25519PrivateKey ? new Uint8Array(parsed.ed25519PrivateKey) : new Uint8Array(0),
         };
       }
 
@@ -162,6 +166,8 @@ export class PreKeyManager {
         privateKey: Array.from(this.identityKeyPair.privateKey),
         publicKey: Array.from(this.identityKeyPair.publicKey),
         registrationId: this.identityKeyPair.registrationId,
+        ed25519PublicKey: Array.from(this.identityKeyPair.ed25519PublicKey),
+        ed25519PrivateKey: Array.from(this.identityKeyPair.ed25519PrivateKey),
       }) : null;
 
       const spkData = this.signedPreKey ? JSON.stringify({
@@ -199,7 +205,7 @@ export class PreKeyManager {
 
     this.identityKeyPair = generateIdentityKeyPair();
     this.signedPreKey = generateSignedPreKeyRecord(
-      this.identityKeyPair.privateKey,
+      this.identityKeyPair.ed25519PrivateKey,
       1
     );
     this.oneTimePreKeys = generateOneTimePreKeys(1, 100);
@@ -227,6 +233,7 @@ export class PreKeyManager {
     const bundle: PreKeyBundle = {
       registrationId: this.identityKeyPair.registrationId,
       identityKey: this.identityKeyPair.publicKey,
+      ed25519PublicKey: this.identityKeyPair.ed25519PublicKey,
       signedPreKey: {
         keyId: this.signedPreKey.keyId,
         publicKey: this.signedPreKey.keyPair.publicKey,
@@ -248,6 +255,7 @@ export class PreKeyManager {
 
   getPublicKeyForServer(): {
     identityKey: string;
+    ed25519PublicKey: string;
     signedPreKey: { keyId: number; publicKey: string; signature: string };
     oneTimePreKey?: { keyId: number; publicKey: string };
   } | null {
@@ -255,6 +263,7 @@ export class PreKeyManager {
 
     const result: any = {
       identityKey: arrayToBase64(this.identityKeyPair.publicKey),
+      ed25519PublicKey: arrayToBase64(this.identityKeyPair.ed25519PublicKey),
       signedPreKey: {
         keyId: this.signedPreKey.keyId,
         publicKey: arrayToBase64(this.signedPreKey.keyPair.publicKey),

@@ -25,7 +25,7 @@ export function x3dhInit(
   const valid = ed25519.verify(
     remoteBundle.signedPreKey.signature,
     remoteBundle.signedPreKey.publicKey,
-    remoteBundle.identityKey
+    remoteBundle.ed25519PublicKey
   );
   if (!valid) throw new Error('Invalid signed pre-key signature');
 

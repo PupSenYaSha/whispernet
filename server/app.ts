@@ -70,7 +70,7 @@ export function createApp(clientDir?: string) {
   app.register(fastifyWebsocket);
   app.register(fastifyMultipart, { limits: { fileSize: MAX_UPLOAD_SIZE } });
 
-  const resolvedClientDir = clientDir || path.join(__dirname, '../dist/client');
+  const resolvedClientDir = clientDir || path.join(__dirname, '../client');
   app.register(fastifyStatic, {
     root: resolvedClientDir,
     prefix: '/',

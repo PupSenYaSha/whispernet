@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { createContext, useContext, useReducer, ReactNode } from 'react';
-import type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor } from './types';
+import { useReducer, ReactNode } from 'react';
+import type { User, Message, AppSettings, AccentColor } from './types';
 import { generateKeyPair, encryptMessage, decryptMessage, generateSafetyNumber } from './crypto';
 import { encryptPrivateKey, decryptPrivateKey, isEncryptedBundle, createBackup, downloadBackup, isKeyBackup, type EncryptedKeyBundle } from './crypto-keys';
 import { encryptPassword, decryptPassword } from './device-crypto';
 import { uploadImage } from './upload';
+import { ConnectionContext, useConnection, type ConnectionState, type ConnectionAction } from './context';
+import { translations, cn, formatTime, getAvatarText, loadSettings, defaultSettings } from './utils';
 
 declare const __APP_VERSION__: string;
 import {
@@ -26,58 +28,6 @@ const WS_URL = import.meta.env.VITE_WS_URL || (() => {
   return `${proto}//${location.host}/ws`;
 })();
 
-interface ConnectionState {
-  status: ConnectionStatus;
-  messages: Message[];
-  users: User[];
-  nickname: string;
-  userId: string | null;
-  settings: AppSettings;
-  ws: WebSocket | null;
-  reconnectAttempts: number;
-  authError: string | null;
-  e2eeReady: boolean;
-  needsKeySetup: boolean;
-  activeChannel: ActiveChannel;
-  contacts: Contact[];
-  dmMessages: Record<string, Message[]>;
-  searchResults: { id: string; nickname: string; online: boolean }[];
-  messageSearchResults: Message[];
-}
-
-type ConnectionAction =
-  | { type: 'SET_STATUS'; status: ConnectionStatus }
-  | { type: 'ADD_MESSAGE'; message: Message }
-  | { type: 'SET_MESSAGES'; messages: Message[] }
-  | { type: 'SET_DM_MESSAGES'; channel: string; messages: Message[] }
-  | { type: 'ADD_DM_MESSAGE'; channel: string; message: Message }
-  | { type: 'SET_USERS'; users: User[] }
-  | { type: 'ADD_USER'; user: User }
-  | { type: 'REMOVE_USER'; userId: string }
-  | { type: 'SET_USER'; userId: string; nickname: string }
-  | { type: 'SET_WS'; ws: WebSocket | null }
-  | { type: 'SET_RECONNECT_ATTEMPTS'; attempts: number }
-  | { type: 'SET_AUTH_ERROR'; error: string | null }
-  | { type: 'UPDATE_SETTINGS'; settings: Partial<AppSettings> }
-  | { type: 'SET_E2EE_READY'; ready: boolean }
-  | { type: 'SET_KEY_SETUP_NEEDED'; needed: boolean }
-  | { type: 'SET_ACTIVE_CHANNEL'; channel: ActiveChannel }
-  | { type: 'SET_CONTACTS'; contacts: Contact[] }
-  | { type: 'SET_SEARCH_RESULTS'; results: { id: string; nickname: string; online: boolean }[] }
-  | { type: 'SET_MESSAGE_SEARCH_RESULTS'; results: Message[] }
-  | { type: 'DELETE_MESSAGE'; messageId: string }
-  | { type: 'RESET' };
-
-const defaultSettings: AppSettings = {
-  theme: 'dark',
-  accentColor: 'purple',
-  language: 'en',
-  notifications: true,
-  soundEnabled: true,
-  fontSize: 'normal',
-  compactMode: false,
-};
-
 const initialState: ConnectionState = {
   status: 'disconnected',
   messages: [],
@@ -96,14 +46,6 @@ const initialState: ConnectionState = {
   searchResults: [],
   messageSearchResults: [],
 };
-
-function loadSettings(): AppSettings {
-  try {
-    const saved = localStorage.getItem('wn_settings');
-    if (saved) return { ...defaultSettings, ...JSON.parse(saved) };
-  } catch {}
-  return defaultSettings;
-}
 
 function connectionReducer(state: ConnectionState, action: ConnectionAction): ConnectionState {
   switch (action.type) {
@@ -162,272 +104,6 @@ function connectionReducer(state: ConnectionState, action: ConnectionAction): Co
       return state;
   }
 }
-
-interface ConnectionContextType {
-  state: ConnectionState;
-  dispatch: React.Dispatch<any>;
-  connect: (nickname: string, password: string, isRegister: boolean) => void;
-  reconnect: () => void;
-  disconnect: () => void;
-  logout: () => void;
-  sendMessage: (text: string) => void;
-  sendDm: (to: string, text: string) => void;
-  sendDmImage: (to: string, file: File) => Promise<void>;
-  sendImage: (file: File) => Promise<void>;
-  openDm: (userId: string) => void;
-  openGeneral: () => void;
-  refreshContacts: () => void;
-  searchUsers: (query: string) => void;
-  searchMessages: (query: string, channel?: string) => void;
-  deleteMessage: (messageId: string) => void;
-  t: (key: string) => string;
-  updateSettings: (settings: Partial<AppSettings>) => void;
-  getMyPublicKey: () => JsonWebKey | null;
-  getPublicKey: (userId: string) => JsonWebKey | null;
-  sessions: { id: string; lastActive: number; current: boolean }[];
-  requestSessions: () => void;
-  revokeSession: (sessionId: string) => void;
-  showImportModal: (data: any, mode: 'setup' | 'settings') => void;
-}
-
-const ConnectionContext = createContext<ConnectionContextType | null>(null);
-
-const translations = {
-  en: {
-    connected: 'Online',
-    connecting: 'Connecting...',
-    disconnected: 'Offline',
-    reconnecting: 'Reconnecting...',
-    status_connected: 'Connected',
-    status_disconnected: 'No connection',
-    server_unreachable: 'Server is unreachable. Check your connection.',
-    retry: 'Retry',
-    status_connecting: 'Connecting...',
-    settings: 'Settings',
-    appearance: 'Appearance',
-    general: 'Global Chat',
-    theme: 'Theme',
-    theme_dark: 'Dark',
-    theme_light: 'Light',
-    language: 'Language',
-    lang_en: 'English',
-    lang_ru: 'Русский',
-    notifications: 'Notifications',
-    enable_notifications: 'Enable notifications',
-    sound: 'Sound',
-    message_sound: 'Message sound',
-    data: 'Data',
-    clear_local_data: 'Clear local data',
-    confirm_clear: 'Clear',
-    confirm_clear_data: 'Clear all local data?',
-    confirm_clear_data_desc: 'All settings and encryption keys will be removed from this browser. This action is irreversible.',
-    cancel: 'Cancel',
-    done: 'Done',
-    copy: 'Copy',
-    login: 'Login',
-    register: 'Register',
-    nickname: 'Nickname',
-    password: 'Password',
-    nickname_placeholder: 'Enter nickname (3-16 chars)',
-    password_create: 'Create password (8-32 chars, letters + numbers)',
-    password_enter: 'Enter password',
-    create_account: 'Create Account',
-    sign_in: 'Sign In',
-    creating_account: 'Creating account...',
-    signing_in: 'Signing in...',
-    nickname_hint: 'Nickname: 3-16 chars, letters/numbers/_- only',
-    type_message: 'Type a message...',
-    not_connected: 'Not connected',
-    send_message: 'Send message',
-    close_settings: 'Close settings',
-    logout: 'Log out',
-    confirm_logout: 'Log out of account?',
-    confirm_logout_desc: 'You will need to sign in again to continue using the messenger.',
-    online_users: 'Online',
-    no_messages: 'No messages yet. Say hello!',
-    no_dm_messages: 'No messages yet. Say hi!',
-    delete: 'Delete',
-    search_messages: 'Search messages',
-    search_messages_hint: 'Search in chat...',
-    font_size: 'Font size',
-    font_small: 'Small',
-    font_normal: 'Normal',
-    font_large: 'Large',
-    compact_mode: 'Compact mode',
-    enable_compact: 'Smaller gaps and padding',
-    about: 'About',
-    version: 'Version',
-    contacts: 'Contacts',
-    chat: 'Chat',
-    back_to_chat: 'Back to chat',
-    dm_with: 'Messages with',
-    no_contacts: 'No conversations yet',
-    start_dm: 'Send a message',
-    search_placeholder: 'Search users...',
-    search_results: 'Results',
-    no_results: 'No users found',
-    chats: 'Chats',
-    global_chat: 'Global Chat',
-    global_chat_desc: 'Public chat for everyone',
-    home: 'Home',
-    about_desc: 'Minimalist messenger with end-to-end encryption. Private, self-hosted, lightweight and fast. Your data stays on your server.',
-    online: 'Online',
-    offline: 'Offline',
-    sec_appearance: 'Appearance',
-    sec_text: 'Text',
-    sec_notifications: 'Notifications',
-    sec_account: 'Account',
-    sec_safety: 'Security',
-    safety_number: 'Safety Number',
-    safety_number_desc: 'Compare this number with your contact to verify identity',
-    safety_yours: 'Your safety number',
-    export_keys: 'Export Keys',
-    export_keys_desc: 'Download encrypted backup of your keys',
-    import_keys: 'Import Keys',
-    import_keys_desc: 'Restore keys from backup file',
-    screenshot_prot: 'Screenshot Protection',
-    screenshot_prot_desc: 'Block screen capture of this app',
-    sessions: 'Active Sessions',
-    sessions_desc: 'Manage connected devices',
-    revoke: 'Revoke',
-    revoke_all: 'Revoke All Others',
-    key_exported: 'Backup downloaded',
-    key_imported: 'Keys restored from backup',
-    key_import_err: 'Invalid backup file or wrong password',
-    session_revoked: 'Session revoked',
-    key_setup_title: 'No Encryption Keys Found',
-    key_setup_desc: 'This device has no encryption keys. Import a backup to access your existing messages, or generate new keys (old messages will be unreadable).',
-    key_setup_new: 'Generate New Keys',
-    key_setup_new_confirm: 'Warning: old encrypted messages will be unreadable. Continue?',
-    enter_backup_password: 'Enter backup password:',
-    accent_color: 'Accent color',
-    accent_purple: 'Purple',
-    accent_blue: 'Blue',
-    accent_green: 'Green',
-    accent_red: 'Red',
-    accent_orange: 'Orange',
-    accent_pink: 'Pink',
-    accent_teal: 'Teal',
-    accent_indigo: 'Indigo',
-  },
-  ru: {
-    connected: 'В сети',
-    connecting: 'Подключение...',
-    disconnected: 'Не в сети',
-    reconnecting: 'Переподключение...',
-    status_connected: 'Подключено',
-    status_disconnected: 'Нет подключения',
-    server_unreachable: 'Сервер недоступен. Проверьте подключение.',
-    retry: 'Повторить',
-    status_connecting: 'Подключение...',
-    settings: 'Настройки',
-    appearance: 'Внешний вид',
-    general: 'Global Chat',
-    theme: 'Theme',
-    theme_dark: 'Тёмная',
-    theme_light: 'Светлая',
-    language: 'Язык',
-    lang_en: 'English',
-    lang_ru: 'Русский',
-    notifications: 'Уведомления',
-    enable_notifications: 'Включить уведомления',
-    sound: 'Звук',
-    message_sound: 'Звук сообщений',
-    data: 'Данные',
-    clear_local_data: 'Очистить локальные данные',
-    confirm_clear: 'Очистить',
-    confirm_clear_data: 'Очистить все локальные данные?',
-    confirm_clear_data_desc: 'Все настройки и ключи шифрования будут удалены. Действие необратимо.',
-    cancel: 'Отмена',
-    done: 'Готово',
-    copy: 'Копировать',
-    login: 'Войти',
-    register: 'Регистрация',
-    nickname: 'Никнейм',
-    password: 'Пароль',
-    nickname_placeholder: 'Введите никнейм (3-16 символов)',
-    password_create: 'Придумайте пароль (8-32 символа, буквы + цифры)',
-    password_enter: 'Введите пароль',
-    create_account: 'Создать аккаунт',
-    sign_in: 'Войти',
-    creating_account: 'Создание аккаунта...',
-    signing_in: 'Вход...',
-    nickname_hint: 'Никнейм: 3-16 символов, только буквы, цифры, _-',
-    type_message: 'Введите сообщение...',
-    not_connected: 'Нет подключения',
-    send_message: 'Отправить сообщение',
-    close_settings: 'Закрыть настройки',
-    logout: 'Выйти',
-    confirm_logout: 'Выйти из аккаунта?',
-    confirm_logout_desc: 'Вам придётся войти снова, чтобы продолжить использование.',
-    online_users: 'В сети',
-    no_messages: 'Пока нет сообщений. Скажите привет!',
-    no_dm_messages: 'Пока нет сообщений. Напишите привет!',
-    delete: 'Удалить',
-    search_messages: 'Поиск сообщений',
-    search_messages_hint: 'Поиск в чате...',
-    font_size: 'Размер шрифта',
-    font_small: 'Маленький',
-    font_normal: 'Обычный',
-    font_large: 'Большой',
-    compact_mode: 'Компактный режим',
-    enable_compact: 'Уменьшить отступы',
-    about: 'О приложении',
-    version: 'Версия',
-    contacts: 'Контакты',
-    chat: 'Чат',
-    back_to_chat: 'Назад к чату',
-    dm_with: 'Переписка с',
-    no_contacts: 'Пока нет контактов',
-    start_dm: 'Написать сообщение',
-    search_placeholder: 'Поиск пользователей...',
-    search_results: 'Результаты',
-    no_results: 'Пользователи не найдены',
-    chats: 'Чаты',
-    global_chat: 'Глобальный чат',
-    global_chat_desc: 'Публичный чат для всех',
-    home: 'Главная',
-    about_desc: 'Минималистичный мессенджер с сквозным шифрованием. Приватный, сам-hosted, лёгкий и быстрый. Ваши данные остаются на вашем сервере.',
-    online: 'В сети',
-    offline: 'Не в сети',
-    sec_appearance: 'Внешний вид',
-    sec_text: 'Текст',
-    sec_notifications: 'Уведомления',
-    sec_account: 'Аккаунт',
-    sec_safety: 'Безопасность',
-    safety_number: 'Номер безопасности',
-    safety_number_desc: 'Сравните этот номер с контактом для подтверждения личности',
-    safety_yours: 'Ваш номер безопасности',
-    export_keys: 'Экспорт ключей',
-    export_keys_desc: 'Скачать зашифрованный бэкап ключей',
-    import_keys: 'Импорт ключей',
-    import_keys_desc: 'Восстановить ключи из бэкапа',
-    screenshot_prot: 'Защита от скриншотов',
-    screenshot_prot_desc: 'Блокировать захват экрана',
-    sessions: 'Активные сессии',
-    sessions_desc: 'Управление подключёнными устройствами',
-    revoke: 'Отозвать',
-    revoke_all: 'Отозвать все остальные',
-    key_exported: 'Бэкап скачан',
-    key_imported: 'Ключи восстановлены из бэкапа',
-    key_import_err: 'Неверный файл бэкапа или пароль',
-    session_revoked: 'Сессия отозвана',
-    key_setup_title: 'Ключи шифрования не найдены',
-    key_setup_desc: 'На этом устройстве нет ключей шифрования. Импортируйте бэкап для доступа к сообщениям, или сгенерируйте новые ключи (старые сообщения будут недоступны).',
-    key_setup_new: 'Сгенерировать новые ключи',
-    key_setup_new_confirm: 'Внимание: старые зашифрованные сообщения будут недоступны. Продолжить?',
-    enter_backup_password: 'Введите пароль бэкапа:',
-    accent_color: 'Цвет акцента',
-    accent_purple: 'Фиолетовый',
-    accent_blue: 'Синий',
-    accent_green: 'Зелёный',
-    accent_red: 'Красный',
-    accent_orange: 'Оранжевый',
-    accent_pink: 'Розовый',
-    accent_teal: 'Бирюзовый',
-    accent_indigo: 'Индиго',
-  },
-};
 
 function ConnectionProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(connectionReducer, initialState, (init) => ({
@@ -1234,29 +910,6 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   );
 }
 
-function useConnection() {
-  const ctx = useContext(ConnectionContext);
-  if (!ctx) throw new Error('useConnection must be used within ConnectionProvider');
-  return ctx;
-}
-
-function cn(...classes: (string | boolean | undefined | null)[]): string {
-  return classes.filter(Boolean).join(' ');
-}
-
-function formatTime(timestamp: number): string {
-  const date = new Date(timestamp);
-  const now = new Date();
-  if (date.toDateString() === now.toDateString()) {
-    return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-  if (date.getFullYear() === now.getFullYear()) {
-    return date.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
-           ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  }
-  return date.toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' });
-}
-
 function MessageItem({ message, showAvatar = true }: { message: Message; showAvatar?: boolean }) {
   const { state, deleteMessage: deleteMsg, t } = useConnection();
   const isSystem = message.senderId === 'system';
@@ -1521,14 +1174,6 @@ function MessageInput() {
       </div>
     </form>
   );
-}
-
-function getAvatarText(nickname: string): string {
-  const words = nickname.split(/[_\-\s]+/).filter(Boolean);
-  if (words.length >= 2) {
-    return (words[0][0] + words[1][0]).toUpperCase();
-  }
-  return nickname.charAt(0).toUpperCase();
 }
 
 function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick: () => void; isMobile?: boolean; onBack?: () => void }) {

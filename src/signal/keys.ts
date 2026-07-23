@@ -14,7 +14,13 @@ export function generateKeyPair(): KeyPair {
 export function generateIdentityKeyPair(): IdentityKeyPair {
   const kp = generateKeyPair();
   const registrationId = randomUint16();
-  return { ...kp, registrationId };
+  const ed25519KP = ed25519.keygen();
+  return {
+    ...kp,
+    registrationId,
+    ed25519PublicKey: ed25519KP.publicKey,
+    ed25519PrivateKey: ed25519KP.secretKey,
+  };
 }
 
 export function generatePreKeyRecord(startId: number): PreKeyRecord {
@@ -25,11 +31,11 @@ export function generatePreKeyRecord(startId: number): PreKeyRecord {
 }
 
 export function generateSignedPreKeyRecord(
-  identityKey: Uint8Array,
+  ed25519PrivateKey: Uint8Array,
   keyId: number
 ): SignedPreKeyRecord {
   const keyPair = generateKeyPair();
-  const signature = ed25519.sign(keyPair.publicKey, identityKey);
+  const signature = ed25519.sign(keyPair.publicKey, ed25519PrivateKey);
   return {
     keyId,
     keyPair,

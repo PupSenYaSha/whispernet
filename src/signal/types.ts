@@ -5,11 +5,14 @@ export interface KeyPair {
 
 export interface IdentityKeyPair extends KeyPair {
   registrationId: number;
+  ed25519PublicKey: Uint8Array;
+  ed25519PrivateKey: Uint8Array;
 }
 
 export interface PreKeyBundle {
   registrationId: number;
   identityKey: Uint8Array;
+  ed25519PublicKey: Uint8Array;
   signedPreKey: {
     keyId: number;
     publicKey: Uint8Array;

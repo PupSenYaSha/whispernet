@@ -2,11 +2,11 @@ import type { Session, KeyPair, PreKeyBundle, SignalPreKeyMessage } from './type
 import { generateKeyPair } from './keys';
 import { x3dhInit, x3dhRespond } from './x3dh';
 import {
-  initializeRatchetAsReceiver,
   advanceSendingChain,
   advanceReceivingChain,
   ratchetStep,
   createRatchetState,
+  dhRatchet,
   MAX_SESSIONS,
 } from './ratchet';
 import { hkdf } from '@noble/hashes/hkdf.js';
@@ -172,7 +172,21 @@ export class SessionManager {
     const sessionId = this.getSessionId(myId, remoteId);
     const sharedSecret = x3dhRespond(identityKey, signedPreKey, oneTimePreKey, x3dhMessage);
 
-    const { state } = initializeRatchetAsReceiver(sharedSecret, aliceRatchetPublicKey);
+    const derived = hkdf(sha256, sharedSecret, new Uint8Array(32), INFO_ROOT, 64);
+    const rootKey = derived.slice(0, 32);
+    const chainKey = derived.slice(32, 64);
+
+    const ratchetKeyPair = generateKeyPair();
+    const { rootKey: newRootKey, chainKey: sendingChainKey } = dhRatchet(rootKey, ratchetKeyPair.privateKey, aliceRatchetPublicKey);
+
+    const state = createRatchetState();
+    state.rootKey = newRootKey;
+    state.receivingChainKey = chainKey;
+    state.receivingRatchetPublicKey = aliceRatchetPublicKey;
+    state.receivingMessageNumber = 0;
+    state.sendingChainKey = sendingChainKey;
+    state.sendingRatchetKey = ratchetKeyPair;
+    state.currentRatchetPublicKey = ratchetKeyPair.publicKey;
 
     const session: Session = { sessionId, state, version: 3 };
     this.evictOldestSession();
@@ -210,7 +224,7 @@ export class SessionManager {
       data
     );
 
-    const result = new Uint8Array(4 + iv.length + encrypted.byteLength);
+    const result = new Uint8Array(1 + iv.length + encrypted.byteLength);
     result[0] = iv.length;
     result.set(iv, 1);
     result.set(new Uint8Array(encrypted), 1 + iv.length);

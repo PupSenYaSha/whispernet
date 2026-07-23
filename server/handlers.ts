@@ -119,6 +119,7 @@ function isValidPreKeyBundle(bundle: any): boolean {
   if (str.length > MAX_BUNDLE_SIZE) return false;
   if ('__proto__' in bundle || 'constructor' in bundle || 'prototype' in bundle) return false;
   if (typeof bundle.identityKey !== 'string') return false;
+  if (typeof bundle.ed25519PublicKey !== 'string') return false;
   if (typeof bundle.signedPreKey !== 'object' || bundle.signedPreKey === null) return false;
   if (typeof bundle.signedPreKey.publicKey !== 'string') return false;
   if (!Array.isArray(bundle.signedPreKey.signature)) return false;

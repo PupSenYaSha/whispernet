@@ -50,20 +50,21 @@ export function initializeRatchetAsSender(
 
 export function initializeRatchetAsReceiver(
   sharedSecret: Uint8Array,
-  remoteRatchetPublicKey: Uint8Array
+  remoteRatchetPublicKey: Uint8Array,
+  ratchetKeyPair?: KeyPair
 ): { state: SessionState; chainKey: Uint8Array } {
-  const ratchetKeyPair = generateRatchetKeyPair();
+  const kp = ratchetKeyPair || generateRatchetKeyPair();
 
   const { rootKey, chainKey } = dhRatchet(
     sharedSecret,
-    ratchetKeyPair.privateKey,
+    kp.privateKey,
     remoteRatchetPublicKey
   );
 
   const state = createRatchetState();
   state.rootKey = rootKey;
-  state.currentRatchetPublicKey = ratchetKeyPair.publicKey;
-  state.sendingRatchetKey = ratchetKeyPair;
+  state.currentRatchetPublicKey = kp.publicKey;
+  state.sendingRatchetKey = kp;
   state.receivingRatchetPublicKey = remoteRatchetPublicKey;
   state.receivingChainKey = chainKey;
   state.receivingMessageNumber = 0;
@@ -144,7 +145,7 @@ export function ratchetStep(
   return chainKey;
 }
 
-function dhRatchet(
+export function dhRatchet(
   rootKey: Uint8Array,
   privateKey: Uint8Array,
   remotePublicKey: Uint8Array
