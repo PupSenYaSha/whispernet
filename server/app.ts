@@ -55,7 +55,7 @@ export function createApp(clientDir?: string) {
     reply.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
     reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     const host = req.headers.host || 'localhost';
-    reply.header('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: https://img.n1ko.dev; connect-src 'self' wss://${host}; font-src 'self'`);
+    reply.header('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://img.n1ko.dev; connect-src 'self' wss://${host} ws://${host}; font-src 'self' https://fonts.gstatic.com`);
     const origin = req.headers.origin;
     if (origin) {
       const allowedHost = new URL(origin).host;
@@ -74,7 +74,7 @@ export function createApp(clientDir?: string) {
   app.register(fastifyStatic, {
     root: resolvedClientDir,
     prefix: '/',
-    wildcard: false,
+    wildcard: true,
   });
 
   app.get('/health', async () => ({ status: 'ok' }));
