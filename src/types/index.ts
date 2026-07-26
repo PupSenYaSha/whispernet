@@ -12,6 +12,13 @@ export interface Message {
   isOwn: boolean;
   channel?: string;
   fileKey?: Record<string, string>;
+  reactions?: Record<string, string[]>;
+  quotedMessageId?: string;
+  quotedMessageText?: string;
+  quotedMessageSender?: string;
+  editedAt?: number;
+  sealedSender?: boolean;
+  expiresAt?: number;
 }
 
 export interface Contact {

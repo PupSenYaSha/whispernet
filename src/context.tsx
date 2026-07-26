@@ -43,6 +43,9 @@ export type ConnectionAction =
   | { type: 'SET_SEARCH_RESULTS'; results: { id: string; nickname: string; online: boolean }[] }
   | { type: 'SET_MESSAGE_SEARCH_RESULTS'; results: Message[] }
   | { type: 'DELETE_MESSAGE'; messageId: string }
+  | { type: 'ADD_REACTION'; messageId: string; emoji: string; userId: string }
+  | { type: 'REMOVE_REACTION'; messageId: string; emoji: string; userId: string }
+  | { type: 'UPDATE_MESSAGE'; messageId: string; text: string; editedAt: number }
   | { type: 'RESET' };
 
 export interface ConnectionContextType {
@@ -62,6 +65,9 @@ export interface ConnectionContextType {
   searchUsers: (query: string) => void;
   searchMessages: (query: string, channel?: string) => void;
   deleteMessage: (messageId: string) => void;
+  addReaction: (messageId: string, emoji: string) => void;
+  removeReaction: (messageId: string, emoji: string) => void;
+  editMessage: (messageId: string, text: string) => void;
   t: (key: string) => string;
   updateSettings: (settings: Partial<AppSettings>) => void;
   getMyPublicKey: () => JsonWebKey | null;

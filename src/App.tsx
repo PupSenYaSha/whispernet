@@ -106,6 +106,30 @@ function connectionReducer(state: ConnectionState, action: ConnectionAction): Co
           Object.entries(state.dmMessages).map(([ch, msgs]) => [ch, msgs.filter(m => m.id !== action.messageId)])
         ),
       };
+    case 'UPDATE_MESSAGE':
+      return {
+        ...state,
+        messages: state.messages.map(m => m.id === action.messageId ? { ...m, text: action.text, editedAt: action.editedAt } : m),
+        dmMessages: Object.fromEntries(
+          Object.entries(state.dmMessages).map(([ch, msgs]) => [ch, msgs.map(m => m.id === action.messageId ? { ...m, text: action.text, editedAt: action.editedAt } : m)])
+        ),
+      };
+    case 'ADD_REACTION':
+      return {
+        ...state,
+        messages: state.messages.map(m => m.id === action.messageId ? { ...m, reactions: { ...m.reactions, [action.emoji]: [...(m.reactions?.[action.emoji] || []), action.userId] } } : m),
+        dmMessages: Object.fromEntries(
+          Object.entries(state.dmMessages).map(([ch, msgs]) => [ch, msgs.map(m => m.id === action.messageId ? { ...m, reactions: { ...m.reactions, [action.emoji]: [...(m.reactions?.[action.emoji] || []), action.userId] } } : m)])
+        ),
+      };
+    case 'REMOVE_REACTION':
+      return {
+        ...state,
+        messages: state.messages.map(m => m.id === action.messageId ? { ...m, reactions: { ...m.reactions, [action.emoji]: (m.reactions?.[action.emoji] || []).filter(u => u !== action.userId) } } : m),
+        dmMessages: Object.fromEntries(
+          Object.entries(state.dmMessages).map(([ch, msgs]) => [ch, msgs.map(m => m.id === action.messageId ? { ...m, reactions: { ...m.reactions, [action.emoji]: (m.reactions?.[action.emoji] || []).filter(u => u !== action.userId) } } : m)])
+        ),
+      };
     default:
       return state;
   }
@@ -239,6 +263,18 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
 
   const deleteMessage = useCallback((messageId: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'delete_message', payload: { messageId } }));
+  }, []);
+
+  const addReaction = useCallback((messageId: string, emoji: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'add_reaction', payload: { messageId, emoji } }));
+  }, []);
+
+  const removeReaction = useCallback((messageId: string, emoji: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'remove_reaction', payload: { messageId, emoji } }));
+  }, []);
+
+  const editMessage = useCallback((messageId: string, text: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'edit_message', payload: { messageId, text } }));
   }, []);
 
   const connect = useCallback((nickname: string, password: string, isRegister: boolean) => {
@@ -427,6 +463,15 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               break;
             case 'message_deleted':
               dispatch({ type: 'DELETE_MESSAGE', messageId: message.payload.messageId });
+              break;
+            case 'reaction_update': {
+              const { messageId, emoji, userId, action } = message.payload;
+              if (action === 'add') dispatch({ type: 'ADD_REACTION', messageId, emoji, userId });
+              else if (action === 'remove') dispatch({ type: 'REMOVE_REACTION', messageId, emoji, userId });
+              break;
+            }
+            case 'message_edited':
+              dispatch({ type: 'UPDATE_MESSAGE', messageId: message.payload.messageId, text: message.payload.text, editedAt: message.payload.editedAt });
               break;
             case 'sessions_list':
               setSessions(message.payload.sessions);
@@ -653,6 +698,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         sendMessage, sendDm, sendDmImage, sendImage,
         openDm, openGeneral, refreshContacts,
         searchUsers, searchMessages, deleteMessage,
+        addReaction, removeReaction, editMessage,
         t, updateSettings, getMyPublicKey, getPublicKey,
         sessions, requestSessions, revokeSession,
         showImportModal: (data: any, mode: 'setup' | 'settings') => setImportModal({ data, mode }),
