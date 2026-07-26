@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { getUserByNickname, saveMessage, getRecentMessages, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, searchMessages, deleteMessage } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { appendFileSync } from 'fs';
@@ -234,6 +234,9 @@ export function handleConnection(ws: WebSocket): void {
       case 'delete_message':
         if (userId) await handleDeleteMessage(userId, ws, message.payload);
         break;
+      case 'edit_message':
+        if (userId) await handleEditMessage(userId, ws, message.payload);
+        break;
       case 'auth_update_key':
         if (userId) await handleAuthUpdateKey(userId, ws, message.payload);
         break;
@@ -453,7 +456,7 @@ export function handleConnection(ws: WebSocket): void {
     send(ws, { type: 'chat_message', payload: { ...messagePayload, isOwn: true, channel: 'general' }, timestamp });
   }
 
-  async function handleDmSend(senderId: string, ws: WebSocket, payload: { to: string; text: string; encrypted?: any; signalEncrypted?: any; fileKey?: Record<string, string>; sealed?: string }): Promise<void> {
+   async function handleDmSend(senderId: string, ws: WebSocket, payload: { to: string; text: string; encrypted?: any; signalEncrypted?: any; fileKey?: Record<string, string>; sealed?: string; reaction?: { messageId: string; userId: string; emoji: string } }): Promise<void> {
     if (!checkMessageRateLimit(ip)) {
       send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down.' }, timestamp: Date.now() });
       return;
@@ -481,6 +484,15 @@ export function handleConnection(ws: WebSocket): void {
     const isSealed = !!payload?.sealed;
     const isEncrypted = !!payload?.encrypted;
     const isSignalEncrypted = !!payload?.signalEncrypted;
+
+    if (payload?.reaction && typeof payload.reaction === 'object') {
+      const { messageId, userId, emoji } = payload.reaction;
+      await addReaction(messageId, userId, emoji);
+      const reactions = await getReactionsForMessage(messageId);
+      broadcast({ type: 'reaction_update', payload: { messageId, reactions, userId }, timestamp: Date.now() }, userId);
+      if (recipient) send(recipient.ws, { type: 'reaction_update', payload: { messageId, reactions, userId }, timestamp: Date.now() });
+      return;
+    }
 
     if (isSignalEncrypted) {
       await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey);
@@ -591,6 +603,26 @@ export function handleConnection(ws: WebSocket): void {
     if (deleted) {
       send(ws, { type: 'message_deleted', payload: { messageId: payload.messageId }, timestamp: Date.now() });
       broadcast({ type: 'message_deleted', payload: { messageId: payload.messageId }, timestamp: Date.now() }, userId);
+    } else {
+      send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
+    }
+  }
+
+  async function handleEditMessage(userId: string, ws: WebSocket, payload: { messageId: string; text: string }): Promise<void> {
+    if (!payload?.messageId || !payload?.text || typeof payload.text !== 'string') {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'messageId and text required' }, timestamp: Date.now() });
+      return;
+    }
+    const text = sanitize(payload.text);
+    if (!text || text.length > 4096) {
+      send(ws, { type: 'error', payload: { code: 'MESSAGE_TOO_LONG', message: 'Message too long (max 4096 chars)' }, timestamp: Date.now() });
+      return;
+    }
+    const updated = await updateMessageText(payload.messageId, userId, text);
+    if (updated) {
+      const timestamp = Date.now();
+      send(ws, { type: 'message_edited', payload: { messageId: payload.messageId, text, editedAt: timestamp }, timestamp });
+      broadcast({ type: 'message_edited', payload: { messageId: payload.messageId, text, editedAt: timestamp }, timestamp: Date.now() }, userId);
     } else {
       send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
     }

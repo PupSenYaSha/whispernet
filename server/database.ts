@@ -49,6 +49,8 @@ interface StoredMessage {
   encrypted?: any;
   fileKey?: any;
   sealed?: string;
+  quotedMessageId?: string;
+  editedAt?: number;
 }
 
 function isValidUser(u: any): u is StoredUser {
@@ -66,6 +68,21 @@ function isValidMessage(m: any): m is StoredMessage {
     && typeof m.senderNickname === 'string'
     && typeof m.text === 'string'
     && typeof m.timestamp === 'number' && m.timestamp > 0;
+}
+
+interface StoredReaction {
+  messageId: string;
+  userId: string;
+  emoji: string;
+  timestamp: number;
+}
+
+function isValidReaction(r: any): r is StoredReaction {
+  return typeof r === 'object' && r !== null
+    && typeof r.messageId === 'string'
+    && typeof r.userId === 'string'
+    && typeof r.emoji === 'string'
+    && typeof r.timestamp === 'number';
 }
 
 async function loadUsers(): Promise<StoredUser[]> {
@@ -99,11 +116,32 @@ async function loadMessages(): Promise<StoredMessage[]> {
   }
 }
 
-async function saveMessages(messages: StoredMessage[]): Promise<void> {
+saveMessages(messages: StoredMessage[]): Promise<void> {
   const tmp = MESSAGES_FILE + '.tmp';
   await writeFile(tmp, JSON.stringify(messages, null, 2));
   const { renameSync } = await import('fs');
   renameSync(tmp, MESSAGES_FILE);
+}
+
+async function loadReactions(): Promise<StoredReaction[]> {
+  const REACTIONS_FILE = path.join(DATA_DIR, 'reactions.json');
+  if (!existsSync(REACTIONS_FILE)) return [];
+  try {
+    const data = await readFile(REACTIONS_FILE, 'utf-8');
+    const parsed = JSON.parse(data);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(isValidReaction);
+  } catch {
+    return [];
+  }
+}
+
+async function saveReactions(reactions: StoredReaction[]): Promise<void> {
+  const REACTIONS_FILE = path.join(DATA_DIR, 'reactions.json');
+  const tmp = REACTIONS_FILE + '.tmp';
+  await writeFile(tmp, JSON.stringify(reactions, null, 2));
+  const { renameSync } = await import('fs');
+  renameSync(tmp, REACTIONS_FILE);
 }
 
 export function initializeDatabase() {
@@ -222,13 +260,27 @@ export async function saveMessage(
   encrypted?: any,
   channel: string = 'general',
   fileKey?: Record<string, string>,
-  sealed?: string
+  sealed?: string,
+  quotedMessageId?: string,
+  editedAt?: number
 ): Promise<void> {
   await withMutex(messagesMutex, async () => {
     const messages = await loadMessages();
-    messages.push({ id, senderId, senderNickname, text, timestamp, encrypted: encrypted || null, channel, fileKey: fileKey || null, sealed: sealed || undefined });
+    messages.push({ id, senderId, senderNickname, text, timestamp, encrypted: encrypted || null, channel, fileKey: fileKey || null, sealed: sealed || undefined, quotedMessageId, editedAt });
     if (messages.length > 5000) messages.splice(0, messages.length - 5000);
     await saveMessages(messages);
+  });
+}
+
+export async function updateMessageText(messageId: string, senderId: string, newText: string): Promise<boolean> {
+  return withMutex(messagesMutex, async () => {
+    const messages = await loadMessages();
+    const idx = messages.findIndex(m => m.id === messageId && m.senderId === senderId);
+    if (idx === -1) return false;
+    messages[idx].text = newText;
+    messages[idx].editedAt = Date.now();
+    await saveMessages(messages);
+    return true;
   });
 }
 
@@ -291,6 +343,18 @@ export async function deleteMessage(messageId: string, userId: string): Promise<
   });
 }
 
+export async function updateMessageText(messageId: string, userId: string, newText: string): Promise<boolean> {
+  return withMutex(messagesMutex, async () => {
+    const messages = await loadMessages();
+    const idx = messages.findIndex(m => m.id === messageId && m.senderId === userId);
+    if (idx === -1) return false;
+    messages[idx].text = newText;
+    messages[idx].editedAt = Date.now();
+    await saveMessages(messages);
+    return true;
+  });
+}
+
 export async function deleteGeneralMessages(): Promise<number> {
   return withMutex(messagesMutex, async () => {
     const messages = await loadMessages();
@@ -315,6 +379,36 @@ export async function deleteOldGeneralMessages(): Promise<number> {
 }
 
 export function startAutoCleanup(): void {
+  setInterval(async () => {
+    try {
+      const deleted = await deleteOldGeneralMessages();
+      if (deleted > 0) console.log(`Auto-cleaned ${deleted} old general messages`);
+    } catch (e) {
+      console.error('Auto-cleanup failed:', e);
+    }
+  }, ONE_WEEK);
+}
+
+export async function addReaction(messageId: string, userId: string, emoji: string): Promise<void> {
+  return withMutex(messagesMutex, async () => {
+    const reactions = await loadReactions();
+    reactions.push({ messageId, userId, emoji, timestamp: Date.now() });
+    await saveReactions(reactions);
+  });
+}
+
+export async function removeReaction(messageId: string, userId: string, emoji: string): Promise<void> {
+  return withMutex(messagesMutex, async () => {
+    let reactions = await loadReactions();
+    reactions = reactions.filter(r => !(r.messageId === messageId && r.userId === userId && r.emoji === emoji));
+    await saveReactions(reactions);
+  });
+}
+
+export async function getReactionsForMessage(messageId: string): Promise<StoredReaction[]> {
+  const reactions = await loadReactions();
+  return reactions.filter(r => r.messageId === messageId);
+}
   setInterval(async () => {
     try {
       const deleted = await deleteOldGeneralMessages();
