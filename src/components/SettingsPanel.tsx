@@ -1,10 +1,9 @@
 import { useState, useEffect, useRef } from 'react';
 import type { AccentColor } from '../types';
-import type { EncryptedKeyBundle } from '../crypto-keys';
 import { useConnection } from '../context';
 import { cn, getAvatarText } from '../utils';
-import { encryptPrivateKey, isEncryptedBundle, createBackup, downloadBackup, isKeyBackup } from '../crypto-keys';
-import { generateSafetyNumber } from '../crypto';
+import { encryptPrivateKey, isEncryptedBundle, createBackup, downloadBackup } from '../crypto-keys';
+import type { EncryptedKeyBundle } from '../crypto-keys';
 
 declare const __APP_VERSION__: string;
 
@@ -131,7 +130,7 @@ function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, onCon
 }
 
 export function SettingsPanel({ onClose, closing, inline }: { onClose: () => void; closing?: boolean; inline?: boolean }) {
-  const { state, updateSettings, logout, getMyPublicKey, getPublicKey, sessions, requestSessions, showImportModal, t } = useConnection();
+  const { state, updateSettings, logout, sessions, requestSessions, t } = useConnection();
   const [confirmAction, setConfirmAction] = useState<'logout' | 'clearData' | null>(null);
   const [exportModal, setExportModal] = useState(false);
 
@@ -146,80 +145,6 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
   const accentColorPreview: Record<AccentColor, string> = {
     purple: '#8b5cf6', blue: '#3b82f6', green: '#22c55e', red: '#ef4444',
     orange: '#f97316', pink: '#ec4899', teal: '#14b8a6', indigo: '#6366f1',
-  };
-
-  const SafetyNumberButton = () => {
-    const [showSafety, setShowSafety] = useState(false);
-    const [safetyNum, setSafetyNum] = useState('');
-    const [copyOk, setCopyOk] = useState(false);
-
-    const showNumber = async () => {
-      try {
-        const pubKey = getMyPublicKey();
-        if (!pubKey) {
-          setSafetyNum('KEY NOT FOUND — re-login required');
-          setShowSafety(true);
-          return;
-        }
-        const otherKey = state.activeChannel !== 'general' ? getPublicKey(state.activeChannel) : null;
-        const num = await generateSafetyNumber(pubKey, otherKey || undefined);
-        setSafetyNum(num);
-        setShowSafety(true);
-      } catch (e: any) {
-        setSafetyNum('ERROR: ' + (e.message || 'unknown'));
-        setShowSafety(true);
-      }
-    };
-
-    const handleCopy = async () => {
-      try {
-        if (navigator.clipboard?.writeText) {
-          await navigator.clipboard.writeText(safetyNum);
-        } else {
-          const ta = document.createElement('textarea');
-          ta.value = safetyNum;
-          ta.style.position = 'fixed';
-          ta.style.opacity = '0';
-          document.body.appendChild(ta);
-          ta.select();
-          document.execCommand('copy');
-          document.body.removeChild(ta);
-        }
-        setCopyOk(true);
-        setTimeout(() => setCopyOk(false), 2000);
-      } catch {}
-    };
-
-    return (
-      <>
-        <button onClick={showNumber}
-          className="px-3 py-1.5 rounded-xl text-[13px] font-medium bg-bg-tertiary text-fg-muted hover:text-fg-primary transition-colors">
-          {t('safety_number')}
-        </button>
-        {showSafety && (
-          <>
-            <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[60]" onClick={() => setShowSafety(false)} />
-            <div className="fixed inset-0 flex items-center justify-center z-[61] p-4">
-              <div className="bg-bg-secondary border border-border-default rounded-2xl w-full max-w-sm p-6 space-y-4 animate-in" onClick={(e) => e.stopPropagation()}>
-                <h3 className="text-[17px] font-semibold text-fg-primary">{t('safety_yours')}</h3>
-                <p className="text-[13px] text-fg-muted">{t('safety_number_desc')}</p>
-                <div className="p-4 rounded-xl bg-bg-tertiary font-mono text-[13px] text-fg-primary break-all text-center leading-relaxed">
-                  {safetyNum}
-                </div>
-                <button onClick={handleCopy}
-                  className="w-full py-3 rounded-xl border border-border-default text-fg-primary text-[15px] hover:bg-bg-tertiary transition-colors font-medium">
-                  {copyOk ? '✓ Copied' : t('copy')}
-                </button>
-                <button onClick={() => setShowSafety(false)}
-                  className="w-full py-3 rounded-xl bg-accent-primary text-accent-text text-[15px] font-semibold hover:opacity-90 transition-opacity">
-                  {t('done')}
-                </button>
-              </div>
-            </div>
-          </>
-        )}
-      </>
-    );
   };
 
   const content = (
@@ -302,27 +227,21 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
           <Toggle checked={state.settings.soundEnabled} onChange={(v) => updateSettings({ soundEnabled: v })} />
         </Option>
       </Section>
-
-      <Section title={t('sec_safety')}>
-        <Option label={t('safety_number')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /></svg>}>
-          <SafetyNumberButton />
-        </Option>
-        <Option label={t('export_keys')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>}>
-          <button onClick={() => setExportModal(true)} className="text-[13px] text-accent-primary hover:underline">{t('export_keys')}</button>
-        </Option>
-        <Option label={t('import_keys')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>}>
-          <input type="file" accept=".json" className="hidden" id={`import-keys-input${inline ? '-inline' : ''}`} onChange={async (e) => {
-            const file = e.target.files?.[0];
-            if (!file) return;
-            try {
-              const text = await file.text();
-              const data = JSON.parse(text);
-              if (!isKeyBackup(data)) { alert(t('key_import_err')); return; }
-              showImportModal(data, 'settings');
-            } catch { alert(t('key_import_err')); }
-            e.target.value = '';
-          }} />
-          <label htmlFor={`import-keys-input${inline ? '-inline' : ''}`} className="text-[13px] text-accent-primary hover:underline cursor-pointer">{t('import_keys')}</label>
+<Section title={t('sec_privacy')}>
+        <Option label={t('disappearing_messages')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>}>
+          <div className="flex gap-1.5">
+            {(['off', '24h', '7d', '30d'] as const).map((ttl) => (
+              <button key={ttl} onClick={() => updateSettings({ disappearingTTL: ttl })}
+                className={cn(
+                  'flex-1 min-w-0 px-1.5 py-1.5 rounded-xl text-[11px] font-medium transition-all',
+                  state.settings.disappearingTTL === ttl
+                    ? 'bg-accent-primary text-accent-text'
+                    : 'bg-bg-tertiary text-fg-muted hover:text-fg-primary'
+                )}>
+                {ttl === 'off' ? t('disappearing_off') : ttl === '24h' ? t('disappearing_24h') : ttl === '7d' ? t('disappearing_7d') : t('disappearing_30d')}
+              </button>
+            ))}
+          </div>
         </Option>
         <Option label={t('screenshot_prot')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="3" x2="21" y2="21" /></svg>}>
           <Toggle checked={!!localStorage.getItem('wn_screenshot_prot')} onChange={(v) => {

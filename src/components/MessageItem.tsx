@@ -1,5 +1,5 @@
 import type { Message } from '../types';
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
 import { useConnection } from '../context';
 import { cn, formatTime, getAvatarText } from '../utils';
 
@@ -40,6 +40,18 @@ export function MessageItem({ message, showAvatar = true }: { message: Message; 
     count: users.length,
     hasOwn: users.includes(state.userId || '')
   }));
+
+  const expiresIn = useMemo(() => {
+    if (!message.expiresAt) return null;
+    const remaining = message.expiresAt - Date.now();
+    if (remaining <= 0) return 'expired';
+    const hours = Math.floor(remaining / 3600000);
+    const minutes = Math.floor((remaining % 3600000) / 60000);
+    const seconds = Math.floor((remaining % 60000) / 1000);
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    if (minutes > 0) return `${minutes}m ${seconds}s`;
+    return `${seconds}s`;
+  }, [message.expiresAt]);
 
   return (
     <div className={`flex gap-2.5 px-4 animate-message ${isOwn ? 'flex-row-reverse' : 'flex-row'}`}>
@@ -176,6 +188,11 @@ export function MessageItem({ message, showAvatar = true }: { message: Message; 
               {message.editedAt && (
                 <span className="ml-1.5 text-fg-subtle/70">• edited</span>
               )}
+              {expiresIn && (
+                <span className={`ml-1.5 text-[10px] font-mono ${expiresIn === 'expired' ? 'text-status-error' : 'text-accent-primary'}`}>
+                  ⏳ {expiresIn}
+                </span>
+              )}
             </span>
           </div>
         </div>
@@ -183,6 +200,11 @@ export function MessageItem({ message, showAvatar = true }: { message: Message; 
         <span className="text-[10px] text-fg-subtle mt-1 px-1">
           {formatTime(message.timestamp)}
           {message.editedAt && <span className="ml-1.5 text-fg-subtle/70">• edited</span>}
+          {expiresIn && (
+            <span className={`ml-1.5 text-[10px] font-mono ${expiresIn === 'expired' ? 'text-status-error' : 'text-accent-primary'}`}>
+              ⏳ {expiresIn}
+            </span>
+          )}
         </span>
       </div>
     </div>

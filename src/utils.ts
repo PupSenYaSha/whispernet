@@ -8,6 +8,7 @@ export const defaultSettings: AppSettings = {
   soundEnabled: true,
   fontSize: 'normal',
   compactMode: false,
+  disappearingTTL: 'off',
 };
 
 export function cn(...classes: (string | boolean | undefined | null)[]): string {
@@ -160,6 +161,13 @@ export const translations = {
     accent_pink: 'Pink',
     accent_teal: 'Teal',
     accent_indigo: 'Indigo',
+    sec_privacy: 'Privacy',
+    disappearing_messages: 'Disappearing Messages',
+    disappearing_off: 'Off',
+    disappearing_24h: '24 Hours',
+    disappearing_7d: '7 Days',
+    disappearing_30d: '30 Days',
+    disappearing_timer: 'Disappears in',
   },
   ru: {
     connected: 'В сети',
@@ -277,6 +285,13 @@ export const translations = {
     accent_pink: 'Розовый',
     accent_teal: 'Бирюзовый',
     accent_indigo: 'Индиго',
+    sec_privacy: 'Приватность',
+    disappearing_messages: 'Исчезающие сообщения',
+    disappearing_off: 'Выкл',
+    disappearing_24h: '24 Часа',
+    disappearing_7d: '7 Дней',
+    disappearing_30d: '30 Дней',
+    disappearing_timer: 'Исчезнет через',
   },
 } as const;
 

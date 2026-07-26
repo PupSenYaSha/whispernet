@@ -42,6 +42,7 @@ export interface AppSettings {
   soundEnabled: boolean;
   fontSize: 'small' | 'normal' | 'large';
   compactMode: boolean;
+  disappearingTTL: 'off' | '24h' | '7d' | '30d';
 }
 
 declare global {
