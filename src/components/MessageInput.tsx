@@ -5,6 +5,7 @@ export function MessageInput() {
   const { state, sendMessage, sendDm, sendImage, sendDmImage, t } = useConnection();
   const [hasText, setHasText] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [sealedMode, setSealedMode] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   const isConnected = state.status === 'connected';
@@ -27,7 +28,7 @@ export function MessageInput() {
     const val = ta?.value?.trim();
     if (!val || !isConnected) return;
     if (isDm && dmTarget) {
-      sendDm(dmTarget, val);
+      sendDm(dmTarget, val, sealedMode);
     } else {
       sendMessage(val);
     }
@@ -36,6 +37,7 @@ export function MessageInput() {
       ta.style.height = 'auto';
     }
     setHasText(false);
+    setSealedMode(false);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {

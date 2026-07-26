@@ -572,7 +572,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     wsRef.current.send(JSON.stringify({ type: 'chat_message', payload: { text: text.trim() } }));
   }, []);
 
-  const sendDm = useCallback(async (to: string, text: string) => {
+  const sendDm = useCallback(async (to: string, text: string, sealed: boolean = false) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !text.trim()) return;
     const trimmed = text.trim();
     const recipientKey = publicKeysRef.current[to];
@@ -582,6 +582,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         const sessionId = getSessionId(userIdRef.current || '', to);
         const encrypted = await encryptWithSignal(sessionId, trimmed);
         const payload: any = { to, text: '', signalEncrypted: encrypted };
+        if (sealed) payload.sealed = true;
         if (pendingX3dhRef.current[to]) {
           payload.x3dhMessage = pendingX3dhRef.current[to].x3dhMessage;
           payload.ratchetPublicKey = Array.from(pendingX3dhRef.current[to].ratchetPublicKey);
@@ -590,7 +591,9 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         wsRef.current.send(JSON.stringify({ type: 'dm_send', payload }));
       } else {
         const encrypted = await encryptMessage(trimmed, buildEncryptKeys({ [to]: recipientKey }));
-        wsRef.current.send(JSON.stringify({ type: 'dm_send', payload: { to, text: '', encrypted } }));
+        const payload: any = { to, text: '', encrypted };
+        if (sealed) payload.sealed = true;
+        wsRef.current.send(JSON.stringify({ type: 'dm_send', payload }));
       }
     } catch (e) { console.error('Encryption failed'); }
   }, [buildEncryptKeys]);

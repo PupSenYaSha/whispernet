@@ -56,7 +56,7 @@ export interface ConnectionContextType {
   disconnect: () => void;
   logout: () => void;
   sendMessage: (text: string) => void;
-  sendDm: (to: string, text: string) => void;
+  sendDm: (to: string, text: string, sealed?: boolean) => void;
   sendDmImage: (to: string, file: File) => Promise<void>;
   sendImage: (file: File) => Promise<void>;
   openDm: (userId: string) => void;
