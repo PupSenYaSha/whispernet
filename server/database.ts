@@ -9,10 +9,16 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
 let USERS_FILE = path.join(DATA_DIR, 'users.json');
 let MESSAGES_FILE = path.join(DATA_DIR, 'messages.json');
+let PREKEYS_FILE = path.join(DATA_DIR, 'prekeys.json');
 
 let usersMutex = { v: false };
 let messagesMutex = { v: false };
 let preKeysMutex = { v: false };
+
+const PREKEY_BUNDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const MESSAGE_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const PREKEY_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const MESSAGE_TTL_MAX_MS = 30 * 24 * 60 * 60 * 1000;
 
 async function withMutex<T>(flag: { v: boolean }, fn: () => Promise<T>): Promise<T> {
   while (flag.v) await new Promise(r => setTimeout(r, 5));
@@ -51,6 +57,8 @@ interface StoredMessage {
   sealed?: string;
   quotedMessageId?: string;
   editedAt?: number;
+  expiresAt?: number;
+  sealedSender?: boolean;
 }
 
 function isValidUser(u: any): u is StoredUser {
@@ -116,7 +124,7 @@ async function loadMessages(): Promise<StoredMessage[]> {
   }
 }
 
-saveMessages(messages: StoredMessage[]): Promise<void> {
+async function saveMessages(messages: StoredMessage[]): Promise<void> {
   const tmp = MESSAGES_FILE + '.tmp';
   await writeFile(tmp, JSON.stringify(messages, null, 2));
   const { renameSync } = await import('fs');
@@ -144,45 +152,38 @@ async function saveReactions(reactions: StoredReaction[]): Promise<void> {
   renameSync(tmp, REACTIONS_FILE);
 }
 
-export function initializeDatabase() {
-}
-
-let preKeyBundles: Record<string, any> = {};
-
-async function loadPreKeyBundles(): Promise<void> {
-  const filePath = path.join(DATA_DIR, 'prekeys.json');
-  if (existsSync(filePath)) {
-    try {
-      const data = await readFile(filePath, 'utf-8');
-      preKeyBundles = JSON.parse(data);
-    } catch {
-      preKeyBundles = {};
-    }
-  }
-}
-
-async function savePreKeyBundles(): Promise<void> {
-  const filePath = path.join(DATA_DIR, 'prekeys.json');
-  const tmp = filePath + '.tmp';
-  await writeFile(tmp, JSON.stringify(preKeyBundles, null, 2));
-  const { renameSync } = await import('fs');
-  renameSync(tmp, filePath);
-}
-
-export async function setPreKeyBundle(userId: string, bundle: any): Promise<void> {
-  await withMutex(preKeysMutex, async () => {
+export async function cleanupExpiredPreKeys(): Promise<number> {
+  return withMutex(preKeysMutex, async () => {
     await loadPreKeyBundles();
-    preKeyBundles[userId] = bundle;
-    await savePreKeyBundles();
+    const now = Date.now();
+    let deleted = 0;
+    for (const [userId, bundle] of Object.entries(preKeyBundles)) {
+      if (now - bundle.createdAt > PREKEY_BUNDLE_TTL_MS) {
+        delete preKeyBundles[userId];
+        deleted++;
+      }
+    }
+    if (deleted > 0) await savePreKeyBundles();
+    return deleted;
   });
 }
 
-export async function getPreKeyBundle(userId: string): Promise<any> {
-  return preKeyBundles[userId] || null;
+export async function cleanupExpiredMessages(): Promise<number> {
+  return withMutex(messagesMutex, async () => {
+    const messages = await loadMessages();
+    const now = Date.now();
+    const initialLength = messages.length;
+    const remaining = messages.filter(m => !m.expiresAt || m.expiresAt > now);
+    if (remaining.length !== initialLength) {
+      await saveMessages(remaining);
+    }
+    return initialLength - remaining.length;
+  });
 }
 
-export async function getAllPreKeyBundles(): Promise<Record<string, any>> {
-  return { ...preKeyBundles };
+export async function startCleanupJobs(): Promise<void> {
+  setInterval(() => cleanupExpiredPreKeys().then(n => n && console.log(`Cleaned ${n} expired prekeys`)), PREKEY_CLEANUP_INTERVAL_MS);
+  setInterval(() => cleanupExpiredMessages().then(n => n && console.log(`Cleaned ${n} expired messages`)), MESSAGE_CLEANUP_INTERVAL_MS);
 }
 
 export async function createUser(nickname: string, password: string, publicKey?: any): Promise<{ id: string; nickname: string } | null> {
@@ -233,17 +234,21 @@ export async function getUserById(id: string): Promise<{ id: string; nickname: s
 }
 
 export async function updatePublicKey(userId: string, publicKey: any): Promise<void> {
-  await withMutex(usersMutex, async () => {
-    const users = await loadUsers();
-    const user = users.find(u => u.id === userId);
-    if (user) {
-      user.publicKey = publicKey;
-      await saveUsers(users);
-    }
-  });
-}
+    await withMutex(usersMutex, async () => {
+      const users = await loadUsers();
+      const user = users.find(u => u.id === userId);
+      if (user) {
+        user.publicKey = publicKey;
+        await saveUsers(users);
+      }
+    });
+  }
 
-export async function getAllUsers(): Promise<{ id: string; nickname: string }[]> {
+  export async function setPreKeyBundle(userId: string, bundle: any): Promise<void> {
+    await setPreKeyBundle(userId, bundle);
+  }
+  
+  export async function getAllUsers(): Promise<{ id: string; nickname: string }[]> {
   return (await loadUsers()).map(u => ({ id: u.id, nickname: u.nickname }));
 }
 
@@ -343,18 +348,6 @@ export async function deleteMessage(messageId: string, userId: string): Promise<
   });
 }
 
-export async function updateMessageText(messageId: string, userId: string, newText: string): Promise<boolean> {
-  return withMutex(messagesMutex, async () => {
-    const messages = await loadMessages();
-    const idx = messages.findIndex(m => m.id === messageId && m.senderId === userId);
-    if (idx === -1) return false;
-    messages[idx].text = newText;
-    messages[idx].editedAt = Date.now();
-    await saveMessages(messages);
-    return true;
-  });
-}
-
 export async function deleteGeneralMessages(): Promise<number> {
   return withMutex(messagesMutex, async () => {
     const messages = await loadMessages();
@@ -389,6 +382,9 @@ export function startAutoCleanup(): void {
   }, ONE_WEEK);
 }
 
+export function initializeDatabase(): void {
+}
+
 export async function addReaction(messageId: string, userId: string, emoji: string): Promise<void> {
   return withMutex(messagesMutex, async () => {
     const reactions = await loadReactions();
@@ -408,13 +404,4 @@ export async function removeReaction(messageId: string, userId: string, emoji: s
 export async function getReactionsForMessage(messageId: string): Promise<StoredReaction[]> {
   const reactions = await loadReactions();
   return reactions.filter(r => r.messageId === messageId);
-}
-  setInterval(async () => {
-    try {
-      const deleted = await deleteOldGeneralMessages();
-      if (deleted > 0) console.log(`Auto-cleaned ${deleted} old general messages`);
-    } catch (e) {
-      console.error('Auto-cleanup failed:', e);
-    }
-  }, ONE_WEEK);
 }

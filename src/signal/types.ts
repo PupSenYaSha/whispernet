@@ -17,11 +17,13 @@ export interface PreKeyBundle {
     keyId: number;
     publicKey: Uint8Array;
     signature: Uint8Array;
+    createdAt: number;
   };
   oneTimePreKey?: {
     keyId: number;
     publicKey: Uint8Array;
   };
+  bundleVersion: number;
 }
 
 export interface PreKeyRecord {
@@ -49,12 +51,15 @@ export interface SessionState {
   sendingMessageNumber: number;
   receivingMessageNumber: number;
   skippedMessageKeys: Map<number, Uint8Array>;
+  createdAt: number;
+  lastActivity: number;
 }
 
 export interface Session {
   sessionId: string;
   state: SessionState;
   version: 3;
+  protocolVersion: number;
 }
 
 export interface SignalMessage {

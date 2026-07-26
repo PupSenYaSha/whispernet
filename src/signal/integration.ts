@@ -7,6 +7,7 @@ const sessionManager = new SessionManager();
 
 export async function initSessionManager(password: string): Promise<void> {
   await sessionManager.init(password);
+  sessionManager.startCleanupTimer();
 }
 
 export async function initPreKeyManager(password: string): Promise<void> {

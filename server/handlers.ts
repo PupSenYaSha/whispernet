@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { getUserByNickname, saveMessage, getRecentMessages, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { appendFileSync } from 'fs';
@@ -124,6 +124,7 @@ function isValidPreKeyBundle(bundle: any): boolean {
   if (typeof bundle.signedPreKey.publicKey !== 'string') return false;
   if (!Array.isArray(bundle.signedPreKey.signature)) return false;
   if (bundle.oneTimePreKey && typeof bundle.oneTimePreKey !== 'object') return false;
+  if (typeof bundle.bundleVersion !== 'number' || bundle.bundleVersion < 1) return false;
   return true;
 }
 
@@ -218,6 +219,9 @@ export function handleConnection(ws: WebSocket): void {
         break;
       case 'dm_send':
         if (userId) await handleDmSend(userId, ws, message.payload);
+        break;
+      case 'sealed_send':
+        if (userId) await handleSealedSend(userId, ws, message.payload);
         break;
       case 'dm_history':
         if (userId) await handleDmHistory(userId, ws, message.payload);

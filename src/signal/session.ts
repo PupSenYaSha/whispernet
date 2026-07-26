@@ -15,6 +15,11 @@ import { sha256 } from '@noble/hashes/sha2.js';
 const SESSIONS_KEY = 'wn_signal_sessions';
 const INFO_ROOT = new TextEncoder().encode('WhisperNetRoot');
 const PBKDF2_ITER = 600_000;
+const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
+const REKEY_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_INACTIVITY_MS = 60 * 24 * 60 * 60 * 1000;
+const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+const PROTOCOL_VERSION = 2;
 
 function bufToBase64(buf: ArrayBuffer): string {
   return btoa(String.fromCharCode(...new Uint8Array(buf)));
@@ -149,8 +154,11 @@ export class SessionManager {
     state.sendingRatchetKey = ratchetKeyPair;
     state.currentRatchetPublicKey = ratchetKeyPair.publicKey;
     state.sendingMessageNumber = 0;
+    const now = Date.now();
+    state.createdAt = now;
+    state.lastActivity = now;
 
-    const session: Session = { sessionId, state, version: 3 };
+    const session: Session = { sessionId, state, version: 3, protocolVersion: PROTOCOL_VERSION };
     this.evictOldestSession();
     this.sessions.set(sessionId, session);
     this.save();
@@ -187,8 +195,11 @@ export class SessionManager {
     state.sendingChainKey = sendingChainKey;
     state.sendingRatchetKey = ratchetKeyPair;
     state.currentRatchetPublicKey = ratchetKeyPair.publicKey;
+    const now = Date.now();
+    state.createdAt = now;
+    state.lastActivity = now;
 
-    const session: Session = { sessionId, state, version: 3 };
+    const session: Session = { sessionId, state, version: 3, protocolVersion: PROTOCOL_VERSION };
     this.evictOldestSession();
     this.sessions.set(sessionId, session);
     this.save();
@@ -199,6 +210,8 @@ export class SessionManager {
   async encryptMessage(sessionId: string, plaintext: string): Promise<Uint8Array> {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('No session');
+
+    this.touchSession(sessionId);
 
     const messageKey = advanceSendingChain(session.state);
 
@@ -240,6 +253,8 @@ export class SessionManager {
     const session = this.sessions.get(sessionId);
     if (!session) throw new Error('No session');
 
+    this.touchSession(sessionId);
+
     const currentRemoteKey = session.state.receivingRatchetPublicKey;
     const keysEqual = currentRemoteKey &&
       currentRemoteKey.length === ratchetPublicKey.length &&
@@ -276,8 +291,77 @@ export class SessionManager {
     return new TextDecoder().decode(decrypted);
   }
 
-  deleteSession(sessionId: string): void {
+deleteSession(sessionId: string): void {
     this.sessions.delete(sessionId);
     this.save();
   }
+
+  touchSession(sessionId: string): void {
+    const session = this.sessions.get(sessionId);
+    if (session) {
+      session.state.lastActivity = Date.now();
+      this.save();
+    }
+  }
+
+  evictStaleSessions(): number {
+    const now = Date.now();
+    let evicted = 0;
+    for (const [id, session] of this.sessions) {
+      const age = now - (session.state.createdAt || 0);
+      const inactive = now - (session.state.lastActivity || 0);
+      if (age > SESSION_MAX_AGE_MS || inactive > MAX_INACTIVITY_MS) {
+        this.sessions.delete(id);
+        evicted++;
+      }
+    }
+    if (evicted > 0) this.save();
+    return evicted;
+  }
+
+  autoRekeyIfNeeded(sessionId: string): boolean {
+    const session = this.sessions.get(sessionId);
+    if (!session) return false;
+
+    const inactive = Date.now() - (session.state.lastActivity || 0);
+    if (inactive > REKEY_INTERVAL_MS) {
+      const ratchetKeyPair = generateKeyPair();
+      const { rootKey: newRootKey, chainKey: newSendingChain } = dhRatchet(
+        session.state.rootKey,
+        ratchetKeyPair.privateKey,
+        session.state.receivingRatchetPublicKey || ratchetKeyPair.publicKey
+      );
+
+      session.state.rootKey = newRootKey;
+      session.state.sendingChainKey = newSendingChain;
+      session.state.sendingRatchetKey = ratchetKeyPair;
+      session.state.currentRatchetPublicKey = ratchetKeyPair.publicKey;
+      session.state.sendingMessageNumber = 0;
+      session.state.receivingMessageNumber = 0;
+      session.state.lastActivity = Date.now();
+
+      this.save();
+      return true;
+    }
+    return false;
+  }
+
+  startCleanupTimer(): void {
+    if (this.cleanupTimer) return;
+    this.cleanupTimer = setInterval(() => {
+      this.evictStaleSessions();
+      for (const id of this.sessions.keys()) {
+        this.autoRekeyIfNeeded(id);
+      }
+    }, CLEANUP_INTERVAL_MS);
+  }
+
+  stopCleanupTimer(): void {
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = null;
+    }
+  }
+
+  private cleanupTimer: ReturnType<typeof setInterval> | null = null;
 }

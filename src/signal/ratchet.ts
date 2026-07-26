@@ -22,6 +22,8 @@ export function createRatchetState(): SessionState {
     sendingMessageNumber: 0,
     receivingMessageNumber: 0,
     skippedMessageKeys: new Map(),
+    createdAt: Date.now(),
+    lastActivity: Date.now(),
   };
 }
 

@@ -10,6 +10,11 @@ const SPK_KEY = 'wn_signal_spk';
 const OPK_KEY = 'wn_signal_opk';
 const PBKDF2_ITER = 600_000;
 
+const SIGNED_PREKEY_ROTATION_DAYS = 14;
+const MIN_ONE_TIME_PREKEYS = 50;
+const MAX_ONE_TIME_PREKEYS = 100;
+const PREKEY_BUNDLE_VERSION = 2;
+
 function bufToBase64(buf: ArrayBuffer): string {
   return btoa(String.fromCharCode(...new Uint8Array(buf)));
 }
@@ -51,12 +56,21 @@ async function decryptValue(key: CryptoKey, encrypted: string): Promise<string |
   }
 }
 
+function now(): number {
+  return Date.now();
+}
+
+function isPreKeyExpired(createdAt: number, maxAgeMs: number): boolean {
+  return now() - createdAt > maxAgeMs;
+}
+
 export class PreKeyManager {
   private identityKeyPair: ReturnType<typeof generateIdentityKeyPair> | null = null;
   private signedPreKey: SignedPreKeyRecord | null = null;
   private oneTimePreKeys: PreKeyRecord[] = [];
   private encryptionKey: CryptoKey | null = null;
   private saveTimeout: ReturnType<typeof setTimeout> | null = null;
+  private rotationTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {}
 
@@ -71,6 +85,57 @@ export class PreKeyManager {
     }
     this.encryptionKey = await deriveKey(password, salt);
     await this.loadEncrypted();
+    this.startRotationTimer();
+  }
+
+  private startRotationTimer(): void {
+    if (this.rotationTimer) clearInterval(this.rotationTimer);
+    this.rotationTimer = setInterval(() => this.maybeRotatePreKeys(), 6 * 60 * 60 * 1000);
+    this.maybeRotatePreKeys();
+  }
+
+  private async maybeRotatePreKeys(): Promise<void> {
+    const spkMaxAge = SIGNED_PREKEY_ROTATION_DAYS * 24 * 60 * 60 * 1000;
+
+    if (this.signedPreKey && isPreKeyExpired(this.signedPreKey.createdAt, spkMaxAge)) {
+      await this.rotateSignedPreKey();
+    }
+
+    if (this.oneTimePreKeys.length < MIN_ONE_TIME_PREKEYS) {
+      await this.replenishOneTimePreKeys();
+    }
+  }
+
+  async rotateSignedPreKey(): Promise<void> {
+    if (!this.identityKeyPair || !this.encryptionKey) return;
+
+    const newSpk = generateSignedPreKeyRecord(
+      this.identityKeyPair.ed25519PrivateKey,
+      (this.signedPreKey?.keyId || 0) + 1
+    );
+    this.signedPreKey = newSpk;
+    await this.save();
+  }
+
+  async replenishOneTimePreKeys(): Promise<void> {
+    if (!this.identityKeyPair) return;
+
+    const needed = MAX_ONE_TIME_PREKEYS - this.oneTimePreKeys.length;
+    if (needed <= 0) return;
+
+    const newKeys = generateOneTimePreKeys(
+      this.oneTimePreKeys.length + 1,
+      this.oneTimePreKeys.length + needed
+    );
+    this.oneTimePreKeys.push(...newKeys);
+    await this.save();
+  }
+
+  async ensurePreKeysForBundle(): Promise<void> {
+    await this.maybeRotatePreKeys();
+    if (this.oneTimePreKeys.length === 0) {
+      await this.replenishOneTimePreKeys();
+    }
   }
 
   private async loadEncrypted(): Promise<void> {
@@ -151,7 +216,6 @@ export class PreKeyManager {
         }));
       }
     } catch {
-      // silent
     }
   }
 
@@ -196,8 +260,12 @@ export class PreKeyManager {
         localStorage.setItem(OPK_KEY, opkData);
       }
     } catch {
-      // silent
     }
+  }
+
+  destroy(): void {
+    if (this.saveTimeout) clearTimeout(this.saveTimeout);
+    if (this.rotationTimer) clearInterval(this.rotationTimer);
   }
 
   initialize(): void {
@@ -208,9 +276,10 @@ export class PreKeyManager {
       this.identityKeyPair.ed25519PrivateKey,
       1
     );
-    this.oneTimePreKeys = generateOneTimePreKeys(1, 100);
+    this.oneTimePreKeys = generateOneTimePreKeys(1, MAX_ONE_TIME_PREKEYS);
 
     this.save();
+    this.startRotationTimer();
   }
 
   getIdentityKeyPair(): ReturnType<typeof generateIdentityKeyPair> | null {
@@ -221,16 +290,23 @@ export class PreKeyManager {
     return this.signedPreKey;
   }
 
+  getOneTimePreKeysCount(): number {
+    return this.oneTimePreKeys.length;
+  }
+
   consumeOneTimePreKey(): PreKeyRecord | undefined {
     const opk = this.oneTimePreKeys.shift();
     if (opk) this.save();
     return opk;
   }
 
-  generatePreKeyBundle(): PreKeyBundle | null {
+  async generatePreKeyBundle(): Promise<PreKeyBundle | null> {
     if (!this.identityKeyPair || !this.signedPreKey) return null;
 
+    await this.ensurePreKeysForBundle();
+
     const bundle: PreKeyBundle = {
+      bundleVersion: PREKEY_BUNDLE_VERSION,
       registrationId: this.identityKeyPair.registrationId,
       identityKey: this.identityKeyPair.publicKey,
       ed25519PublicKey: this.identityKeyPair.ed25519PublicKey,
@@ -238,6 +314,7 @@ export class PreKeyManager {
         keyId: this.signedPreKey.keyId,
         publicKey: this.signedPreKey.keyPair.publicKey,
         signature: this.signedPreKey.signature,
+        createdAt: this.signedPreKey.createdAt,
       },
     };
 
@@ -253,21 +330,26 @@ export class PreKeyManager {
     return bundle;
   }
 
-  getPublicKeyForServer(): {
+  async getPublicKeyForServer(): Promise<{
+    version: number;
     identityKey: string;
     ed25519PublicKey: string;
-    signedPreKey: { keyId: number; publicKey: string; signature: string };
+    signedPreKey: { keyId: number; publicKey: string; signature: string; createdAt: number };
     oneTimePreKey?: { keyId: number; publicKey: string };
-  } | null {
+  } | null> {
     if (!this.identityKeyPair || !this.signedPreKey) return null;
 
+    await this.ensurePreKeysForBundle();
+
     const result: any = {
+      version: PREKEY_BUNDLE_VERSION,
       identityKey: arrayToBase64(this.identityKeyPair.publicKey),
       ed25519PublicKey: arrayToBase64(this.identityKeyPair.ed25519PublicKey),
       signedPreKey: {
         keyId: this.signedPreKey.keyId,
         publicKey: arrayToBase64(this.signedPreKey.keyPair.publicKey),
         signature: Array.from(this.signedPreKey.signature),
+        createdAt: this.signedPreKey.createdAt,
       },
     };
 
