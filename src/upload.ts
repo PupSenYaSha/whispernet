@@ -1,9 +1,10 @@
-export async function uploadImage(
-  file: File,
+export async function uploadFile(
+  blob: Blob,
+  filename: string = 'encrypted.bin',
   onProgress?: (percent: number) => void
 ): Promise<string> {
   const form = new FormData();
-  form.append('file', file);
+  form.append('file', blob, filename);
 
   if (onProgress) onProgress(10);
 
@@ -22,4 +23,11 @@ export async function uploadImage(
   if (onProgress) onProgress(100);
   const data = await res.json();
   return data.url;
+}
+
+export async function uploadImage(
+  file: File,
+  onProgress?: (percent: number) => void
+): Promise<string> {
+  return uploadFile(file, file.name || 'image', onProgress);
 }

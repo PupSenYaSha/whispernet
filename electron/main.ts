@@ -4,7 +4,7 @@ import { fileURLToPath } from 'url';
 import { writeFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, rmdirSync, createWriteStream } from 'fs';
 import https from 'https';
 import http from 'http';
-import { execFile } from 'child_process';
+import { spawn } from 'child_process';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = join(__filename, '..');
@@ -143,7 +143,7 @@ function applyUpdateAndRestart(updateDir: string) {
     `del "%~f0"`,
   ].join('\r\n');
   writeFileSync(batPath, bat);
-  execFile('cmd.exe', ['/c', batPath], { detached: true, stdio: 'ignore' }).unref();
+  spawn('cmd.exe', ['/c', batPath], { detached: true, stdio: 'ignore' }).unref();
   app.quit();
 }
 
@@ -237,7 +237,8 @@ function createWindow() {
 
   async function checkServer(): Promise<boolean> {
     return new Promise((resolve) => {
-      const req = https.get(REMOTE_URL + '/health', { timeout: 5000 }, (res) => {
+      const protocol = REMOTE_URL.startsWith('https') ? https : http;
+      const req = protocol.get(REMOTE_URL + '/health', { timeout: 5000 }, (res) => {
         let data = '';
         res.on('data', (c: any) => data += c);
         res.on('end', () => resolve(res.statusCode === 200));

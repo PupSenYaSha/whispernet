@@ -72,6 +72,7 @@ export interface ConnectionContextType {
   updateSettings: (settings: Partial<AppSettings>) => void;
   getMyPublicKey: () => JsonWebKey | null;
   getPublicKey: (userId: string) => JsonWebKey | null;
+  decryptMedia: (message: { id: string; text: string; fileKey?: Record<string, string> }) => Promise<string | null>;
   sessions: { id: string; lastActive: number; current: boolean }[];
   requestSessions: () => void;
   revokeSession: (sessionId: string) => void;

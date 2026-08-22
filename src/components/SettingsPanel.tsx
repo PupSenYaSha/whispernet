@@ -2,7 +2,9 @@ import { useState, useEffect, useRef } from 'react';
 import type { AccentColor } from '../types';
 import { useConnection } from '../context';
 import { cn, getAvatarText } from '../utils';
-import { encryptPrivateKey, isEncryptedBundle, createBackup, downloadBackup } from '../crypto-keys';
+import { encryptPrivateKey, isEncryptedBundle, createBackup, downloadBackup, isKeyBackup } from '../crypto-keys';
+import { generateSafetyNumber } from '../crypto';
+import QRCode from 'qrcode';
 import type { EncryptedKeyBundle } from '../crypto-keys';
 
 declare const __APP_VERSION__: string;
@@ -53,6 +55,7 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 function PasswordModal({ title, onConfirm, onCancel }: {
   title: string; onConfirm: (password: string) => void; onCancel: () => void;
 }) {
+  const { t } = useConnection();
   const [password, setPassword] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { inputRef.current?.focus(); }, []);
@@ -74,7 +77,7 @@ function PasswordModal({ title, onConfirm, onCancel }: {
           <div className="flex gap-3">
             <button onClick={onCancel}
               className="flex-1 py-3 rounded-2xl border border-border-default text-fg-primary text-[15px] font-medium hover:bg-bg-tertiary transition-colors">
-              Cancel
+              {t('cancel')}
             </button>
             <button onClick={() => password && onConfirm(password)} disabled={!password}
               className="flex-1 py-3 rounded-2xl bg-accent-primary text-accent-text text-[15px] font-semibold hover:opacity-90 transition-colors disabled:opacity-40">
@@ -130,7 +133,7 @@ function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, onCon
 }
 
 export function SettingsPanel({ onClose, closing, inline }: { onClose: () => void; closing?: boolean; inline?: boolean }) {
-  const { state, updateSettings, logout, sessions, requestSessions, t } = useConnection();
+  const { state, updateSettings, logout, sessions, requestSessions, showImportModal, t } = useConnection();
   const [confirmAction, setConfirmAction] = useState<'logout' | 'clearData' | null>(null);
   const [exportModal, setExportModal] = useState(false);
 
@@ -145,6 +148,89 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
   const accentColorPreview: Record<AccentColor, string> = {
     purple: '#8b5cf6', blue: '#3b82f6', green: '#22c55e', red: '#ef4444',
     orange: '#f97316', pink: '#ec4899', teal: '#14b8a6', indigo: '#6366f1',
+  };
+
+  const SafetyNumberButton = () => {
+    const { state, getMyPublicKey, getPublicKey, t } = useConnection();
+    const [showSafety, setShowSafety] = useState(false);
+    const [safetyNum, setSafetyNum] = useState('');
+    const [qrCode, setQrCode] = useState<string>('');
+    const [copyOk, setCopyOk] = useState(false);
+
+    const showNumber = async () => {
+      try {
+        const pubKey = getMyPublicKey();
+        if (!pubKey) {
+          setSafetyNum('KEY NOT FOUND -- re-login required');
+          setShowSafety(true);
+          return;
+        }
+        const otherKey = state.activeChannel !== 'general' ? getPublicKey(state.activeChannel) : null;
+        const num = await generateSafetyNumber(pubKey, otherKey || undefined);
+        setSafetyNum(num);
+        const qr = await QRCode.toDataURL(num);
+        setQrCode(qr);
+        setShowSafety(true);
+      } catch (e: any) {
+        setSafetyNum('ERROR: ' + (e.message || 'unknown'));
+        setShowSafety(true);
+      }
+    };
+
+    const handleCopy = async () => {
+      try {
+        if (navigator.clipboard?.writeText) {
+          await navigator.clipboard.writeText(safetyNum);
+        } else {
+          const ta = document.createElement('textarea');
+          ta.value = safetyNum;
+          ta.style.position = 'fixed';
+          ta.style.opacity = '0';
+          document.body.appendChild(ta);
+          ta.select();
+          document.execCommand('copy');
+          document.body.removeChild(ta);
+        }
+        setCopyOk(true);
+        setTimeout(() => setCopyOk(false), 2000);
+      } catch {}
+    };
+
+    return (
+      <>
+        <button onClick={showNumber}
+          className="px-3 py-1.5 rounded-xl text-[13px] font-medium bg-bg-tertiary text-fg-muted hover:text-fg-primary transition-colors">
+          {t('safety_number')}
+        </button>
+        {showSafety && (
+          <>
+            <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[60]" onClick={() => setShowSafety(false)} />
+            <div className="fixed inset-0 flex items-center justify-center z-[61] p-4">
+              <div className="bg-bg-secondary border border-border-default rounded-2xl w-full max-w-sm p-6 space-y-4 animate-in" onClick={(e) => e.stopPropagation()}>
+                <h3 className="text-[17px] font-semibold text-fg-primary">{t('safety_yours')}</h3>
+                <p className="text-[13px] text-fg-muted">{t('safety_number_desc')}</p>
+                {qrCode && (
+                  <div className="flex justify-center mb-4">
+                    <img src={qrCode} alt="Safety Number QR" className="w-48 h-48" />
+                  </div>
+                )}
+                <div className="p-4 rounded-xl bg-bg-tertiary font-mono text-[13px] text-fg-primary break-all text-center leading-relaxed">
+                  {safetyNum}
+                </div>
+                <button onClick={handleCopy}
+                  className="w-full py-3 rounded-xl border border-border-default text-fg-primary text-[15px] hover:bg-bg-tertiary transition-colors font-medium">
+                  {copyOk ? 'OK Copied' : t('copy')}
+                </button>
+                <button onClick={() => setShowSafety(false)}
+                  className="w-full py-3 rounded-xl bg-accent-primary text-accent-text text-[15px] font-semibold hover:opacity-90 transition-opacity">
+                  {t('done')}
+                </button>
+              </div>
+            </div>
+          </>
+        )}
+      </>
+    );
   };
 
   const content = (
@@ -191,7 +277,7 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
                     ? 'bg-accent-primary text-accent-text'
                     : 'bg-bg-tertiary text-fg-muted hover:text-fg-primary'
                 )}>
-                {lang === 'en' ? 'English' : 'Русский'}
+                {lang === 'en' ? 'English' : 'Russian'}
               </button>
             ))}
           </div>
@@ -209,8 +295,8 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
                     ? 'bg-accent-primary text-accent-text'
                     : 'bg-bg-tertiary text-fg-muted hover:text-fg-primary'
                 )}>
-                {t(`font_${size}`)}
-              </button>
+                  {t(`font_${size}`)}
+                </button>
             ))}
           </div>
         </Option>
@@ -227,7 +313,8 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
           <Toggle checked={state.settings.soundEnabled} onChange={(v) => updateSettings({ soundEnabled: v })} />
         </Option>
       </Section>
-<Section title={t('sec_privacy')}>
+
+      <Section title={t('sec_privacy')}>
         <Option label={t('disappearing_messages')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>}>
           <div className="flex gap-1.5">
             {(['off', '24h', '7d', '30d'] as const).map((ttl) => (
@@ -248,6 +335,29 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
             if (v) localStorage.setItem('wn_screenshot_prot', '1');
             else localStorage.removeItem('wn_screenshot_prot');
           }} />
+        </Option>
+      </Section>
+
+      <Section title={t('sec_safety')}>
+        <Option label={t('safety_number')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>}>
+          <SafetyNumberButton />
+        </Option>
+        <Option label={t('export_keys')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>}>
+          <button onClick={() => setExportModal(true)} className="text-[13px] text-accent-primary hover:underline">{t('export_keys')}</button>
+        </Option>
+        <Option label={t('import_keys')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>}>
+          <input type="file" accept=".json" className="hidden" id={`import-keys-input${inline ? '-inline' : ''}`} onChange={async (e) => {
+            const file = e.target.files?.[0];
+            if (!file) return;
+            try {
+              const text = await file.text();
+              const data = JSON.parse(text);
+              if (!isKeyBackup(data)) { alert(t('key_import_err')); return; }
+              showImportModal(data, 'settings');
+            } catch { alert(t('key_import_err')); }
+            e.target.value = '';
+          }} />
+          <label htmlFor={`import-keys-input${inline ? '-inline' : ''}`} className="text-[13px] text-accent-primary hover:underline cursor-pointer">{t('import_keys')}</label>
         </Option>
       </Section>
 
@@ -285,7 +395,7 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
             <div className="w-9 h-9 rounded-xl bg-accent-primary/15 flex items-center justify-center">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2">
                 <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
               </svg>
             </div>
             <h2 className="text-[17px] font-semibold text-fg-primary">{t('settings')}</h2>
@@ -307,34 +417,6 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
             {t('clear_local_data')}
           </button>
         </div>
-
-        {confirmAction === 'logout' && (
-          <ConfirmModal title={t('confirm_logout')} message={t('confirm_logout_desc')} confirmLabel={t('logout')} cancelLabel={t('cancel')} danger
-            onConfirm={() => { logout(); window.location.reload(); }} onCancel={() => setConfirmAction(null)} />
-        )}
-        {confirmAction === 'clearData' && (
-          <ConfirmModal title={t('confirm_clear_data')} message={t('confirm_clear_data_desc')} confirmLabel={t('confirm_clear')} cancelLabel={t('cancel')} danger
-            onConfirm={() => { (() => { const keys = Object.keys(localStorage).filter(k => k.startsWith('wn_')); keys.forEach(k => localStorage.removeItem(k)); })(); window.location.reload(); }} onCancel={() => setConfirmAction(null)} />
-        )}
-        {exportModal && (
-          <PasswordModal title={t('enter_backup_password')} onCancel={() => setExportModal(false)} onConfirm={async (pass) => {
-            try {
-              const nick = state.nickname.toLowerCase();
-              const savedKey = localStorage.getItem(`wn_pk_${nick}`);
-              const savedPubKey = localStorage.getItem(`wn_pub_${nick}`);
-              if (!savedKey || !savedPubKey) return;
-              const parsed = JSON.parse(savedKey);
-              let bundle: EncryptedKeyBundle;
-              if (isEncryptedBundle(parsed)) { bundle = parsed; } else {
-                bundle = await encryptPrivateKey(parsed, pass);
-                bundle.publicKey = JSON.parse(savedPubKey);
-              }
-              const backup = createBackup(state.nickname, bundle.publicKey, bundle);
-              downloadBackup(backup);
-            } catch {}
-            setExportModal(false);
-          }} />
-        )}
       </div>
     );
   }
@@ -349,7 +431,7 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
             <div className="w-9 h-9 rounded-xl bg-accent-primary/15 flex items-center justify-center">
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2">
                 <circle cx="12" cy="12" r="3" />
-                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
               </svg>
             </div>
             <h2 className="text-[17px] font-semibold text-fg-primary">{t('settings')}</h2>
@@ -408,3 +490,4 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
     </>
   );
 }
+

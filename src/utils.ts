@@ -3,7 +3,7 @@ import type { AppSettings } from './types';
 export const defaultSettings: AppSettings = {
   theme: 'dark',
   accentColor: 'purple',
-  language: 'en',
+  language: 'ru',
   notifications: true,
   soundEnabled: true,
   fontSize: 'normal',
@@ -34,6 +34,27 @@ export function getAvatarText(nickname: string): string {
     return (words[0][0] + words[1][0]).toUpperCase();
   }
   return nickname.charAt(0).toUpperCase();
+}
+
+const AVATAR_GRADIENTS = [
+  'linear-gradient(135deg, #7c3aed, #a78bfa)',
+  'linear-gradient(135deg, #2563eb, #60a5fa)',
+  'linear-gradient(135deg, #059669, #34d399)',
+  'linear-gradient(135deg, #dc2626, #f87171)',
+  'linear-gradient(135deg, #ea580c, #fb923c)',
+  'linear-gradient(135deg, #db2777, #f472b6)',
+  'linear-gradient(135deg, #0d9488, #2dd4bf)',
+  'linear-gradient(135deg, #4f46e5, #818cf8)',
+  'linear-gradient(135deg, #d97706, #fbbf24)',
+  'linear-gradient(135deg, #0284c7, #38bdf8)',
+];
+
+export function getAvatarGradient(nickname: string): string {
+  let hash = 5381;
+  for (let i = 0; i < nickname.length; i++) {
+    hash = ((hash << 5) + hash + nickname.charCodeAt(i)) | 0;
+  }
+  return AVATAR_GRADIENTS[Math.abs(hash) % AVATAR_GRADIENTS.length];
 }
 
 export function loadSettings(): AppSettings {
@@ -168,6 +189,10 @@ export const translations = {
     disappearing_7d: '7 Days',
     disappearing_30d: '30 Days',
     disappearing_timer: 'Disappears in',
+    media_decrypt_error: 'Could not decrypt attachment',
+    edit_message_prompt: 'Edit message:',
+    today: 'Today',
+    yesterday: 'Yesterday',
   },
   ru: {
     connected: 'В сети',
@@ -181,8 +206,8 @@ export const translations = {
     status_connecting: 'Подключение...',
     settings: 'Настройки',
     appearance: 'Внешний вид',
-    general: 'Global Chat',
-    theme: 'Theme',
+    general: 'Общий чат',
+    theme: 'Тема',
     theme_dark: 'Тёмная',
     theme_light: 'Светлая',
     language: 'Язык',
@@ -246,7 +271,7 @@ export const translations = {
     global_chat: 'Глобальный чат',
     global_chat_desc: 'Публичный чат для всех',
     home: 'Главная',
-    about_desc: 'Минималистичный мессенджер с сквозным шифрованием. Приватный, сам-hosted, лёгкий и быстрый. Ваши данные остаются на вашем сервере.',
+    about_desc: 'Минималистичный мессенджер со сквозным шифрованием. Приватный, разворачивается на вашем сервере, лёгкий и быстрый. Ваши данные остаются у вас.',
     online: 'В сети',
     offline: 'Не в сети',
     sec_appearance: 'Внешний вид',
@@ -292,6 +317,10 @@ export const translations = {
     disappearing_7d: '7 Дней',
     disappearing_30d: '30 Дней',
     disappearing_timer: 'Исчезнет через',
+    media_decrypt_error: 'Не удалось расшифровать вложение',
+    edit_message_prompt: 'Редактировать сообщение:',
+    today: 'Сегодня',
+    yesterday: 'Вчера',
   },
 } as const;
 

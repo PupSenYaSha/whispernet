@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { getUserByNickname, saveMessage, getRecentMessages, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { appendFileSync } from 'fs';
@@ -62,12 +62,14 @@ interface ClientMessage {
 }
 
 function getClientIp(ws: WebSocket): string {
-  const req = (ws as any).req || (ws as any)._socket?.remoteAddress || 'unknown';
-  if (typeof req === 'string' && req.includes('::ffff:')) return req.split('::ffff:')[1] || req;
-  return String(req);
+  const req = (ws as any).req;
+  const socketIp = req?.socket?.remoteAddress || (ws as any)._socket?.remoteAddress;
+  if (!socketIp) return 'unknown';
+  return socketIp.replace(/^::ffff:/, '');
 }
 
 function checkMessageRateLimit(ip: string): boolean {
+  if (RATE_LIMITS_DISABLED) return true;
   const now = Date.now();
   const last = lastMessageTime.get(ip) || 0;
   if (now - last < MIN_MESSAGE_INTERVAL) return false;
@@ -75,7 +77,10 @@ function checkMessageRateLimit(ip: string): boolean {
   return true;
 }
 
+const RATE_LIMITS_DISABLED = process.env.DISABLE_RATE_LIMITS === '1';
+
 function checkAuthRateLimit(ip: string): boolean {
+  if (RATE_LIMITS_DISABLED) return true;
   const now = Date.now();
   const entry = authAttempts.get(ip);
   if (!entry || now > entry.resetAt) {
@@ -88,6 +93,7 @@ function checkAuthRateLimit(ip: string): boolean {
 }
 
 function checkConnectionLimit(ip: string): boolean {
+  if (RATE_LIMITS_DISABLED) return true;
   const count = connectionCounts.get(ip) || 0;
   if (count >= MAX_CONNECTIONS_PER_IP) return false;
   connectionCounts.set(ip, count + 1);
@@ -108,8 +114,19 @@ function sanitize(input: string): string {
     .trim();
 }
 
+function sanitizeText(input: string): string {
+  return input
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '')
+    .trim();
+}
+
 function isValidNickname(nick: string): boolean {
   return /^[a-zA-Z0-9_-]{3,16}$/.test(nick);
+}
+
+function hasUnsafeOwnKeys(obj: any): boolean {
+  if (typeof obj !== 'object' || obj === null) return false;
+  return Object.keys(obj).some(k => k === '__proto__' || k === 'constructor' || k === 'prototype');
 }
 
 function isValidPreKeyBundle(bundle: any): boolean {
@@ -117,10 +134,11 @@ function isValidPreKeyBundle(bundle: any): boolean {
   const MAX_BUNDLE_SIZE = 10000;
   const str = JSON.stringify(bundle);
   if (str.length > MAX_BUNDLE_SIZE) return false;
-  if ('__proto__' in bundle || 'constructor' in bundle || 'prototype' in bundle) return false;
+  if (hasUnsafeOwnKeys(bundle)) return false;
   if (typeof bundle.identityKey !== 'string') return false;
   if (typeof bundle.ed25519PublicKey !== 'string') return false;
   if (typeof bundle.signedPreKey !== 'object' || bundle.signedPreKey === null) return false;
+  if (hasUnsafeOwnKeys(bundle.signedPreKey)) return false;
   if (typeof bundle.signedPreKey.publicKey !== 'string') return false;
   if (!Array.isArray(bundle.signedPreKey.signature)) return false;
   if (bundle.oneTimePreKey && typeof bundle.oneTimePreKey !== 'object') return false;
@@ -133,7 +151,7 @@ function isValidPublicKey(key: any): boolean {
   const MAX_KEY_SIZE = 5000;
   const str = JSON.stringify(key);
   if (str.length > MAX_KEY_SIZE) return false;
-  if ('__proto__' in key || 'constructor' in key || 'prototype' in key) return false;
+  if (hasUnsafeOwnKeys(key)) return false;
   if (key.kty !== 'RSA') return false;
   if (key.alg !== 'RSA-OAEP' && key.alg !== 'RSA-OAEP-256') return false;
   if (typeof key.n !== 'string' || typeof key.e !== 'string') return false;
@@ -240,6 +258,12 @@ export function handleConnection(ws: WebSocket): void {
         break;
       case 'edit_message':
         if (userId) await handleEditMessage(userId, ws, message.payload);
+        break;
+      case 'add_reaction':
+        if (userId) await handleAddReaction(userId, ws, message.payload);
+        break;
+      case 'remove_reaction':
+        if (userId) await handleRemoveReaction(userId, ws, message.payload);
         break;
       case 'auth_update_key':
         if (userId) await handleAuthUpdateKey(userId, ws, message.payload);
@@ -395,11 +419,10 @@ export function handleConnection(ws: WebSocket): void {
 
   async function onAuthenticated(userId: string, nickname: string, ws: WebSocket): Promise<void> {
     const publicKeys = await getAllPublicKeys();
-    const preKeyBundles = await getAllPreKeyBundles();
 
     const onlineUsers = Array.from(clients.values()).map(c => ({ id: c.userId, nickname: c.nickname }));
 
-    send(ws, { type: 'auth_success', payload: { userId, nickname, publicKeys, preKeyBundles, onlineUsers }, timestamp: Date.now() });
+    send(ws, { type: 'auth_success', payload: { userId, nickname, publicKeys, preKeyBundles: {}, onlineUsers }, timestamp: Date.now() });
 
     const history = await getRecentMessages(100);
     send(ws, {
@@ -415,6 +438,7 @@ export function handleConnection(ws: WebSocket): void {
           timestamp: m.timestamp,
           isOwn: m.senderId === userId,
           fileKey: m.fileKey || null,
+          expiresAt: m.expiresAt || null,
         })),
       },
       timestamp: Date.now(),
@@ -424,7 +448,7 @@ export function handleConnection(ws: WebSocket): void {
     broadcastSystem(`${nickname} joined the chat`, userId);
   }
 
-  async function handleChatMessage(senderId: string, ws: WebSocket, payload: { text: string; fileKey?: Record<string, string> }): Promise<void> {
+  async function handleChatMessage(senderId: string, ws: WebSocket, payload: { text: string; fileKey?: Record<string, string>; ttl?: number }): Promise<void> {
     if (!checkMessageRateLimit(ip) || !checkMessageRateLimit(senderId)) {
       logSecurity('RATE_LIMIT_MESSAGE', { ip, senderId });
       send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down. Max 1 message per second.' }, timestamp: Date.now() });
@@ -434,7 +458,7 @@ export function handleConnection(ws: WebSocket): void {
     const sender = clients.get(senderId);
     if (!sender) return;
 
-    const text = typeof payload?.text === 'string' ? sanitize(payload.text) : '';
+    const text = typeof payload?.text === 'string' ? sanitizeText(payload.text) : '';
     if (!text) return;
     if (text.length > 4096) {
       send(ws, { type: 'error', payload: { code: 'MESSAGE_TOO_LONG', message: 'Message too long (max 4096 chars)' }, timestamp: Date.now() });
@@ -444,7 +468,8 @@ export function handleConnection(ws: WebSocket): void {
     const messageId = crypto.randomUUID();
     const timestamp = Date.now();
     const fileKey = payload?.fileKey && typeof payload.fileKey === 'object' ? payload.fileKey : undefined;
-    await saveMessage(messageId, senderId, sender.nickname, text, timestamp, undefined, 'general', fileKey);
+    const expiresAt = resolveExpiry(payload?.ttl, timestamp);
+    await saveMessage(messageId, senderId, sender.nickname, text, timestamp, undefined, 'general', fileKey, undefined, undefined, undefined, expiresAt);
 
     const messagePayload = {
       id: messageId,
@@ -454,13 +479,14 @@ export function handleConnection(ws: WebSocket): void {
       timestamp,
       isOwn: false,
       fileKey,
+      expiresAt,
     };
 
     broadcast({ type: 'chat_message', payload: { ...messagePayload, channel: 'general' }, timestamp }, senderId);
     send(ws, { type: 'chat_message', payload: { ...messagePayload, isOwn: true, channel: 'general' }, timestamp });
   }
 
-   async function handleDmSend(senderId: string, ws: WebSocket, payload: { to: string; text: string; encrypted?: any; signalEncrypted?: any; fileKey?: Record<string, string>; sealed?: string; reaction?: { messageId: string; userId: string; emoji: string } }): Promise<void> {
+   async function handleDmSend(senderId: string, ws: WebSocket, payload: { to: string; text: string; encrypted?: any; signalEncrypted?: any; fileKey?: Record<string, string>; sealed?: string; ttl?: number; reaction?: { messageId: string; userId: string; emoji: string } }): Promise<void> {
     if (!checkMessageRateLimit(ip)) {
       send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down.' }, timestamp: Date.now() });
       return;
@@ -488,6 +514,7 @@ export function handleConnection(ws: WebSocket): void {
     const isSealed = !!payload?.sealed;
     const isEncrypted = !!payload?.encrypted;
     const isSignalEncrypted = !!payload?.signalEncrypted;
+    const expiresAt = resolveExpiry(payload?.ttl, timestamp);
 
     if (payload?.reaction && typeof payload.reaction === 'object') {
       const { messageId, userId, emoji } = payload.reaction;
@@ -499,39 +526,98 @@ export function handleConnection(ws: WebSocket): void {
     }
 
     if (isSignalEncrypted) {
-      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey);
+      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey, undefined, undefined, undefined, expiresAt);
     } else if (isSealed) {
-      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey, payload.sealed);
+      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey, payload.sealed, undefined, undefined, expiresAt);
     } else if (isEncrypted) {
-      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, payload.encrypted, channelId, fileKey);
+      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, payload.encrypted, channelId, fileKey, undefined, undefined, undefined, expiresAt);
     } else {
-      const text = sanitize(payload.text || '');
-      if (!text) return;
-      if (text.length > 4096) {
-        send(ws, { type: 'error', payload: { code: 'MESSAGE_TOO_LONG', message: 'Message too long' }, timestamp: Date.now() });
-        return;
-      }
-      await saveMessage(messageId, senderId, sender.nickname, text, timestamp, undefined, channelId, fileKey);
+      send(ws, { type: 'error', payload: { code: 'ENCRYPTION_REQUIRED', message: 'Direct messages must be encrypted' }, timestamp: Date.now() });
+      logSecurity('PLAINTEXT_DM_REJECTED', { from: senderId, to: recipientUser.id });
+      return;
     }
 
-    if (recipient) {
-      send(recipient.ws, { type: 'dm_message', payload: {
-        id: messageId, senderId, senderNickname: sender.nickname,
-        text: '',
-        encrypted: isEncrypted ? payload.encrypted : null,
-        signalEncrypted: isSignalEncrypted ? payload.signalEncrypted : null,
-        sealed: isSealed ? payload.sealed : null,
-        timestamp, isOwn: false, channel: channelId, fileKey,
-      }, timestamp });
-    }
-    send(ws, { type: 'dm_message', payload: {
-      id: messageId, senderId, senderNickname: sender.nickname,
+    const dmPayload = {
+      id: messageId,
+      senderId,
+      senderNickname: sender.nickname,
       text: '',
       encrypted: isEncrypted ? payload.encrypted : null,
       signalEncrypted: isSignalEncrypted ? payload.signalEncrypted : null,
       sealed: isSealed ? payload.sealed : null,
-      timestamp, isOwn: true, channel: channelId, fileKey,
-    }, timestamp });
+      timestamp,
+      channel: channelId,
+      fileKey,
+      expiresAt,
+    };
+    if (recipient) {
+      send(recipient.ws, { type: 'dm_message', payload: { ...dmPayload, isOwn: false }, timestamp });
+    }
+    send(ws, { type: 'dm_message', payload: { ...dmPayload, isOwn: true }, timestamp });
+  }
+
+const ALLOWED_TTL_MS: Record<number, number> = {
+  86400: 24 * 60 * 60 * 1000,
+  604800: 7 * 24 * 60 * 60 * 1000,
+  2592000: 30 * 24 * 60 * 60 * 1000,
+};
+
+function resolveExpiry(ttl: unknown, timestamp: number): number | undefined {
+  if (typeof ttl !== 'number' || !ALLOWED_TTL_MS[ttl]) return undefined;
+  return timestamp + ALLOWED_TTL_MS[ttl];
+}
+
+function isValidEmoji(emoji: unknown): emoji is string {
+  return typeof emoji === 'string' && emoji.length > 0 && emoji.length <= 16
+    && /[\p{Emoji_Presentation}\p{Extended_Pictographic}\u200d\uFE0F]/u.test(emoji);
+}
+
+   async function handleSealedSend(senderId: string, ws: WebSocket, payload: any): Promise<void> {
+    await handleDmSend(senderId, ws, { ...payload, sealed: payload?.sealed || true });
+  }
+
+  async function handleAddReaction(userId: string, ws: WebSocket, payload: { messageId: string; emoji: string }): Promise<void> {
+    if (!payload?.messageId || typeof payload.messageId !== 'string') return;
+    if (!isValidEmoji(payload.emoji)) return;
+    await addReaction(payload.messageId, userId, payload.emoji);
+    const reactions = await getReactionsForMessage(payload.messageId);
+    broadcastToMessageAudience(payload.messageId, userId, {
+      type: 'reaction_update',
+      payload: { messageId: payload.messageId, emoji: payload.emoji, userId, action: 'add', reactions },
+      timestamp: Date.now(),
+    });
+  }
+
+  async function handleRemoveReaction(userId: string, ws: WebSocket, payload: { messageId: string; emoji: string }): Promise<void> {
+    if (!payload?.messageId || typeof payload.messageId !== 'string') return;
+    if (!isValidEmoji(payload.emoji)) return;
+    await removeReaction(payload.messageId, userId, payload.emoji);
+    const reactions = await getReactionsForMessage(payload.messageId);
+    broadcastToMessageAudience(payload.messageId, userId, {
+      type: 'reaction_update',
+      payload: { messageId: payload.messageId, emoji: payload.emoji, userId, action: 'remove', reactions },
+      timestamp: Date.now(),
+    });
+  }
+
+  function broadcastToMessageAudience(messageId: string, actorUserId: string, message: ServerMessage): void {
+    void (async () => {
+      const target = await getMessageById(messageId);
+      if (!target) return;
+      if (!target.channel || target.channel === 'general') {
+        broadcast(message, actorUserId);
+        const sender = clients.get(actorUserId);
+        if (sender) send(sender.ws, message);
+        return;
+      }
+      const parts = target.channel.split(':');
+      for (const participantId of parts) {
+        const client = clients.get(participantId);
+        if (client && client.ws.readyState === WebSocket.OPEN) {
+          client.ws.send(JSON.stringify(message));
+        }
+      }
+    })();
   }
 
   async function handleDmHistory(userId: string, ws: WebSocket, payload: { with: string }): Promise<void> {
@@ -541,7 +627,7 @@ export function handleConnection(ws: WebSocket): void {
     const parts = channel.split(':');
     if (parts.length !== 2 || (parts[0] !== userId && parts[1] !== userId)) return;
     const messages = await getDmHistory(userId, payload.with, 100);
-    const publicKeys = await getAllPublicKeys();
+    const publicKeys = await getPublicKeysByIds([userId, payload.with]);
     send(ws, {
       type: 'dm_history',
       payload: {
@@ -558,6 +644,7 @@ export function handleConnection(ws: WebSocket): void {
           timestamp: m.timestamp,
           isOwn: m.senderId === userId,
           fileKey: m.fileKey || null,
+          expiresAt: m.expiresAt || null,
         })),
       },
       timestamp: Date.now(),
@@ -566,7 +653,7 @@ export function handleConnection(ws: WebSocket): void {
 
   async function handleDmContacts(userId: string, ws: WebSocket): Promise<void> {
     const contacts = await getDmContacts(userId);
-    const publicKeys = await getAllPublicKeys();
+    const publicKeys = await getPublicKeysByIds([userId, ...contacts.map(c => c.id)]);
     const onlineIds = new Set(Array.from(clients.keys()));
     const contactsWithOnline = contacts.map(c => ({ ...c, online: onlineIds.has(c.id) }));
     send(ws, { type: 'dm_contacts', payload: { contacts: contactsWithOnline, publicKeys }, timestamp: Date.now() });
@@ -594,7 +681,7 @@ export function handleConnection(ws: WebSocket): void {
       send(ws, { type: 'message_search_results', payload: { results: [] }, timestamp: Date.now() });
       return;
     }
-    const results = await searchMessages(query, payload.channel, 50);
+    const results = await searchMessages(query, payload.channel, 50, userId);
     send(ws, { type: 'message_search_results', payload: { results }, timestamp: Date.now() });
   }
 
@@ -617,7 +704,7 @@ export function handleConnection(ws: WebSocket): void {
       send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'messageId and text required' }, timestamp: Date.now() });
       return;
     }
-    const text = sanitize(payload.text);
+    const text = sanitizeText(payload.text);
     if (!text || text.length > 4096) {
       send(ws, { type: 'error', payload: { code: 'MESSAGE_TOO_LONG', message: 'Message too long (max 4096 chars)' }, timestamp: Date.now() });
       return;

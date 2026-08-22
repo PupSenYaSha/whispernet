@@ -7,6 +7,8 @@ import { readFileSync, existsSync, statSync } from 'fs';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 const SITE_DIR = path.join(ROOT, 'site');
+const SITE_PORT = parseInt(process.env.SITE_PORT || '3000', 10);
+const MESSENGER_PORT = parseInt(process.env.PORT || '50025', 10);
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -24,10 +26,11 @@ const MIME = {
   '.exe': 'application/octet-stream',
   '.zip': 'application/zip',
   '.gz': 'application/gzip',
+  '.tar': 'application/x-tar',
 };
 
 function serveStatic(req, res) {
-  let url = req.url.split('?')[0];
+  let url = (req.url || '/').split('?')[0];
   if (url === '/') url = '/index.html';
 
   const filePath = path.join(SITE_DIR, url);
@@ -41,9 +44,8 @@ function serveStatic(req, res) {
   if (!existsSync(filePath) || !statSync(filePath).isFile()) {
     const fallback = path.join(SITE_DIR, 'index.html');
     if (existsSync(fallback)) {
-      const content = readFileSync(fallback);
       res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(content);
+      res.end(readFileSync(fallback));
     } else {
       res.writeHead(404);
       res.end('Not Found');
@@ -70,14 +72,11 @@ function serveStatic(req, res) {
 function startSiteServer(port) {
   return new Promise((resolve) => {
     const server = createServer(serveStatic);
-    server.listen(port, '0.0.0.0', () => {
-      console.log(`  Landing page:  http://localhost:${port}`);
-      resolve(server);
-    });
+    server.listen(port, '0.0.0.0', () => resolve(server));
   });
 }
 
-function startMessengerServer() {
+function startMessenger(port) {
   return new Promise((resolve, reject) => {
     const tsx = path.join(ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs');
     const serverEntry = path.join(ROOT, 'server', 'index.ts');
@@ -85,7 +84,7 @@ function startMessengerServer() {
     const child = spawn(process.execPath, [tsx, serverEntry], {
       cwd: ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: { ...process.env, PORT: String(port) },
     });
 
     let started = false;
@@ -99,13 +98,10 @@ function startMessengerServer() {
       }
     });
 
-    child.stderr.on('data', (data) => {
-      process.stderr.write(data);
-    });
-
+    child.stderr.on('data', (data) => process.stderr.write(data));
     child.on('error', reject);
     child.on('exit', (code) => {
-      if (!started) reject(new Error(`Server exited with code ${code}`));
+      if (!started) reject(new Error(`Messenger exited with code ${code}`));
     });
 
     setTimeout(() => {
@@ -118,15 +114,30 @@ function startMessengerServer() {
 }
 
 async function main() {
+  const siteOnly = process.argv.includes('--site-only');
   console.log('\n  Starting WhisperNet...\n');
 
-  const siteServer = await startSiteServer(3000);
+  const siteServer = await startSiteServer(SITE_PORT);
+  console.log(`  Marketing site:  http://localhost:${SITE_PORT}`);
+
+  if (siteOnly) {
+    console.log('\n  Site-only mode. Press Ctrl+C to stop.\n');
+    const shutdown = () => {
+      console.log('\n  Shutting down...\n');
+      siteServer.close();
+      process.exit(0);
+    };
+    process.on('SIGINT', shutdown);
+    process.on('SIGTERM', shutdown);
+    return;
+  }
 
   let messengerProcess;
   try {
-    messengerProcess = await startMessengerServer();
+    messengerProcess = await startMessenger(MESSENGER_PORT);
+    console.log(`  Messenger app:   http://localhost:${MESSENGER_PORT}`);
   } catch (err) {
-    console.error('  Messenger server failed to start:', err.message);
+    console.error('  Messenger failed to start:', err.message);
   }
 
   console.log('\n  Ready! Press Ctrl+C to stop.\n');

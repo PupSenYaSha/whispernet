@@ -4,9 +4,10 @@ import type { User, AppSettings } from './types';
 import { generateKeyPair, encryptMessage, decryptMessage } from './crypto';
 import { encryptPrivateKey, decryptPrivateKey, isEncryptedBundle, isKeyBackup } from './crypto-keys';
 import { encryptPassword, decryptPassword } from './device-crypto';
-import { uploadImage } from './upload';
+import { uploadFile } from './upload';
+import { encryptFile, buildFileKeyMap, unwrapAndDecrypt, wrapForMedia } from './media-crypto';
 import { ConnectionContext, useConnection, type ConnectionState, type ConnectionAction } from './context';
-import { loadSettings, defaultSettings, translations, cn } from './utils';
+import { loadSettings, defaultSettings, translations, cn, getAvatarText, getAvatarGradient, formatTime } from './utils';
 
 declare const __APP_VERSION__: string;
 import {
@@ -230,6 +231,9 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'dm_history', payload: { with: userId } }));
       wsRef.current.send(JSON.stringify({ type: 'dm_contacts', payload: {} }));
+      if (!preKeyBundlesRef.current[userId]) {
+        wsRef.current.send(JSON.stringify({ type: 'prekey_fetch', payload: { userIds: [userId] } }));
+      }
       if (signalInitializedRef.current && !hasSession(userIdRef.current || '', userId) && preKeyBundlesRef.current[userId]) {
         try {
           const result = createSessionWithRemote(userIdRef.current || '', userId, preKeyBundlesRef.current[userId]);
@@ -389,7 +393,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               ws.close();
               break;
             case 'chat_history':
-              dispatch({ type: 'SET_MESSAGES', messages: message.payload.messages.map((m: any) => ({ id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text: m.text || '', timestamp: m.timestamp, isOwn: m.isOwn, fileKey: m.fileKey })) });
+              dispatch({ type: 'SET_MESSAGES', messages: message.payload.messages.map((m: any) => ({ id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text: m.text || '', timestamp: m.timestamp, isOwn: m.isOwn, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined })) });
               break;
             case 'dm_history': {
               if (message.payload.publicKeys) {
@@ -413,7 +417,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
                 } else if (m.encrypted && privateKeyRef.current && userIdRef.current) {
                   try { text = await decryptMessage(m.encrypted, userIdRef.current, privateKeyRef.current); } catch { if (!text) text = '[encrypted]'; }
                 }
-                return { id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text, timestamp: m.timestamp, isOwn: m.senderId === userIdRef.current, channel: otherId, fileKey: m.fileKey };
+                return { id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text, timestamp: m.timestamp, isOwn: m.senderId === userIdRef.current, channel: otherId, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined };
               }));
               dispatch({ type: 'SET_DM_MESSAGES', channel: otherId, messages: msgs });
               break;
@@ -438,14 +442,14 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               const ch = message.payload.channel;
               const parts = ch.split(':');
               const otherId = parts[0] === userIdRef.current ? parts[1] : parts[0];
-              dispatch({ type: 'ADD_DM_MESSAGE', channel: otherId, message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: msgText, timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, channel: otherId, fileKey: message.payload.fileKey } });
+              dispatch({ type: 'ADD_DM_MESSAGE', channel: otherId, message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: msgText, timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, channel: otherId, fileKey: message.payload.fileKey, expiresAt: message.payload.expiresAt || undefined } });
               dispatch({ type: 'SET_CONTACTS', contacts: [] });
               ws.send(JSON.stringify({ type: 'dm_contacts', payload: {} }));
               if (!message.payload.isOwn) { unreadCountRef.current++; updateTitle(); fireNotification(`@${message.payload.senderNickname}`, msgText); playNotifSound(); }
               break;
             }
             case 'chat_message':
-              dispatch({ type: 'ADD_MESSAGE', message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: message.payload.text || '', timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, fileKey: message.payload.fileKey } });
+              dispatch({ type: 'ADD_MESSAGE', message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: message.payload.text || '', timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, fileKey: message.payload.fileKey, expiresAt: message.payload.expiresAt || undefined } });
               if (!message.payload.isOwn) { unreadCountRef.current++; updateTitle(); fireNotification(`@${message.payload.senderNickname}`, message.payload.text || ''); playNotifSound(); }
               break;
             case 'dm_contacts':
@@ -567,10 +571,40 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const getMyPublicKey = useCallback((): JsonWebKey | null => publicKeyRef.current, []);
   const getPublicKey = useCallback((userId: string): JsonWebKey | null => publicKeysRef.current[userId] || null, []);
 
+  const ttlSeconds = useCallback(() => {
+    const ttl = state.settings.disappearingTTL;
+    if (ttl === '24h') return 86400;
+    if (ttl === '7d') return 604800;
+    if (ttl === '30d') return 2592000;
+    return undefined;
+  }, [state.settings.disappearingTTL]);
+
+  const decryptedMediaCacheRef = useRef<Map<string, string>>(new Map());
+
+  const decryptMedia = useCallback(async (message: { id: string; text: string; fileKey?: Record<string, string> }): Promise<string | null> => {
+    const cached = decryptedMediaCacheRef.current.get(message.id);
+    if (cached) return cached;
+    if (!privateKeyRef.current || !userIdRef.current || !message.fileKey) return null;
+    const entry = message.fileKey[userIdRef.current];
+    if (!entry) return null;
+    const mediaMatch = message.text.match(/^\[(image|video)\]([\s\S]*?)\[\/\1\]/);
+    if (!mediaMatch) return null;
+    try {
+      let url = mediaMatch[2];
+      url = `/api/media?url=${encodeURIComponent(url)}`;
+      const blob = await unwrapAndDecrypt(entry, url, privateKeyRef.current);
+      const objectUrl = URL.createObjectURL(blob);
+      decryptedMediaCacheRef.current.set(message.id, objectUrl);
+      return objectUrl;
+    } catch {
+      return null;
+    }
+  }, []);
+
   const sendMessage = useCallback(async (text: string) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !text.trim()) return;
-    wsRef.current.send(JSON.stringify({ type: 'chat_message', payload: { text: text.trim() } }));
-  }, []);
+    wsRef.current.send(JSON.stringify({ type: 'chat_message', payload: { text: text.trim(), ttl: ttlSeconds() } }));
+  }, [ttlSeconds]);
 
   const sendDm = useCallback(async (to: string, text: string, sealed: boolean = false) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !text.trim()) return;
@@ -581,7 +615,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
       if (signalInitializedRef.current && hasSession(userIdRef.current || '', to)) {
         const sessionId = getSessionId(userIdRef.current || '', to);
         const encrypted = await encryptWithSignal(sessionId, trimmed);
-        const payload: any = { to, text: '', signalEncrypted: encrypted };
+        const payload: any = { to, text: '', signalEncrypted: encrypted, ttl: ttlSeconds() };
         if (sealed) payload.sealed = true;
         if (pendingX3dhRef.current[to]) {
           payload.x3dhMessage = pendingX3dhRef.current[to].x3dhMessage;
@@ -591,39 +625,62 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         wsRef.current.send(JSON.stringify({ type: 'dm_send', payload }));
       } else {
         const encrypted = await encryptMessage(trimmed, buildEncryptKeys({ [to]: recipientKey }));
-        const payload: any = { to, text: '', encrypted };
+        const payload: any = { to, text: '', encrypted, ttl: ttlSeconds() };
         if (sealed) payload.sealed = true;
         wsRef.current.send(JSON.stringify({ type: 'dm_send', payload }));
       }
     } catch (e) { console.error('Encryption failed'); }
-  }, [buildEncryptKeys]);
+  }, [buildEncryptKeys, ttlSeconds]);
 
   const getMediaTag = (type: string): string => type.startsWith('video/') ? 'video' : 'image';
 
+  const prepareEncryptedMedia = useCallback(async (
+    file: File,
+    recipientIds: string[]
+  ): Promise<{ text: string; fileKey?: Record<string, string> }> => {
+    const enc = await encryptFile(file);
+    const url = await uploadFile(wrapForMedia(await enc.blob.arrayBuffer()), 'media.png');
+    const tag = getMediaTag(file.type);
+    const fileKey = await buildFileKeyMap(
+      enc.rawKey,
+      recipientIds,
+      (id) => publicKeysRef.current[id],
+      userIdRef.current || '',
+      publicKeyRef.current,
+      enc.ivB64
+    );
+    return { text: `[${tag}]${url}[/${tag}]`, fileKey: Object.keys(fileKey).length > 0 ? fileKey : undefined };
+  }, []);
+
   const sendImage = useCallback(async (file: File) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    const url = await uploadImage(file);
-    wsRef.current.send(JSON.stringify({ type: 'chat_message', payload: { text: `[${getMediaTag(file.type)}]${url}[/${getMediaTag(file.type)}]` } }));
-  }, []);
+    try {
+      const { text, fileKey } = await prepareEncryptedMedia(file, Object.keys(publicKeysRef.current));
+      wsRef.current.send(JSON.stringify({ type: 'chat_message', payload: { text, fileKey, ttl: ttlSeconds() } }));
+    } catch (e) { console.error('Image send failed'); }
+  }, [prepareEncryptedMedia, ttlSeconds]);
 
   const sendDmImage = useCallback(async (to: string, file: File) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    const url = await uploadImage(file);
-    const tag = getMediaTag(file.type);
-    const text = `[${tag}]${url}[/${tag}]`;
     const recipientKey = publicKeysRef.current[to];
     if (!privateKeyRef.current || !recipientKey) { console.error('Encryption keys not available'); return; }
     try {
+      const { text, fileKey } = await prepareEncryptedMedia(file, [to]);
+      const payload: any = { to, text: '', fileKey, ttl: ttlSeconds() };
       if (signalInitializedRef.current && hasSession(userIdRef.current || '', to)) {
         const sessionId = getSessionId(userIdRef.current || '', to);
-        const encrypted = await encryptWithSignal(sessionId, text);
-        wsRef.current.send(JSON.stringify({ type: 'dm_send', payload: { to, text: '', signalEncrypted: encrypted } }));
+        payload.signalEncrypted = await encryptWithSignal(sessionId, text);
+        if (pendingX3dhRef.current[to]) {
+          payload.x3dhMessage = pendingX3dhRef.current[to].x3dhMessage;
+          payload.ratchetPublicKey = Array.from(pendingX3dhRef.current[to].ratchetPublicKey);
+          delete pendingX3dhRef.current[to];
+        }
       } else {
-        const encrypted = await encryptMessage(text, buildEncryptKeys({ [to]: recipientKey }));
-        wsRef.current.send(JSON.stringify({ type: 'dm_send', payload: { to, text: '', encrypted } }));
+        payload.encrypted = await encryptMessage(text, buildEncryptKeys({ [to]: recipientKey }));
       }
+      wsRef.current.send(JSON.stringify({ type: 'dm_send', payload }));
     } catch (e) { console.error('Image encryption failed'); }
-  }, [buildEncryptKeys]);
+  }, [buildEncryptKeys, prepareEncryptedMedia, ttlSeconds]);
 
   useEffect(() => {
     const saved = localStorage.getItem('wn_auth');
@@ -702,7 +759,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         openDm, openGeneral, refreshContacts,
         searchUsers, searchMessages, deleteMessage,
         addReaction, removeReaction, editMessage,
-        t, updateSettings, getMyPublicKey, getPublicKey,
+        t, updateSettings, getMyPublicKey, getPublicKey, decryptMedia,
         sessions, requestSessions, revokeSession,
         showImportModal: (data: any, mode: 'setup' | 'settings') => setImportModal({ data, mode }),
       }}>
@@ -710,7 +767,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
       </ConnectionContext.Provider>
       {importModal && (
         <div className="fixed inset-0 z-[70]">
-          <PasswordModalInline title={t('enter_backup_password')} onCancel={() => setImportModal(null)} onConfirm={async (pass) => {
+          <PasswordModalInline title={t('enter_backup_password')} cancelLabel={t('cancel')} onCancel={() => setImportModal(null)} onConfirm={async (pass) => {
             try {
               const data = importModal.data;
               const privKey = await decryptPrivateKey(data.encryptedPrivateKey, pass);
@@ -735,7 +792,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   );
 }
 
-function PasswordModalInline({ title, onConfirm, onCancel }: { title: string; onConfirm: (password: string) => void; onCancel: () => void }) {
+function PasswordModalInline({ title, cancelLabel, onConfirm, onCancel }: { title: string; cancelLabel: string; onConfirm: (password: string) => void; onCancel: () => void }) {
   const [password, setPassword] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { inputRef.current?.focus(); }, []);
@@ -755,7 +812,7 @@ function PasswordModalInline({ title, onConfirm, onCancel }: { title: string; on
             className="w-full px-4 py-3 rounded-xl bg-bg-tertiary border border-border-default text-[15px] text-fg-primary placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary mb-4"
             placeholder="Password" />
           <div className="flex gap-3">
-            <button onClick={onCancel} className="flex-1 py-3 rounded-2xl border border-border-default text-fg-primary text-[15px] font-medium hover:bg-bg-tertiary transition-colors">Cancel</button>
+            <button onClick={onCancel} className="flex-1 py-3 rounded-2xl border border-border-default text-fg-primary text-[15px] font-medium hover:bg-bg-tertiary transition-colors">{cancelLabel}</button>
             <button onClick={() => password && onConfirm(password)} disabled={!password} className="flex-1 py-3 rounded-2xl bg-accent-primary text-accent-text text-[15px] font-semibold hover:opacity-90 transition-colors disabled:opacity-40">OK</button>
           </div>
         </div>
@@ -765,7 +822,7 @@ function PasswordModalInline({ title, onConfirm, onCancel }: { title: string; on
 }
 
 function AppInner() {
-  const { state, t } = useConnection();
+  const { state, t, reconnect, openGeneral, openDm, searchUsers } = useConnection();
   const [mobileTab, setMobileTab] = useState<'home' | 'settings'>('home');
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -819,7 +876,7 @@ function AppInner() {
                 <h2 className="text-lg font-semibold text-fg-primary mb-1">{t('status_disconnected')}</h2>
                 <p className="text-[13px] text-fg-muted">{state.status === 'reconnecting' ? t('reconnecting') : t('server_unreachable')}</p>
               </div>
-              <button onClick={() => {}} className="px-6 py-3 rounded-2xl bg-accent-primary text-accent-text font-medium hover:brightness-110 transition-all">{t('retry')}</button>
+              <button onClick={reconnect} className="px-6 py-3 rounded-2xl bg-accent-primary text-accent-text font-medium hover:brightness-110 transition-all">{t('retry')}</button>
             </>
           ) : (
             <>
@@ -842,8 +899,14 @@ function AppInner() {
   const handleSearch = (value: string) => {
     setSearchQuery(value);
     if (debounceRef.current) clearTimeout(debounceRef.current);
-    debounceRef.current = setTimeout(() => {}, 300);
+    debounceRef.current = setTimeout(() => {
+      if (value.trim()) searchUsers(value.trim());
+    }, 300);
   };
+
+  const mobileContacts = state.contacts.filter(c =>
+    !searchQuery.trim() || c.nickname.toLowerCase().includes(searchQuery.trim().toLowerCase())
+  );
 
   if (isMobile) {
     return (
@@ -864,10 +927,10 @@ function AppInner() {
                   className="w-full px-4 py-3 rounded-2xl bg-bg-tertiary border border-border-default text-[15px] text-fg-primary placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary" />
               </div>
               <div className="flex-1 overflow-y-auto">
-                {searchQuery.length === 0 && (
+                {searchQuery.trim().length === 0 && (
                   <>
                     <div className="px-3 pb-2">
-                      <button onClick={() => { useConnection().openGeneral(); setMobileChatOpen(true); }}
+                      <button onClick={() => { openGeneral(); setMobileChatOpen(true); }}
                         className="w-full flex items-center gap-4 px-4 py-4 rounded-2xl transition-all text-left hover:bg-bg-tertiary">
                         <div className="w-14 h-14 rounded-2xl bg-accent-primary/20 flex items-center justify-center flex-shrink-0">
                           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2">
@@ -880,7 +943,68 @@ function AppInner() {
                         </div>
                       </button>
                     </div>
+
+                    {mobileContacts.length > 0 && (
+                      <div className="px-3 pt-1 pb-2">
+                        <div className="px-1 py-2">
+                          <span className="text-[11px] font-semibold text-fg-muted uppercase tracking-wider">{t('contacts')}</span>
+                        </div>
+                        {mobileContacts.map(contact => {
+                          const userOnline = state.users.some(u => u.id === contact.id);
+                          return (
+                            <button key={contact.id}
+                              onClick={() => { openDm(contact.id); setMobileChatOpen(true); }}
+                              className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left hover:bg-bg-tertiary text-fg-primary">
+                              <div className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 relative shadow-sm"
+                                style={{ background: getAvatarGradient(contact.nickname) }}>
+                                <span className="text-[13px] font-bold text-white">{getAvatarText(contact.nickname)}</span>
+                                {userOnline && (
+                                  <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-status-success border-[2.5px] border-bg-secondary" />
+                                )}
+                              </div>
+                              <div className="min-w-0 flex-1">
+                                <span className="text-[15px] font-semibold block truncate">@{contact.nickname}</span>
+                                <span className="text-[12px] text-fg-muted mt-0.5 block">{formatTime(contact.lastMessage)}</span>
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </>
+                )}
+
+                {searchQuery.trim().length > 0 && state.searchResults.length > 0 && (
+                  <div className="px-3 pb-2">
+                    <div className="px-1 py-2">
+                      <span className="text-[11px] font-semibold text-fg-muted uppercase tracking-wider">{t('search_results')}</span>
+                    </div>
+                    {state.searchResults.map(user => (
+                      <button key={user.id}
+                        onClick={() => { openDm(user.id); setMobileChatOpen(true); setSearchQuery(''); }}
+                        className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left hover:bg-bg-tertiary text-fg-primary">
+                        <div className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 relative shadow-sm"
+                          style={{ background: getAvatarGradient(user.nickname) }}>
+                          <span className="text-[13px] font-bold text-white">{getAvatarText(user.nickname)}</span>
+                          {user.online && (
+                            <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-status-success border-[2.5px] border-bg-secondary" />
+                          )}
+                        </div>
+                        <div>
+                          <span className="text-[15px] font-semibold">@{user.nickname}</span>
+                          <span className={cn('block text-[12px] mt-0.5', user.online ? 'text-status-success' : 'text-fg-muted')}>
+                            {user.online ? t('online') : t('offline')}
+                          </span>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+
+                {searchQuery.trim().length > 0 && state.searchResults.length === 0 && (
+                  <div className="px-4 py-8 text-center">
+                    <p className="text-[13px] text-fg-muted">{t('no_results')}</p>
+                  </div>
                 )}
               </div>
             </div>

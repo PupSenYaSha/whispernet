@@ -22,7 +22,7 @@
     const meta = document.querySelector('meta[name="description"]');
     if (meta) {
       meta.setAttribute('content', lang === 'ru'
-        ? 'Минималистичный мессенджер с сквозным шифрованием на базе Signal Protocol'
+        ? 'Минималистичный мессенджер со сквозным шифрованием на базе Signal Protocol'
         : 'Minimalist messenger with end-to-end encryption based on Signal Protocol');
     }
     try {

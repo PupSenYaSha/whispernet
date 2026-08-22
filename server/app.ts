@@ -5,9 +5,12 @@ import fastifyMultipart from '@fastify/multipart';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
+import fs from 'fs';
+import { existsSync } from 'fs';
 import { handleConnection, startHeartbeatCheck, getTotalConnections } from './handlers.js';
-import { initializeDatabase } from './database.js';
+import { initializeDatabase, getMediaDir } from './database.js';
 import https from 'https';
+import http from 'http';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -44,8 +47,14 @@ function sanitizeFilename(name: string): string {
   return name.replace(/[\x00-\x1f\x7f\/\\"]/g, '').slice(0, 128) || 'upload';
 }
 
+function getMediaBase(): URL {
+  return new URL(process.env.MEDIA_BASE_URL || 'https://img.n1ko.dev');
+}
+
 export function createApp(clientDir?: string) {
   const app = fastify({ logger: false });
+  let mediaHost = 'img.n1ko.dev';
+  try { mediaHost = getMediaBase().host; } catch {}
 
   app.addHook('onRequest', async (req, reply) => {
     reply.header('X-Content-Type-Options', 'nosniff');
@@ -55,7 +64,7 @@ export function createApp(clientDir?: string) {
     reply.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
     reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     const host = req.headers.host || 'localhost';
-    reply.header('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https://img.n1ko.dev; connect-src 'self' wss://${host} ws://${host}; font-src 'self' https://fonts.gstatic.com`);
+    reply.header('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://${mediaHost} http://${mediaHost}; media-src 'self' blob: https://${mediaHost} http://${mediaHost}; connect-src 'self' wss://${host} ws://${host}; font-src 'self' https://fonts.gstatic.com`);
     const origin = req.headers.origin;
     if (origin) {
       const allowedHost = new URL(origin).host;
@@ -83,6 +92,18 @@ export function createApp(clientDir?: string) {
     const url = (req.query as any).url;
     if (!url || typeof url !== 'string') return reply.code(400).send({ error: 'Missing url' });
 
+    if (url.startsWith('/media/')) {
+      const id = path.basename(url);
+      if (!/^[a-f0-9]{32}$/.test(id)) return reply.code(400).send({ error: 'Invalid media id' });
+      const fp = path.join(getMediaDir(), id);
+      if (!existsSync(fp)) return reply.code(404).send({ error: 'Not found' });
+      const buf = await fs.promises.readFile(fp);
+      return reply
+        .header('Content-Type', 'application/octet-stream')
+        .header('Cache-Control', 'public, max-age=86400')
+        .send(buf);
+    }
+
     let parsed: URL;
     try {
       parsed = new URL(url);
@@ -90,14 +111,16 @@ export function createApp(clientDir?: string) {
       return reply.code(400).send({ error: 'Invalid URL' });
     }
 
-    if (parsed.hostname !== 'img.n1ko.dev' || parsed.protocol !== 'https:') {
+    const allowed = getMediaBase();
+    if (parsed.protocol !== allowed.protocol || parsed.hostname !== allowed.hostname || parsed.port !== allowed.port) {
       return reply.code(403).send({ error: 'Forbidden' });
     }
 
     const hijacked = reply.hijack();
     const raw = hijacked.raw;
 
-    const proxyReq = https.get(url, {
+    const lib = parsed.protocol === 'https:' ? https : http;
+    const proxyReq = lib.get(url, {
       headers: { 'User-Agent': 'WhisperNet' },
       timeout: 15000,
     }, (proxyRes) => {
@@ -140,10 +163,27 @@ export function createApp(clientDir?: string) {
       return reply.code(429).send({ error: 'Rate limit' });
     }
 
+    if ((process.env.MEDIA_STORAGE || 'remote') === 'local') {
+      const data = await req.file();
+      if (!data) return reply.code(400).send({ error: 'No file' });
+      if (!(data.mimetype.startsWith('image/') || data.mimetype.startsWith('video/') || data.mimetype === 'application/octet-stream')) {
+        return reply.code(400).send({ error: 'Invalid file type' });
+      }
+      const buf = await data.toBuffer();
+      if (buf.length > MAX_UPLOAD_SIZE) return reply.code(413).send({ error: 'File too large' });
+      const id = crypto.randomBytes(16).toString('hex');
+      await fs.promises.writeFile(path.join(getMediaDir(), id), buf);
+      return reply.send({ url: '/media/' + id });
+    }
+
     const data = await req.file();
     if (!data) return reply.code(400).send({ error: 'No file' });
 
-    if (!data.mimetype.startsWith('image/') && !data.mimetype.startsWith('video/')) {
+    if (!(
+      data.mimetype.startsWith('image/') ||
+      data.mimetype.startsWith('video/') ||
+      data.mimetype === 'application/octet-stream'
+    )) {
       return reply.code(400).send({ error: 'Invalid file type' });
     }
 
@@ -153,7 +193,7 @@ export function createApp(clientDir?: string) {
     }
 
     const boundary = '----FormBoundary' + crypto.randomUUID();
-    const fileName = sanitizeFilename(data.filename || 'upload');
+    const fileName = sanitizeFilename((data.filename || 'upload').replace(/\.[a-z0-9]{1,5}$/i, '')) + '.bin';
     const parts: Buffer[] = [];
     parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${data.mimetype}\r\n\r\n`));
     parts.push(fileBuffer);
@@ -161,7 +201,9 @@ export function createApp(clientDir?: string) {
     const body = Buffer.concat(parts);
 
     return new Promise<void>((resolve) => {
-      const req2 = https.request('https://img.n1ko.dev/upload', {
+      const uploadUrl = new URL('/upload', getMediaBase());
+      const lib = uploadUrl.protocol === 'https:' ? https : http;
+      const req2 = lib.request(uploadUrl, {
         method: 'POST',
         headers: {
           'Content-Type': `multipart/form-data; boundary=${boundary}`,
@@ -259,9 +301,10 @@ export async function startServer(clientDir?: string, dataDir?: string) {
   const PORT = process.env.PORT ? parseInt(process.env.PORT) : 50025;
   const HOST = process.env.HOST || '127.0.0.1';
 
-  if (dataDir) {
+  const resolvedDataDir = dataDir || process.env.DATA_DIR;
+  if (resolvedDataDir) {
     const { setDataDir } = await import('./database.js');
-    setDataDir(dataDir);
+    setDataDir(resolvedDataDir);
   }
   initializeDatabase();
   startHeartbeatCheck();

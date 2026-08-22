@@ -1,6 +1,7 @@
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { mkdirSync, existsSync } from 'fs';
+import fs from 'fs';
 import { readFile, writeFile } from 'fs/promises';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
@@ -10,10 +11,15 @@ let DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
 let USERS_FILE = path.join(DATA_DIR, 'users.json');
 let MESSAGES_FILE = path.join(DATA_DIR, 'messages.json');
 let PREKEYS_FILE = path.join(DATA_DIR, 'prekeys.json');
+let MEDIA_DIR = path.join(DATA_DIR, 'media');
 
 let usersMutex = { v: false };
 let messagesMutex = { v: false };
 let preKeysMutex = { v: false };
+
+try {
+  mkdirSync(DATA_DIR, { recursive: true });
+} catch {}
 
 const PREKEY_BUNDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MESSAGE_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
@@ -30,11 +36,37 @@ async function withMutex<T>(flag: { v: boolean }, fn: () => Promise<T>): Promise
   }
 }
 
+// Resilient atomic write: some environments (Windows + OneDrive/antivirus)
+// briefly lock files, causing rename to fail with EPERM. Retry the rename and
+// fall back to a direct overwrite so persistence never hard-fails a request.
+async function atomicWrite(target: string, data: string): Promise<void> {
+  const tmp = target + '.tmp';
+  await writeFile(tmp, data);
+  for (let attempt = 0; attempt < 6; attempt++) {
+    try {
+      fs.renameSync(tmp, target);
+      return;
+    } catch (e) {
+      if (attempt === 5) {
+        try { fs.writeFileSync(target, data); return; } catch { throw e; }
+      }
+      await new Promise(r => setTimeout(r, 20 * (attempt + 1)));
+    }
+  }
+}
+
 export function setDataDir(dir: string): void {
   DATA_DIR = dir;
   USERS_FILE = path.join(DATA_DIR, 'users.json');
   MESSAGES_FILE = path.join(DATA_DIR, 'messages.json');
+  PREKEYS_FILE = path.join(DATA_DIR, 'prekeys.json');
+  MEDIA_DIR = path.join(DATA_DIR, 'media');
   mkdirSync(DATA_DIR, { recursive: true });
+  mkdirSync(MEDIA_DIR, { recursive: true });
+}
+
+export function getMediaDir(): string {
+  return MEDIA_DIR;
 }
 
 interface StoredUser {
@@ -93,6 +125,39 @@ function isValidReaction(r: any): r is StoredReaction {
     && typeof r.timestamp === 'number';
 }
 
+interface StoredPreKeyBundle {
+  userId: string;
+  bundle: any;
+  createdAt: number;
+}
+
+function isValidPreKeyBundleEntry(e: any): e is StoredPreKeyBundle {
+  return typeof e === 'object' && e !== null
+    && typeof e.userId === 'string' && e.userId.length > 0
+    && typeof e.bundle === 'object' && e.bundle !== null
+    && typeof e.createdAt === 'number' && e.createdAt > 0;
+}
+
+async function loadPreKeyBundles(): Promise<Record<string, StoredPreKeyBundle>> {
+  if (!existsSync(PREKEYS_FILE)) return {};
+  try {
+    const data = await readFile(PREKEYS_FILE, 'utf-8');
+    const parsed = JSON.parse(data);
+    if (!Array.isArray(parsed)) return {};
+    const map: Record<string, StoredPreKeyBundle> = {};
+    for (const entry of parsed) {
+      if (isValidPreKeyBundleEntry(entry)) map[entry.userId] = entry;
+    }
+    return map;
+  } catch {
+    return {};
+  }
+}
+
+async function savePreKeyBundles(bundles: Record<string, StoredPreKeyBundle>): Promise<void> {
+  await atomicWrite(PREKEYS_FILE, JSON.stringify(Object.values(bundles), null, 2));
+}
+
 async function loadUsers(): Promise<StoredUser[]> {
   if (!existsSync(USERS_FILE)) return [];
   try {
@@ -106,10 +171,7 @@ async function loadUsers(): Promise<StoredUser[]> {
 }
 
 async function saveUsers(users: StoredUser[]): Promise<void> {
-  const tmp = USERS_FILE + '.tmp';
-  await writeFile(tmp, JSON.stringify(users, null, 2));
-  const { renameSync } = await import('fs');
-  renameSync(tmp, USERS_FILE);
+  await atomicWrite(USERS_FILE, JSON.stringify(users, null, 2));
 }
 
 async function loadMessages(): Promise<StoredMessage[]> {
@@ -125,10 +187,7 @@ async function loadMessages(): Promise<StoredMessage[]> {
 }
 
 async function saveMessages(messages: StoredMessage[]): Promise<void> {
-  const tmp = MESSAGES_FILE + '.tmp';
-  await writeFile(tmp, JSON.stringify(messages, null, 2));
-  const { renameSync } = await import('fs');
-  renameSync(tmp, MESSAGES_FILE);
+  await atomicWrite(MESSAGES_FILE, JSON.stringify(messages, null, 2));
 }
 
 async function loadReactions(): Promise<StoredReaction[]> {
@@ -146,24 +205,21 @@ async function loadReactions(): Promise<StoredReaction[]> {
 
 async function saveReactions(reactions: StoredReaction[]): Promise<void> {
   const REACTIONS_FILE = path.join(DATA_DIR, 'reactions.json');
-  const tmp = REACTIONS_FILE + '.tmp';
-  await writeFile(tmp, JSON.stringify(reactions, null, 2));
-  const { renameSync } = await import('fs');
-  renameSync(tmp, REACTIONS_FILE);
+  await atomicWrite(REACTIONS_FILE, JSON.stringify(reactions, null, 2));
 }
 
 export async function cleanupExpiredPreKeys(): Promise<number> {
   return withMutex(preKeysMutex, async () => {
-    await loadPreKeyBundles();
+    const bundles = await loadPreKeyBundles();
     const now = Date.now();
     let deleted = 0;
-    for (const [userId, bundle] of Object.entries(preKeyBundles)) {
-      if (now - bundle.createdAt > PREKEY_BUNDLE_TTL_MS) {
-        delete preKeyBundles[userId];
+    for (const [userId, entry] of Object.entries(bundles)) {
+      if (now - entry.createdAt > PREKEY_BUNDLE_TTL_MS) {
+        delete bundles[userId];
         deleted++;
       }
     }
-    if (deleted > 0) await savePreKeyBundles();
+    if (deleted > 0) await savePreKeyBundles(bundles);
     return deleted;
   });
 }
@@ -245,9 +301,27 @@ export async function updatePublicKey(userId: string, publicKey: any): Promise<v
   }
 
   export async function setPreKeyBundle(userId: string, bundle: any): Promise<void> {
-    await setPreKeyBundle(userId, bundle);
+    await withMutex(preKeysMutex, async () => {
+      const bundles = await loadPreKeyBundles();
+      bundles[userId] = { userId, bundle, createdAt: Date.now() };
+      await savePreKeyBundles(bundles);
+    });
   }
-  
+
+export async function getPreKeyBundle(userId: string): Promise<any | null> {
+  const bundles = await loadPreKeyBundles();
+  return bundles[userId]?.bundle || null;
+}
+
+export async function getAllPreKeyBundles(): Promise<Record<string, any>> {
+  const bundles = await loadPreKeyBundles();
+  const result: Record<string, any> = {};
+  for (const [userId, entry] of Object.entries(bundles)) {
+    result[userId] = entry.bundle;
+  }
+  return result;
+}
+
   export async function getAllUsers(): Promise<{ id: string; nickname: string }[]> {
   return (await loadUsers()).map(u => ({ id: u.id, nickname: u.nickname }));
 }
@@ -267,11 +341,12 @@ export async function saveMessage(
   fileKey?: Record<string, string>,
   sealed?: string,
   quotedMessageId?: string,
-  editedAt?: number
+  editedAt?: number,
+  expiresAt?: number
 ): Promise<void> {
   await withMutex(messagesMutex, async () => {
     const messages = await loadMessages();
-    messages.push({ id, senderId, senderNickname, text, timestamp, encrypted: encrypted || null, channel, fileKey: fileKey || null, sealed: sealed || undefined, quotedMessageId, editedAt });
+    messages.push({ id, senderId, senderNickname, text, timestamp, encrypted: encrypted || null, channel, fileKey: fileKey || null, sealed: sealed || undefined, quotedMessageId, editedAt, expiresAt });
     if (messages.length > 5000) messages.splice(0, messages.length - 5000);
     await saveMessages(messages);
   });
@@ -292,6 +367,11 @@ export async function updateMessageText(messageId: string, senderId: string, new
 export async function getRecentMessages(limit: number = 100, channel: string = 'general'): Promise<any[]> {
   const messages = await loadMessages();
   return messages.filter(m => m.channel === channel).slice(-limit);
+}
+
+export async function getMessageById(messageId: string): Promise<StoredMessage | null> {
+  const messages = await loadMessages();
+  return messages.find(m => m.id === messageId) || null;
 }
 
 export async function getDmHistory(userId1: string, userId2: string, limit: number = 100): Promise<any[]> {
@@ -325,13 +405,26 @@ export async function getDmContacts(userId: string): Promise<{ id: string; nickn
   return result.sort((a, b) => b.lastMessage - a.lastMessage);
 }
 
-export async function searchMessages(query: string, channel?: string, limit: number = 50): Promise<any[]> {
+export async function searchMessages(query: string, channel?: string, limit: number = 50, userId?: string): Promise<any[]> {
   const messages = await loadMessages();
   const q = query.toLowerCase();
   return messages
     .filter(m => {
-      if (channel && m.channel !== channel) return false;
       if (!m.text || typeof m.text !== 'string') return false;
+      if (userId) {
+        if (m.channel === 'general' || !m.channel) {
+          if (channel && channel !== 'general') return false;
+        } else if (m.channel.includes(':')) {
+          if (channel && m.channel !== channel) return false;
+          const parts = m.channel.split(':');
+          if (parts.length !== 2 || (parts[0] !== userId && parts[1] !== userId)) return false;
+        } else {
+          if (channel && m.channel !== channel) return false;
+          if (m.channel !== userId) return false;
+        }
+      } else if (channel && m.channel !== channel) {
+        return false;
+      }
       return m.text.toLowerCase().includes(q);
     })
     .slice(-limit);

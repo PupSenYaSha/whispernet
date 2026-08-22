@@ -49,6 +49,16 @@ export function MessageList({ messages }: { messages: Message[] }) {
     return acc;
   }, []);
 
+  function formatDateSeparator(ts: number): string {
+    const d = new Date(ts);
+    const now = new Date();
+    if (d.toDateString() === now.toDateString()) return t('today') || 'Today';
+    const yesterday = new Date(now);
+    yesterday.setDate(now.getDate() - 1);
+    if (d.toDateString() === yesterday.toDateString()) return t('yesterday') || 'Yesterday';
+    return d.toLocaleDateString([], { day: 'numeric', month: 'long' }) + (d.getFullYear() !== now.getFullYear() ? ` ${d.getFullYear()}` : '');
+  }
+
   if (messages.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center">
@@ -66,17 +76,30 @@ export function MessageList({ messages }: { messages: Message[] }) {
 
   return (
     <div ref={containerRef} className="flex-1 overflow-y-auto px-2 py-3 space-y-2" role="log" aria-live="polite">
-      {groupedMessages.map((group, i) => (
-        <div key={i} className="flex flex-col gap-0.5">
-          {group.map((msg, j) => (
-            <MessageItem
-              key={msg.id}
-              message={msg}
-              showAvatar={j === 0}
-            />
-          ))}
-        </div>
-      ))}
+      {groupedMessages.map((group, i) => {
+        const prevGroup = groupedMessages[i - 1];
+        const newDay = !prevGroup || new Date(prevGroup[0].timestamp).toDateString() !== new Date(group[0].timestamp).toDateString();
+        return (
+          <div key={i}>
+            {newDay && (
+              <div className="flex items-center justify-center py-2">
+                <span className="px-3 py-1 rounded-full bg-bg-tertiary/60 text-[11px] font-medium text-fg-muted">
+                  {formatDateSeparator(group[0].timestamp)}
+                </span>
+              </div>
+            )}
+            <div className="flex flex-col gap-0.5">
+              {group.map((msg, j) => (
+                <MessageItem
+                  key={msg.id}
+                  message={msg}
+                  showAvatar={j === 0}
+                />
+              ))}
+            </div>
+          </div>
+        );
+      })}
       <div ref={endRef} />
     </div>
   );

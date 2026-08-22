@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useConnection } from '../context';
-import { cn, formatTime, getAvatarText } from '../utils';
+import { cn, formatTime, getAvatarText, getAvatarGradient } from '../utils';
 
 export function ContactsPanel({ onSelect }: { onSelect: () => void }) {
   const { state, openDm, openGeneral, refreshContacts, searchUsers, t } = useConnection();
@@ -69,8 +69,9 @@ export function ContactsPanel({ onSelect }: { onSelect: () => void }) {
                   onClick={() => { openDm(user.id); setQuery(''); onSelect(); }}
                   className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left hover:bg-bg-tertiary text-fg-primary"
                 >
-                  <div className="w-12 h-12 rounded-2xl bg-accent-primary/10 flex items-center justify-center flex-shrink-0 relative">
-                    <span className="text-[13px] font-bold text-accent-primary">
+                  <div className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 relative shadow-sm"
+                    style={{ background: getAvatarGradient(user.nickname) }}>
+                    <span className="text-[13px] font-bold text-white">
                       {getAvatarText(user.nickname)}
                     </span>
                     {user.online && (
@@ -114,8 +115,9 @@ export function ContactsPanel({ onSelect }: { onSelect: () => void }) {
                         isActive ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-bg-tertiary text-fg-primary'
                       )}
                     >
-                      <div className="w-12 h-12 rounded-2xl bg-bg-tertiary flex items-center justify-center flex-shrink-0 relative">
-                        <span className="text-[13px] font-bold text-fg-muted">
+                      <div className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 relative shadow-sm"
+                        style={{ background: getAvatarGradient(contact.nickname) }}>
+                        <span className="text-[13px] font-bold text-white">
                           {getAvatarText(contact.nickname)}
                         </span>
                         {userOnline && (

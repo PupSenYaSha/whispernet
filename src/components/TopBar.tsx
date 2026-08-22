@@ -3,7 +3,7 @@ import { useConnection } from '../context';
 import { cn } from '../utils';
 
 export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick: () => void; isMobile?: boolean; onBack?: () => void }) {
-  const { state, openGeneral, t } = useConnection();
+  const { state, openGeneral, openDm, t } = useConnection();
   const [showUsers, setShowUsers] = useState(false);
   const isDm = state.activeChannel !== 'general';
   const dmContact = isDm ? state.contacts.find(c => c.id === state.activeChannel) : null;
@@ -96,7 +96,7 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
               @{state.nickname} (you)
             </span>
             {state.users.map(u => (
-              <button key={u.id} onClick={() => { setShowUsers(false); }}
+              <button key={u.id} onClick={() => { setShowUsers(false); openDm(u.id); }}
                 className="px-2.5 py-1 text-[12px] font-medium bg-bg-tertiary text-fg-muted rounded-lg hover:bg-accent-primary/10 hover:text-accent-primary transition-colors cursor-pointer">
                 @{u.nickname}
               </button>

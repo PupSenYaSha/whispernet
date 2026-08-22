@@ -7,6 +7,12 @@ function sanitize(input: string): string {
     .trim();
 }
 
+function sanitizeText(input: string): string {
+  return input
+    .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '')
+    .trim();
+}
+
 function isValidNickname(nick: string): boolean {
   return /^[a-zA-Z0-9_-]{3,16}$/.test(nick);
 }
@@ -30,6 +36,23 @@ describe('server sanitize', () => {
 
   it('preserves normal text', () => {
     expect(sanitize('Hello World 123')).toBe('Hello World 123');
+  });
+});
+
+describe('message text sanitize', () => {
+  it('removes control characters', () => {
+    expect(sanitizeText('hello\x00world')).toBe('helloworld');
+    expect(sanitizeText('test\x1ftext')).toBe('testtext');
+  });
+
+  it("preserves apostrophes and quotes in messages", () => {
+    expect(sanitizeText("don't stop")).toBe("don't stop");
+    expect(sanitizeText('she said "hi"')).toBe('she said "hi"');
+    expect(sanitizeText('a < b & c > d')).toBe('a < b & c > d');
+  });
+
+  it('trims whitespace', () => {
+    expect(sanitizeText('  hello  ')).toBe('hello');
   });
 });
 

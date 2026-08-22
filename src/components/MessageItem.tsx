@@ -1,10 +1,10 @@
 import type { Message } from '../types';
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { useConnection } from '../context';
-import { cn, formatTime, getAvatarText } from '../utils';
+import { cn, formatTime, getAvatarText, getAvatarGradient } from '../utils';
 
 export function MessageItem({ message, showAvatar = true }: { message: Message; showAvatar?: boolean }) {
-  const { state, deleteMessage: deleteMsg, addReaction, removeReaction, t } = useConnection();
+  const { state, deleteMessage: deleteMsg, addReaction, removeReaction, editMessage, decryptMedia, t } = useConnection();
   const isSystem = message.senderId === 'system';
   const isOwn = message.isOwn;
 
@@ -13,6 +13,8 @@ export function MessageItem({ message, showAvatar = true }: { message: Message; 
     : 'text-[15px]';
 
   const [showReactions, setShowReactions] = useState(false);
+  const [mediaUrl, setMediaUrl] = useState<string | null>(null);
+  const [mediaFailed, setMediaFailed] = useState(false);
   const reactionPickerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -24,6 +26,23 @@ export function MessageItem({ message, showAvatar = true }: { message: Message; 
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  const isMedia = /^\[(image|video)\][\s\S]*?\[\/\1\]/.test(message.text);
+
+  useEffect(() => {
+    let cancelled = false;
+    setMediaFailed(false);
+    if (isMedia && message.fileKey) {
+      decryptMedia(message).then((url) => {
+        if (cancelled) return;
+        if (url) setMediaUrl(url);
+        else setMediaFailed(true);
+      });
+    } else {
+      setMediaUrl(null);
+    }
+    return () => { cancelled = true; };
+  }, [message.id, message.text, message.fileKey, isMedia, decryptMedia]);
 
   if (isSystem) {
     return (
@@ -56,8 +75,9 @@ export function MessageItem({ message, showAvatar = true }: { message: Message; 
   return (
     <div className={`flex gap-2.5 px-4 animate-message ${isOwn ? 'flex-row-reverse' : 'flex-row'}`}>
       {!isOwn && showAvatar && (
-        <div className="flex-shrink-0 w-9 h-9 rounded-full bg-accent-primary/15 flex items-center justify-center mt-1">
-          <span className="text-[11px] font-bold text-accent-primary">
+        <div className="flex-shrink-0 w-9 h-9 rounded-full flex items-center justify-center mt-1 shadow-sm"
+          style={{ background: getAvatarGradient(message.senderNickname) }}>
+          <span className="text-[11px] font-bold text-white">
             {getAvatarText(message.senderNickname)}
           </span>
         </div>
@@ -91,7 +111,34 @@ export function MessageItem({ message, showAvatar = true }: { message: Message; 
             {(() => {
               const mediaMatch = message.text.match(/^\[(image|video)\]([\s\S]*?)\[\/\1\]/);
               if (mediaMatch) {
-                const [, tag, url] = mediaMatch;
+                const [, tag] = mediaMatch;
+                if (message.fileKey) {
+                  if (mediaFailed) {
+                    return <p className="whitespace-pre-wrap break-words text-status-error text-[13px]">{t('media_decrypt_error')}</p>;
+                  }
+                  if (!mediaUrl) {
+                    return (
+                      <div className="w-[240px] h-[160px] rounded-xl bg-bg-tertiary flex items-center justify-center">
+                        <svg className="animate-spin h-6 w-6 text-fg-muted" viewBox="0 0 24 24">
+                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" fill="none" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                        </svg>
+                      </div>
+                    );
+                  }
+                  if (tag === 'video') {
+                    return (
+                      <video src={mediaUrl} controls
+                        className="rounded-xl max-w-[340px] max-h-[340px]" />
+                    );
+                  }
+                  return (
+                    <img src={mediaUrl} alt=""
+                      className="rounded-xl max-w-[300px] max-h-[300px] object-cover cursor-pointer"
+                      onClick={() => { window.open(mediaUrl, '_blank', 'noopener,noreferrer'); }} />
+                  );
+                }
+                const [, , url] = mediaMatch;
                 const safeUrl = /^(https?:\/\/)/i.test(url) ? url : null;
                 if (!safeUrl) {
                   return <p className="whitespace-pre-wrap break-words text-status-error text-[13px]">Invalid URL</p>;
@@ -126,12 +173,12 @@ export function MessageItem({ message, showAvatar = true }: { message: Message; 
               aria-label="Reactions">
             😊
             </button>
-            {isOwn && (
+            {isOwn && !isMedia && (
               <button
                 onClick={() => {
-                  const newText = prompt('Edit message:', message.text);
-                  if (newText && newText !== message.text) {
-                    // Use the editMessage from context
+                  const newText = prompt(t('edit_message_prompt'), message.text);
+                  if (newText && newText.trim() && newText !== message.text) {
+                    editMessage(message.id, newText.trim());
                   }
                 }}
                 className="p-1.5 rounded-full hover:bg-bg-tertiary text-fg-muted hover:text-fg-primary transition-colors"
@@ -196,16 +243,6 @@ export function MessageItem({ message, showAvatar = true }: { message: Message; 
             </span>
           </div>
         </div>
-
-        <span className="text-[10px] text-fg-subtle mt-1 px-1">
-          {formatTime(message.timestamp)}
-          {message.editedAt && <span className="ml-1.5 text-fg-subtle/70">• edited</span>}
-          {expiresIn && (
-            <span className={`ml-1.5 text-[10px] font-mono ${expiresIn === 'expired' ? 'text-status-error' : 'text-accent-primary'}`}>
-              ⏳ {expiresIn}
-            </span>
-          )}
-        </span>
       </div>
     </div>
   );

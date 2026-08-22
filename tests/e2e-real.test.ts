@@ -1,0 +1,340 @@
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import WebSocket from 'ws';
+import http from 'http';
+import os from 'os';
+import fs from 'fs';
+import path from 'path';
+import {
+  encryptFile, buildFileKeyMap, unwrapAndDecrypt, wrapForMedia, bufToBase64, base64ToBuf,
+} from '../src/media-crypto.js';
+import {
+  generateKeyPair, encryptMessage, decryptMessage,
+} from '../src/crypto.js';
+
+function getMediaBase(): URL {
+  return new URL(process.env.MEDIA_BASE_URL || 'https://img.n1ko.dev');
+}
+
+class Client {
+  ws: WebSocket;
+  inbox: any[] = [];
+  constructor(public port: number) {
+    this.ws = new WebSocket(`ws://127.0.0.1:${port}/ws`);
+    this.ws.on('message', (data: Buffer) => {
+      try { this.inbox.push(JSON.parse(data.toString())); } catch {}
+    });
+  }
+  async open(): Promise<void> {
+    if (this.ws.readyState === WebSocket.OPEN) return;
+    await new Promise<void>((res, rej) => {
+      const to = setTimeout(() => rej(new Error('ws open timeout')), 8000);
+      this.ws.on('open', () => { clearTimeout(to); res(); });
+      this.ws.on('error', (e) => { clearTimeout(to); rej(e); });
+    });
+  }
+  send(type: string, payload: any): void {
+    this.ws.send(JSON.stringify({ type, payload }));
+  }
+  async next(filter?: (m: any) => boolean, timeout = 9000): Promise<any> {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const idx = this.inbox.findIndex(filter || (() => true));
+      if (idx >= 0) return this.inbox.splice(idx, 1)[0];
+      await new Promise((r) => setTimeout(r, 25));
+    }
+    throw new Error('timeout waiting for message (filter=' + (filter ? filter.toString().slice(0, 60) : 'any') + ')');
+  }
+}
+
+async function makeUser(port: number, nickHint: string) {
+  const nick = nickHint.slice(0, 4) + Math.random().toString(36).slice(2, 9);
+  const keys = await generateKeyPair();
+  const client = new Client(port);
+  await client.open();
+  client.send('auth_register', {
+    nickname: nick,
+    password: 'Passw0rd123',
+    publicKey: keys.publicKey,
+    preKeyBundle: {
+      bundleVersion: 1,
+      identityKey: 'ik-' + nick,
+      ed25519PublicKey: 'ek-' + nick,
+      signedPreKey: { publicKey: 'spk-' + nick, signature: [1, 2, 3] },
+      oneTimePreKey: null,
+    },
+  });
+  const resp = await client.next((m) => m.type === 'auth_success' || m.type === 'auth_failure');
+  if (resp.type === 'auth_failure') console.error('REG FAIL', nick, JSON.stringify(resp.payload));
+  expect(resp.type).toBe('auth_success');
+  return {
+    client,
+    userId: resp.payload.userId as string,
+    nick,
+    publicKey: keys.publicKey,
+    privateKey: keys.privateKey,
+  };
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+let app: any;
+let PORT = 0;
+let MEDIA_PORT = 0;
+let dataDir = '';
+
+async function uploadEncrypted(blob: Blob, port: number): Promise<string> {
+  const buf = Buffer.from(await (await wrapForMedia(await blob.arrayBuffer())).arrayBuffer());
+  const boundary = '----FormBoundaryTest';
+  const body = Buffer.concat([
+    Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="enc.bin"\r\nContent-Type: application/octet-stream\r\n\r\n`),
+    buf,
+    Buffer.from(`\r\n--${boundary}--\r\n`),
+  ]);
+  const res = await fetch(`http://127.0.0.1:${port}/api/upload`, {
+    method: 'POST',
+    headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+    body,
+  });
+  if (!res.ok) {
+    console.error('UPLOAD FAIL', res.status, await res.text());
+    throw new Error('upload failed ' + res.status);
+  }
+  const json = await res.json();
+  expect(json.url).toBeTruthy();
+  return json.url as string;
+}
+
+describe('WhisperNet real E2E', () => {
+  const EXTERNAL = process.env.WN_EXTERNAL_URL;
+  beforeAll(async () => {
+    dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wn-e2e-'));
+    process.env.DISABLE_RATE_LIMITS = '1';
+    const { setDataDir } = await import('../server/database.js');
+    setDataDir(dataDir);
+
+    if (EXTERNAL) {
+      // Use a real, externally-started server (real entrypoint, real media host).
+      const u = new URL(EXTERNAL);
+      PORT = Number(u.port) || 8080;
+      return;
+    }
+
+    // Local fake media host (in-process mode only)
+    const mediaFiles = new Map<string, Buffer>();
+    const mediaSrv = http.createServer((req, res) => {
+      if (req.method === 'POST' && req.url === '/upload') {
+        const chunks: Buffer[] = [];
+        req.on('data', (c) => chunks.push(c as Buffer));
+        req.on('end', () => {
+          const b = Buffer.concat(chunks);
+          const ct = (req.headers['content-type'] as string) || '';
+          const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(ct);
+          const bound = (m ? (m[1] || m[2]) : 'boundary').trim();
+          const delim = Buffer.from('--' + bound);
+          const idxs: number[] = [];
+          let from = 0;
+          while (true) {
+            const i = b.indexOf(delim, from);
+            if (i < 0) break;
+            idxs.push(i);
+            from = i + delim.length;
+          }
+          let content = Buffer.alloc(0);
+          for (let k = 0; k < idxs.length - 1; k++) {
+            let part = b.subarray(idxs[k] + delim.length, idxs[k + 1]);
+            if (part[0] === 0x0d && part[1] === 0x0a) part = part.subarray(2);
+            if (part.toString('latin1').includes('Content-Disposition')) {
+              const h = part.indexOf('\r\n\r\n');
+              if (h >= 0) {
+                let c = part.subarray(h + 4);
+                if (c.length >= 2 && c[c.length - 2] === 0x0d && c[c.length - 1] === 0x0a) c = c.subarray(0, c.length - 2);
+                content = Buffer.from(c);
+              }
+            }
+          }
+          const name = 'f' + Math.random().toString(36).slice(2) + '.bin';
+          mediaFiles.set(name, content);
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          res.end(`data: ${JSON.stringify({ status: 'ready', url: `http://127.0.0.1:${MEDIA_PORT}/f/${name}` })}\n`);
+        });
+      } else if (req.method === 'GET' && req.url && req.url.startsWith('/f/')) {
+        const f = mediaFiles.get(req.url.slice(3));
+        if (!f) { res.writeHead(404); res.end(); return; }
+        res.writeHead(200, { 'Content-Type': 'application/octet-stream' });
+        res.end(f);
+      } else { res.writeHead(404); res.end(); }
+    });
+    await new Promise<void>((r) => { mediaSrv.listen(0, '127.0.0.1', () => r()); });
+    MEDIA_PORT = (mediaSrv.address() as any).port;
+
+    const { createApp } = await import('../server/app.js');
+    process.env.MEDIA_STORAGE = 'local';
+    app = await createApp();
+    await app.listen({ port: 0, host: '127.0.0.1' });
+    PORT = (app.server.address() as any).port;
+  }, 30000);
+
+  afterAll(async () => {
+    try { if (app && app.close) await app.close(); } catch {}
+    try { await fs.promises.rm(dataDir, { recursive: true, force: true }); } catch {}
+  });
+
+  it('general chat: message broadcast to other user', async () => {
+    const a = await makeUser(PORT, 'alpha' + Date.now());
+    const b = await makeUser(PORT, 'beta' + Date.now());
+    await sleep(1100);
+    a.client.send('chat_message', { text: 'hello from alpha', ttl: 86400 });
+    const toB = await b.client.next((m) => m.type === 'chat_message' && m.payload.text === 'hello from alpha');
+    expect(toB.payload.senderNickname).toBe(a.nick);
+    expect(toB.payload.isOwn).toBe(false);
+    expect(toB.payload.expiresAt).toBeGreaterThan(Date.now());
+    const echo = await a.client.next((m) => m.type === 'chat_message' && m.payload.text === 'hello from alpha');
+    expect(echo.payload.isOwn).toBe(true);
+    expect(echo.payload.expiresAt).toBeGreaterThan(Date.now());
+    a.client.ws.close(); b.client.ws.close();
+  }, 20000);
+
+  it('encrypted DM round-trip with real WebCrypto', async () => {
+    const a = await makeUser(PORT, 'gamma' + Date.now());
+    const b = await makeUser(PORT, 'delta' + Date.now());
+    await sleep(1100);
+    const text = 'secret via RSA-OAEP AES-GCM';
+    const enc = await encryptMessage(text, { [b.userId]: b.publicKey });
+    expect(Object.keys(enc.encryptedKeys)).toContain(b.userId);
+    a.client.send('dm_send', { to: b.userId, text: '', encrypted: enc });
+    const toB = await b.client.next((m) => m.type === 'dm_message' && m.payload.encrypted);
+    const dec = await decryptMessage(toB.payload.encrypted, b.userId, b.privateKey);
+    expect(dec).toBe(text);
+    a.client.ws.close(); b.client.ws.close();
+  }, 20000);
+
+  it('plaintext DM is rejected (ENCRYPTION_REQUIRED)', async () => {
+    const a = await makeUser(PORT, 'eps' + Date.now());
+    const b = await makeUser(PORT, 'zeta' + Date.now());
+    await sleep(1100);
+    a.client.send('dm_send', { to: b.userId, text: 'cleartext' });
+    const err = await a.client.next((m) => m.type === 'error' && m.payload.code === 'ENCRYPTION_REQUIRED');
+    expect(err.payload.code).toBe('ENCRYPTION_REQUIRED');
+    a.client.ws.close(); b.client.ws.close();
+  }, 20000);
+
+  it('photo E2EE: encrypt -> upload -> fetch -> decrypt (byte-exact)', async () => {
+    const a = await makeUser(PORT, 'ph' + Date.now());
+    const b = await makeUser(PORT, 'pg' + Date.now());
+    const original = new Uint8Array(2048);
+    for (let i = 0; i < original.length; i++) original[i] = (i * 37) & 0xff;
+    const blob = new Blob([original], { type: 'application/octet-stream' });
+    const enc = await encryptFile(blob as any);
+    const url = await uploadEncrypted(enc.blob, PORT);
+    const fileKey = await buildFileKeyMap(
+      enc.rawKey,
+      [b.userId, a.userId],
+      (id) => id === b.userId ? b.publicKey : (id === a.userId ? a.publicKey : null),
+      a.userId,
+      a.publicKey,
+      enc.ivB64,
+    );
+    expect(fileKey[b.userId]).toBeTruthy();
+    await sleep(1100);
+    a.client.send('chat_message', { text: `[image]${url}[/image]`, fileKey });
+    const msg = await b.client.next((m) => m.type === 'chat_message' && /\[image\]/.test(m.payload.text));
+    expect(msg.payload.fileKey[b.userId]).toBeTruthy();
+    const proxyUrl = `http://127.0.0.1:${PORT}/api/media?url=${encodeURIComponent(url)}`;
+    const entry = msg.payload.fileKey[b.userId];
+    const decrypted = await unwrapAndDecrypt(entry, proxyUrl, b.privateKey);
+    const got = new Uint8Array(await decrypted.arrayBuffer());
+    expect(Buffer.from(got)).toEqual(Buffer.from(original));
+    a.client.ws.close(); b.client.ws.close();
+  }, 25000);
+
+  it('video E2EE: encrypt -> upload -> fetch -> decrypt (byte-exact)', async () => {
+    const a = await makeUser(PORT, 'vd' + Date.now());
+    const b = await makeUser(PORT, 'vc' + Date.now());
+    const original = new Uint8Array(4096);
+    for (let i = 0; i < original.length; i++) original[i] = (i * 13 + 5) & 0xff;
+    const blob = new Blob([original], { type: 'application/octet-stream' });
+    const enc = await encryptFile(blob as any);
+    const url = await uploadEncrypted(enc.blob, PORT);
+    const fileKey = await buildFileKeyMap(enc.rawKey, [b.userId, a.userId], (id) => id === b.userId ? b.publicKey : (id === a.userId ? a.publicKey : null), a.userId, a.publicKey, enc.ivB64);
+    await sleep(1100);
+    a.client.send('chat_message', { text: `[video]${url}[/video]`, fileKey });
+    const msg = await b.client.next((m) => m.type === 'chat_message' && /\[video\]/.test(m.payload.text));
+    const decrypted = await unwrapAndDecrypt(msg.payload.fileKey[b.userId], `http://127.0.0.1:${PORT}/api/media?url=${encodeURIComponent(url)}`, b.privateKey);
+    const got = new Uint8Array(await decrypted.arrayBuffer());
+    expect(Buffer.from(got)).toEqual(Buffer.from(original));
+    a.client.ws.close(); b.client.ws.close();
+  }, 25000);
+
+  it('reactions: add and remove broadcast to both participants (DM)', async () => {
+    const a = await makeUser(PORT, 'ra' + Date.now());
+    const b = await makeUser(PORT, 'rb' + Date.now());
+    await sleep(1100);
+    const text = 'react to me';
+    const enc = await encryptMessage(text, { [b.userId]: b.publicKey });
+    a.client.send('dm_send', { to: b.userId, text: '', encrypted: enc });
+    const dm = await b.client.next((m) => m.type === 'dm_message' && m.payload.encrypted);
+    const msgId = dm.payload.id;
+    await sleep(300);
+    a.client.send('add_reaction', { messageId: msgId, emoji: '👍' });
+    const addB = await b.client.next((m) => m.type === 'reaction_update' && m.payload.action === 'add' && m.payload.emoji === '👍');
+    expect(addB.payload.messageId).toBe(msgId);
+    const addA = await a.client.next((m) => m.type === 'reaction_update' && m.payload.action === 'add' && m.payload.emoji === '👍');
+    expect(addA.payload.userId).toBe(a.userId);
+    a.client.send('remove_reaction', { messageId: msgId, emoji: '👍' });
+    const rem = await b.client.next((m) => m.type === 'reaction_update' && m.payload.action === 'remove');
+    expect(rem.payload.emoji).toBe('👍');
+    a.client.ws.close(); b.client.ws.close();
+  }, 25000);
+
+  it('search privacy: third user cannot read others DM; public search works', async () => {
+    const a = await makeUser(PORT, 'sa' + Date.now());
+    const b = await makeUser(PORT, 'sb' + Date.now());
+    const c = await makeUser(PORT, 'sc' + Date.now());
+    const secret = 'SUPERSECRETDM_' + Date.now();
+    const enc = await encryptMessage(secret, { [b.userId]: b.publicKey });
+    await sleep(1100);
+    a.client.send('dm_send', { to: b.userId, text: '', encrypted: enc });
+    await a.client.next((m) => m.type === 'dm_message');
+    // public message (general chat is plaintext by design)
+    const pub = 'PUBLICMSG_' + Date.now();
+    await sleep(300);
+    a.client.send('chat_message', { text: pub });
+    await b.client.next((m) => m.type === 'chat_message' && m.payload.text === pub);
+    await sleep(300);
+    // C (non-participant) searching the DM secret -> must find nothing
+    c.client.send('search_messages', { query: secret });
+    const cRes = await c.client.next((m) => m.type === 'message_search_results');
+    expect(cRes.payload.results.length).toBe(0);
+    // C searching the public message -> finds it (proves search scope works)
+    c.client.send('search_messages', { query: pub });
+    const cRes2 = await c.client.next((m) => m.type === 'message_search_results');
+    expect(cRes2.payload.results.length).toBeGreaterThan(0);
+    // A searching own DM secret -> ciphertext stored, so no plaintext match (E2EE at rest)
+    a.client.send('search_messages', { query: secret });
+    const aRes = await a.client.next((m) => m.type === 'message_search_results');
+    expect(aRes.payload.results.length).toBe(0);
+    a.client.ws.close(); b.client.ws.close(); c.client.ws.close();
+  }, 25000);
+
+  it('prekey_fetch returns stored bundle', async () => {
+    const a = await makeUser(PORT, 'pk' + Date.now());
+    const b = await makeUser(PORT, 'pk2' + Date.now());
+    await sleep(300);
+    a.client.send('prekey_fetch', { userIds: [b.userId] });
+    const res = await a.client.next((m) => m.type === 'prekey_bundles');
+    expect(res.payload.bundles[b.userId]).toBeTruthy();
+    expect(res.payload.bundles[b.userId].identityKey).toBe('ik-' + b.nick);
+    a.client.ws.close(); b.client.ws.close();
+  }, 20000);
+
+  it('media proxy blocks foreign hosts (SSRF guard)', async () => {
+    const a = await makeUser(PORT, 'se' + Date.now());
+    const url = 'http://127.0.0.1:' + PORT + '/api/media?url=' + encodeURIComponent('https://example.com/evil.jpg');
+    const res = await fetch(url);
+    expect(res.status).toBe(403);
+    a.client.ws.close();
+  }, 20000);
+
+  // keep helper referenced to avoid unused warnings
+  void bufToBase64; void base64ToBuf;
+});
