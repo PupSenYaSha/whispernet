@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import { appendFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { nextMondayMidnightMSK } from './time.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LOG_DIR = path.join(__dirname, '../data');
@@ -486,7 +487,7 @@ export function handleConnection(ws: WebSocket): void {
     send(ws, { type: 'chat_message', payload: { ...messagePayload, isOwn: true, channel: 'general' }, timestamp });
   }
 
-   async function handleDmSend(senderId: string, ws: WebSocket, payload: { to: string; text: string; encrypted?: any; signalEncrypted?: any; fileKey?: Record<string, string>; sealed?: string; ttl?: number; reaction?: { messageId: string; userId: string; emoji: string } }): Promise<void> {
+    async function handleDmSend(senderId: string, ws: WebSocket, payload: { to?: string; toKey?: any; text: string; encrypted?: any; signalEncrypted?: any; fileKey?: Record<string, string>; sealed?: string; ttl?: number; reaction?: { messageId: string; userId: string; emoji: string } }): Promise<void> {
     if (!checkMessageRateLimit(ip)) {
       send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down.' }, timestamp: Date.now() });
       return;
@@ -494,12 +495,30 @@ export function handleConnection(ws: WebSocket): void {
 
     const sender = clients.get(senderId);
     if (!sender) return;
-    if (!payload?.to || typeof payload.to !== 'string' || payload.to === senderId) {
+    if (!payload?.toKey && (!payload?.to || typeof payload.to !== 'string')) {
       send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Missing recipient' }, timestamp: Date.now() });
       return;
     }
 
-    const recipientUser = await getUserByNickname(payload.to) || (await getAllUsers()).find(u => u.id === payload.to);
+    // Resolve the recipient. When `toKey` (the recipient's public key) is present we route
+    // by public key instead of by username/userId, so a network observer of the WS stream
+    // cannot see who a direct message is addressed to (sealed-sender style metadata hiding).
+    let recipientUser: any = null;
+    if (payload?.toKey && typeof payload.toKey === 'object' && payload.toKey.kty) {
+      const keysMap = await getAllPublicKeys();
+      const keyStr = canonicalJwk(payload.toKey);
+      let rid: string | null = null;
+      for (const [uid, jwk] of Object.entries(keysMap)) {
+        if (jwk && canonicalJwk(jwk) === keyStr) { rid = uid; break; }
+      }
+      if (rid) recipientUser = { id: rid, nickname: '', publicKey: null };
+    } else if (payload?.to) {
+      recipientUser = await getUserByNickname(payload.to) || (await getAllUsers()).find(u => u.id === payload.to);
+    }
+    if (recipientUser && recipientUser.id === senderId) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Cannot message yourself' }, timestamp: Date.now() });
+      return;
+    }
     if (!recipientUser) {
       send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Recipient not found' }, timestamp: Date.now() });
       return;
@@ -570,6 +589,13 @@ function resolveExpiry(ttl: unknown, timestamp: number): number | undefined {
 function isValidEmoji(emoji: unknown): emoji is string {
   return typeof emoji === 'string' && emoji.length > 0 && emoji.length <= 16
     && /[\p{Emoji_Presentation}\p{Extended_Pictographic}\u200d\uFE0F]/u.test(emoji);
+}
+
+// Stable string form of a JWK (key order independent) for public-key based routing lookups.
+function canonicalJwk(jwk: any): string {
+  const sorted: Record<string, any> = {};
+  for (const k of Object.keys(jwk || {}).sort()) sorted[k] = jwk[k];
+  return JSON.stringify(sorted);
 }
 
    async function handleSealedSend(senderId: string, ws: WebSocket, payload: any): Promise<void> {
@@ -819,17 +845,13 @@ export function startHeartbeatCheck(): void {
 }
 
 function scheduleWeeklyCleanup(): void {
-  const now = new Date();
-  const nextMonday = new Date(now);
-  nextMonday.setDate(now.getDate() + ((1 + 7 - now.getDay()) % 7 || 7));
-  nextMonday.setHours(0, 0, 0, 0);
-
-  const msUntilMonday = nextMonday.getTime() - now.getTime();
+  const msUntilMonday = nextMondayMidnightMSK() - Date.now();
 
   setTimeout(async () => {
     const deleted = await deleteGeneralMessages();
     logSecurity('WEEKLY_CLEANUP', { deletedMessages: deleted });
-    console.log(`[Cleanup] Deleted ${deleted} general chat messages`);
+    console.log(`[Cleanup] Deleted ${deleted} general chat messages (Moscow 00:00 Monday)`);
+    broadcast({ type: 'chat_cleared', payload: { channel: 'general' }, timestamp: Date.now() });
 
     scheduleWeeklyCleanup();
   }, msUntilMonday);

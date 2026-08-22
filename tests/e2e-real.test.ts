@@ -208,6 +208,20 @@ describe('WhisperNet real E2E', () => {
     a.client.ws.close(); b.client.ws.close();
   }, 20000);
 
+  it('sealed-sender: DM routed by recipient public key (toKey), username hidden', async () => {
+    const a = await makeUser(PORT, 'seala' + Date.now());
+    const b = await makeUser(PORT, 'sealb' + Date.now());
+    await sleep(1100);
+    const text = 'secret via toKey routing';
+    const enc = await encryptMessage(text, { [b.userId]: b.publicKey });
+    a.client.send('dm_send', { toKey: b.publicKey, text: '', encrypted: enc });
+    const toB = await b.client.next((m) => m.type === 'dm_message' && m.payload.encrypted);
+    const dec = await decryptMessage(toB.payload.encrypted, b.userId, b.privateKey);
+    expect(dec).toBe(text);
+    expect(toB.payload.senderNickname).toBe(a.nick);
+    a.client.ws.close(); b.client.ws.close();
+  }, 20000);
+
   it('plaintext DM is rejected (ENCRYPTION_REQUIRED)', async () => {
     const a = await makeUser(PORT, 'eps' + Date.now());
     const b = await makeUser(PORT, 'zeta' + Date.now());

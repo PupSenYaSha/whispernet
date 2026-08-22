@@ -265,6 +265,12 @@ export async function getUserByNickname(nickname: string): Promise<{ id: string;
   return user ? { id: user.id, nickname: user.nickname, passwordHash: user.passwordHash, publicKey: user.publicKey || null } : null;
 }
 
+export async function getUserById(id: string): Promise<{ id: string; nickname: string; publicKey: any } | null> {
+  const users = await loadUsers();
+  const user = users.find(u => u.id === id);
+  return user ? { id: user.id, nickname: user.nickname, publicKey: user.publicKey || null } : null;
+}
+
 export async function getAllPublicKeys(): Promise<Record<string, any>> {
   const users = await loadUsers();
   const keys: Record<string, any> = {};
@@ -281,12 +287,6 @@ export async function getPublicKeysByIds(ids: string[]): Promise<Record<string, 
     if (ids.includes(user.id) && user.publicKey) keys[user.id] = user.publicKey;
   }
   return keys;
-}
-
-export async function getUserById(id: string): Promise<{ id: string; nickname: string; publicKey: any } | null> {
-  const users = await loadUsers();
-  const user = users.find(u => u.id === id);
-  return user ? { id: user.id, nickname: user.nickname, publicKey: user.publicKey || null } : null;
 }
 
 export async function updatePublicKey(userId: string, publicKey: any): Promise<void> {

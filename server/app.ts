@@ -51,6 +51,20 @@ function getMediaBase(): URL {
   return new URL(process.env.MEDIA_BASE_URL || 'https://img.n1ko.dev');
 }
 
+// Load TLS material when provided via env so the server can terminate HTTPS/WSS directly.
+// Production deployments should always set these (or sit behind a TLS-terminating reverse proxy).
+function loadHttpsOptions(): { key: Buffer; cert: Buffer } | null {
+  const keyPath = process.env.TLS_KEY || process.env.HTTPS_KEY;
+  const certPath = process.env.TLS_CERT || process.env.HTTPS_CERT;
+  if (!keyPath || !certPath) return null;
+  try {
+    return { key: fs.readFileSync(keyPath), cert: fs.readFileSync(certPath) };
+  } catch (e) {
+    console.error('Failed to load TLS certificates:', (e as Error).message);
+    return null;
+  }
+}
+
 export function createApp(clientDir?: string) {
   const app = fastify({ logger: false });
   let mediaHost = 'img.n1ko.dev';
@@ -311,9 +325,13 @@ export async function startServer(clientDir?: string, dataDir?: string) {
 
   const app = createApp(clientDir);
 
+  const httpsOpts = loadHttpsOptions();
+  const listenOpts: any = { port: PORT, host: HOST };
+  if (httpsOpts) Object.assign(listenOpts, { https: httpsOpts });
+
   try {
-    await app.listen({ port: PORT, host: HOST });
-    console.log(`Server running on ${HOST}:${PORT}`);
+    await app.listen(listenOpts);
+    console.log(`Server running on ${HOST}:${PORT}${httpsOpts ? ' (HTTPS/WSS)' : ''}`);
     return app;
   } catch (err) {
     console.error('Server failed:', err);

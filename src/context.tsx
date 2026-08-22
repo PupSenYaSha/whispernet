@@ -46,6 +46,7 @@ export type ConnectionAction =
   | { type: 'ADD_REACTION'; messageId: string; emoji: string; userId: string }
   | { type: 'REMOVE_REACTION'; messageId: string; emoji: string; userId: string }
   | { type: 'UPDATE_MESSAGE'; messageId: string; text: string; editedAt: number }
+  | { type: 'CLEAR_GENERAL' }
   | { type: 'RESET' };
 
 export interface ConnectionContextType {

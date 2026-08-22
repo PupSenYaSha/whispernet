@@ -62,6 +62,8 @@ function connectionReducer(state: ConnectionState, action: ConnectionAction): Co
       return { ...state, messages: [...state.messages, action.message] };
     case 'SET_MESSAGES':
       return { ...state, messages: action.messages };
+    case 'CLEAR_GENERAL':
+      return { ...state, messages: [] };
     case 'SET_DM_MESSAGES':
       return { ...state, dmMessages: { ...state.dmMessages, [action.channel]: action.messages } };
     case 'ADD_DM_MESSAGE':
@@ -452,6 +454,11 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               dispatch({ type: 'ADD_MESSAGE', message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: message.payload.text || '', timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, fileKey: message.payload.fileKey, expiresAt: message.payload.expiresAt || undefined } });
               if (!message.payload.isOwn) { unreadCountRef.current++; updateTitle(); fireNotification(`@${message.payload.senderNickname}`, message.payload.text || ''); playNotifSound(); }
               break;
+            case 'chat_cleared':
+              if (message.payload?.channel === 'general') {
+                dispatch({ type: 'CLEAR_GENERAL' });
+              }
+              break;
             case 'dm_contacts':
               if (message.payload.publicKeys) { publicKeysRef.current = { ...publicKeysRef.current, ...message.payload.publicKeys }; if (userIdRef.current && publicKeyRef.current) publicKeysRef.current[userIdRef.current] = publicKeyRef.current; }
               dispatch({ type: 'SET_CONTACTS', contacts: message.payload.contacts });
@@ -615,7 +622,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
       if (signalInitializedRef.current && hasSession(userIdRef.current || '', to)) {
         const sessionId = getSessionId(userIdRef.current || '', to);
         const encrypted = await encryptWithSignal(sessionId, trimmed);
-        const payload: any = { to, text: '', signalEncrypted: encrypted, ttl: ttlSeconds() };
+        const payload: any = { toKey: recipientKey, text: '', signalEncrypted: encrypted, ttl: ttlSeconds() };
         if (sealed) payload.sealed = true;
         if (pendingX3dhRef.current[to]) {
           payload.x3dhMessage = pendingX3dhRef.current[to].x3dhMessage;
@@ -625,7 +632,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         wsRef.current.send(JSON.stringify({ type: 'dm_send', payload }));
       } else {
         const encrypted = await encryptMessage(trimmed, buildEncryptKeys({ [to]: recipientKey }));
-        const payload: any = { to, text: '', encrypted, ttl: ttlSeconds() };
+        const payload: any = { toKey: recipientKey, text: '', encrypted, ttl: ttlSeconds() };
         if (sealed) payload.sealed = true;
         wsRef.current.send(JSON.stringify({ type: 'dm_send', payload }));
       }
@@ -666,7 +673,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     if (!privateKeyRef.current || !recipientKey) { console.error('Encryption keys not available'); return; }
     try {
       const { text, fileKey } = await prepareEncryptedMedia(file, [to]);
-      const payload: any = { to, text: '', fileKey, ttl: ttlSeconds() };
+      const payload: any = { toKey: recipientKey, text: '', fileKey, ttl: ttlSeconds() };
       if (signalInitializedRef.current && hasSession(userIdRef.current || '', to)) {
         const sessionId = getSessionId(userIdRef.current || '', to);
         payload.signalEncrypted = await encryptWithSignal(sessionId, text);
