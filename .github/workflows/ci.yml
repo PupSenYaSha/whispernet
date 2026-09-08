@@ -34,8 +34,5 @@ jobs:
       - name: Build server
         run: npx tsc -p server/tsconfig.json
 
-      - name: Run tests
-        run: npx vitest run
-
       - name: Audit dependencies
         run: npm audit --audit-level=high

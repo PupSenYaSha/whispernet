@@ -33,12 +33,11 @@ Short usage: `npm start` — installs deps if needed, builds the client, then se
 
 Pre-built binaries on [Releases](https://github.com/PupSenYaSha/whispernet/releases) — Windows portable exe, Linux tar.gz, Android APK.
 
-## Hosted instances
+## Hosted instance
 
 | App | URL |
 |-----|-----|
 | Messenger (Web app) | `https://rightfully-nice-ram.cloudpub.ru/` |
-| Marketing site | `https://unkindly-literate-wigeon.cloudpub.ru/` |
 
 ## License
 

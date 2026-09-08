@@ -7,8 +7,5 @@ data/
 android/app/build/
 android/.gradle/
 android/.idea/
-ios/App/build/
-ios/DerivedData/
-# Pre-built app binaries live on GitHub Releases; deploy.sh syncs them into
-# site/downloads/ on the server. They must NOT be committed to the repo.
-site/downloads/
+ios/
+site/
