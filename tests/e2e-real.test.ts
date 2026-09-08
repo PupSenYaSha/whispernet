@@ -519,6 +519,34 @@ describe('WhisperNet real E2E', () => {
     a.client.ws.close(); b.client.ws.close();
   }, 25000);
 
+  it('reactions: persist and are returned in chat_history after reconnect', async () => {
+    const a = await makeUser(PORT, 'rxP' + Date.now());
+    const b = await makeUser(PORT, 'rxQ' + Date.now());
+    await sleep(1100);
+
+    a.client.send('chat_message', { text: 'persist reaction' });
+    const echo = await a.client.next((m) => m.type === 'chat_message' && m.payload.text === 'persist reaction');
+    const msgId = echo.payload.id;
+
+    b.client.send('add_reaction', { messageId: msgId, emoji: '👍' });
+    await b.client.next((m) => m.type === 'reaction_update' && m.payload.action === 'add' && m.payload.emoji === '👍');
+
+    // Reconnect B: the reloaded chat history must carry the stored reaction.
+    const c = new Client(PORT);
+    await c.open();
+    c.send('auth_login', { nickname: b.nick, password: 'Passw0rd123', deviceId: 'rx-re' });
+    const auth = await c.next((m) => m.type === 'auth_success' || m.type === 'auth_failure');
+    expect(auth.type).toBe('auth_success');
+    const hist = await c.next((m) => m.type === 'chat_history');
+    const found = hist.payload.messages.find((x: any) => x.id === msgId);
+    expect(found).toBeTruthy();
+    const mine = (found.reactions as any[]).filter((r) => r.userId === b.userId);
+    expect(mine.length).toBe(1);
+    expect(mine[0].emoji).toBe('👍');
+
+    c.ws.close(); a.client.ws.close(); b.client.ws.close();
+  }, 25000);
+
   it('sessions: 4th new device is rejected (existing sessions are never evicted)', async () => {
     const a = await makeUser(PORT, 'sesA' + Date.now());
     a.client.ws.close();

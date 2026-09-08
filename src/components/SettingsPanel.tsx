@@ -255,7 +255,7 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
           <Segmented
             value={state.settings.language}
             onChange={(lang) => updateSettings({ language: lang })}
-            options={[{ value: 'en', label: 'English' }, { value: 'ru', label: 'Russian' }]}
+            options={[{ value: 'en', label: 'English' }, { value: 'ru', label: t('lang_ru') }]}
           />
         </Option>
       </Section>
@@ -365,7 +365,6 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
                   {t('admin_ban')}
                 </button>
               </div>
-              <p className="text-[11px] text-fg-muted mt-1.5 leading-relaxed">{t('admin_ban_nick_hint')}</p>
             </div>
 
             <div>
@@ -385,7 +384,6 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
                   <polyline points="6 9 12 15 18 9" />
                 </svg>
               </button>
-              <p className="text-[11px] text-fg-muted mt-1.5 leading-relaxed">{t('admin_banned_note')}</p>
               {banListOpen && (
                 <div className="mt-2 space-y-1.5">
                   {bannedUsers.length === 0 ? (

@@ -529,24 +529,26 @@ export function handleConnection(ws: WebSocket): void {
     send(ws, { type: 'auth_success', payload: { userId, nickname, deviceId, publicKeys, preKeyBundles: {}, onlineUsers, role: await isAdminNickname(nickname) ? 'admin' : 'user' }, timestamp: Date.now() });
 
     const history = await getRecentMessages(100);
+    const messages = await Promise.all(history.map(async m => ({
+      id: m.id,
+      senderId: m.senderId,
+      senderNickname: m.senderNickname,
+      text: m.text,
+      encrypted: m.encrypted || null,
+      timestamp: m.timestamp,
+      isOwn: m.senderId === userId,
+      fileKey: m.fileKey || null,
+      expiresAt: m.expiresAt || null,
+      quotedMessageId: m.quotedMessageId ?? null,
+      quotedMessageText: m.quotedMessageText ?? null,
+      quotedMessageSender: m.quotedMessageSender ?? null,
+      reactions: await getReactionsForMessage(m.id),
+    })));
     send(ws, {
       type: 'chat_history',
       payload: {
         channel: 'general',
-        messages: history.map(m => ({
-          id: m.id,
-          senderId: m.senderId,
-          senderNickname: m.senderNickname,
-          text: m.text,
-          encrypted: m.encrypted || null,
-          timestamp: m.timestamp,
-          isOwn: m.senderId === userId,
-          fileKey: m.fileKey || null,
-          expiresAt: m.expiresAt || null,
-          quotedMessageId: m.quotedMessageId ?? null,
-          quotedMessageText: m.quotedMessageText ?? null,
-          quotedMessageSender: m.quotedMessageSender ?? null,
-        })),
+        messages,
       },
       timestamp: Date.now(),
     });
@@ -611,6 +613,7 @@ export function handleConnection(ws: WebSocket): void {
       quotedMessageId: quoted?.id,
       quotedMessageText: quoted?.text,
       quotedMessageSender: quoted?.sender,
+      reactions: await getReactionsForMessage(messageId),
     };
 
     broadcast({ type: 'chat_message', payload: { ...messagePayload, channel: 'general' }, timestamp }, senderId);
@@ -717,6 +720,7 @@ export function handleConnection(ws: WebSocket): void {
       quotedMessageId: quoted?.id,
       quotedMessageText: quoted?.text,
       quotedMessageSender: quoted?.sender,
+      reactions: await getReactionsForMessage(messageId),
     };
     for (const dev of recipientDevices) {
       send(dev.ws, { type: 'dm_message', payload: { ...dmPayload, isOwn: false }, timestamp });
@@ -807,7 +811,7 @@ function canonicalJwk(jwk: any): string {
         channel,
         with: payload.with,
         publicKeys,
-        messages: messages.map(m => ({
+        messages: await Promise.all(messages.map(async m => ({
           id: m.id,
           senderId: m.senderId,
           senderNickname: m.senderNickname,
@@ -821,7 +825,8 @@ function canonicalJwk(jwk: any): string {
           quotedMessageId: m.quotedMessageId ?? null,
           quotedMessageText: m.quotedMessageText ?? null,
           quotedMessageSender: m.quotedMessageSender ?? null,
-        })),
+          reactions: await getReactionsForMessage(m.id),
+        }))),
       },
       timestamp: Date.now(),
     });
@@ -858,7 +863,8 @@ function canonicalJwk(jwk: any): string {
       return;
     }
     const results = await searchMessages(query, payload.channel, 50, userId);
-    send(ws, { type: 'message_search_results', payload: { results }, timestamp: Date.now() });
+    const resultsWithReactions = await Promise.all(results.map(async (m: any) => ({ ...m, reactions: await getReactionsForMessage(m.id) })));
+    send(ws, { type: 'message_search_results', payload: { results: resultsWithReactions }, timestamp: Date.now() });
   }
 
   async function handleDeleteMessage(userId: string, ws: WebSocket, payload: { messageId: string }): Promise<void> {
@@ -1055,7 +1061,7 @@ function broadcastSystem(text: string, excludeUserId?: string): void {
       if (msg) {
         if (!msg.channel || msg.channel === 'general') channel = 'general';
         else if (msg.channel === getDmChannelId(userId, targetId)) channel = 'dm';
-        messageText = sanitizeText(msg.text || '').slice(0, 500) || undefined;
+        messageText = sanitizeText(msg.text || '').slice(0, 100) || undefined;
       }
     }
     await addReport({

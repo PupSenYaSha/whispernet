@@ -97,6 +97,18 @@ function applyRemoveReaction(msg: Message, emoji: string, userId: string): Messa
   return { ...msg, reactions };
 }
 
+function normalizeReactions(fromServer: any): Record<string, string[]> | undefined {
+  if (!fromServer) return undefined;
+  if (Array.isArray(fromServer)) {
+    const out: Record<string, string[]> = {};
+    for (const r of fromServer) {
+      if (r && typeof r.emoji === 'string') (out[r.emoji] = out[r.emoji] || []).push(r.userId);
+    }
+    return out;
+  }
+  return fromServer as Record<string, string[]>;
+}
+
 function connectionReducer(state: ConnectionState, action: ConnectionAction): ConnectionState {
   switch (action.type) {
     case 'SET_STATUS':
@@ -538,7 +550,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               ws.close();
               break;
             case 'chat_history':
-              dispatch({ type: 'SET_MESSAGES', messages: message.payload.messages.map((m: any) => ({ id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text: m.text || '', timestamp: m.timestamp, isOwn: m.isOwn, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined })) });
+              dispatch({ type: 'SET_MESSAGES', messages: message.payload.messages.map((m: any) => ({ id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text: m.text || '', timestamp: m.timestamp, isOwn: m.isOwn, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined, reactions: normalizeReactions(m.reactions) })) });
               break;
             case 'dm_history': {
               if (message.payload.publicKeys) {
@@ -562,7 +574,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
                 } else if (m.encrypted && privateKeyRef.current && userIdRef.current) {
                   try { text = await decryptMessage(m.encrypted, userIdRef.current, privateKeyRef.current); } catch { if (!text) text = '[encrypted]'; }
                 }
-                return { id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text, timestamp: m.timestamp, isOwn: m.senderId === userIdRef.current, channel: otherId, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined };
+                return { id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text, timestamp: m.timestamp, isOwn: m.senderId === userIdRef.current, channel: otherId, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined, reactions: normalizeReactions(m.reactions) };
               }));
               dispatch({ type: 'SET_DM_MESSAGES', channel: otherId, messages: msgs });
               break;
@@ -587,7 +599,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               const ch = message.payload.channel;
               const parts = ch.split(':');
               const otherId = parts[0] === userIdRef.current ? parts[1] : parts[0];
-              dispatch({ type: 'ADD_DM_MESSAGE', channel: otherId, message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: msgText, timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, channel: otherId, fileKey: message.payload.fileKey, expiresAt: message.payload.expiresAt || undefined, quotedMessageId: message.payload.quotedMessageId ?? undefined, quotedMessageText: message.payload.quotedMessageText ?? undefined, quotedMessageSender: message.payload.quotedMessageSender ?? undefined } });
+              dispatch({ type: 'ADD_DM_MESSAGE', channel: otherId, message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: msgText, timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, channel: otherId, fileKey: message.payload.fileKey, expiresAt: message.payload.expiresAt || undefined, quotedMessageId: message.payload.quotedMessageId ?? undefined, quotedMessageText: message.payload.quotedMessageText ?? undefined, quotedMessageSender: message.payload.quotedMessageSender ?? undefined, reactions: normalizeReactions(message.payload.reactions) } });
               dispatch({ type: 'SET_DM_NAME', userId: otherId, nickname: message.payload.senderNickname });
               dispatch({ type: 'SET_CONTACTS', contacts: [] });
               ws.send(JSON.stringify({ type: 'dm_contacts', payload: {} }));
@@ -595,7 +607,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               break;
             }
             case 'chat_message':
-              dispatch({ type: 'ADD_MESSAGE', message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: message.payload.text || '', timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, fileKey: message.payload.fileKey, expiresAt: message.payload.expiresAt || undefined, quotedMessageId: message.payload.quotedMessageId ?? undefined, quotedMessageText: message.payload.quotedMessageText ?? undefined, quotedMessageSender: message.payload.quotedMessageSender ?? undefined } });
+              dispatch({ type: 'ADD_MESSAGE', message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: message.payload.text || '', timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, fileKey: message.payload.fileKey, expiresAt: message.payload.expiresAt || undefined, quotedMessageId: message.payload.quotedMessageId ?? undefined, quotedMessageText: message.payload.quotedMessageText ?? undefined, quotedMessageSender: message.payload.quotedMessageSender ?? undefined, reactions: normalizeReactions(message.payload.reactions) } });
               if (!message.payload.isOwn) { unreadCountRef.current++; updateTitle(); fireNotification(`@${message.payload.senderNickname}`, message.payload.text || ''); playNotifSound(); }
               break;
             case 'chat_cleared':
