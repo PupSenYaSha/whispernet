@@ -15,7 +15,7 @@
 ## Features
 
 - **End-to-end encryption** — Signal Protocol (X3DH + Double Ratchet) for forward secrecy and break-in recovery
-- **Private and group messaging** — DMs (sealed-sender routing) and a global chat
+- **Private and global messaging** — E2EE DMs (sealed-sender routing) and a global channel
 - **Media sharing** — images and videos, encrypted, with an in-app fullscreen viewer (lightbox)
 - **Reactions** — emoji reactions persisted on the server and restored after reload
 - **Replies** — quoted replies with accent-colored reply chip above the message
