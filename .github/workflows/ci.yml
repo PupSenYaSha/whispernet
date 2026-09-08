@@ -11,7 +11,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [18, 20]
+        node-version: [20, 22]
 
     steps:
       - uses: actions/checkout@v4
@@ -29,7 +29,7 @@ jobs:
         run: npx tsc --noEmit
 
       - name: Build client
-        run: npx vite build
+        run: node node_modules/vite/bin/vite.js build
 
       - name: Build server
         run: npx tsc -p server/tsconfig.json
