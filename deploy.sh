@@ -13,8 +13,11 @@ if [ -f package-lock.json ]; then
   npm install --no-audit --no-fund >/dev/null 2>&1 || true
 fi
 
+# IMPORTANT: build BEFORE killing the running server (a failed build must not leave the app down ->
+# that's what caused the 502). Also use the local vite, NOT `npx vite build` (npx may resolve a newer
+# incompatible vite from the network).
 echo "== rebuilding client =="
-npx vite build
+node node_modules/vite/bin/vite.js build
 
 echo "== restarting server =="
 pkill -f "scripts/start.js" 2>/dev/null || true
@@ -28,7 +31,10 @@ for i in $(seq 1 25); do
   if curl -sf "http://127.0.0.1:${PORT}/" >/dev/null 2>&1; then
     HASH=$(curl -s "http://127.0.0.1:${PORT}/" | grep -oE 'index-[A-Za-z0-9_-]+\.js' | head -1)
     echo "OK: server up on :${PORT}, serving ${HASH}"
-    echo "If the public domain still shows 502, point the reverse proxy in the cloudpub panel to -> http://127.0.0.1:${PORT}"
+    echo ""
+    echo "Reverse proxy in the cloudpub panel should point to:"
+    echo "  messenger (app) -> http://127.0.0.1:${PORT}   (domain rightfully-nice-ram.cloudpub.ru)"
+    echo "  marketing site  -> http://127.0.0.1:3000      (domain unkindly-literate-wigeon.cloudpub.ru)"
     exit 0
   fi
   sleep 1

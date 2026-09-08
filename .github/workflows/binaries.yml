@@ -1,0 +1,94 @@
+name: Build binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to upload the built assets to (e.g. v1.0.0)'
+        required: true
+        default: 'v1.0.0'
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: node node_modules/vite/bin/vite.js build
+      - run: node node_modules/tsx/dist/cli.mjs node_modules/typescript/bin/tsc -p electron/tsconfig.json
+      - name: Package Windows portable exe
+        run: node node_modules/electron-builder/cli.js --win --publish never
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Prepare assets
+        shell: pwsh
+        run: |
+          Copy-Item "dist\build\WhisperNet 1.0.0.exe" "dist\build\WhisperNet.1.0.0.exe" -Force
+          if (-not (Test-Path "dist\build\WhisperNet-v1.0.0.zip")) {
+            Compress-Archive -Path "dist\build\win-unpacked\*" -DestinationPath "dist\build\WhisperNet-v1.0.0.zip" -CompressionLevel Fastest
+          }
+      - name: Upload assets
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          gh release upload "$TAG" "dist/build/WhisperNet.1.0.0.exe" "dist/build/WhisperNet-v1.0.0.zip" --clobber
+
+  linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: node node_modules/vite/bin/vite.js build
+      - run: node node_modules/tsx/dist/cli.mjs node_modules/typescript/bin/tsc -p electron/tsconfig.json
+      - name: Package Linux (unpacked)
+        run: node node_modules/electron-builder/cli.js --linux dir --publish never
+      - name: Prepare tar.gz
+        run: |
+          tar -czf whispernet-1.0.0.tar.gz -C dist/build/linux-unpacked .
+      - name: Upload assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ github.event.inputs.tag }}" whispernet-1.0.0.tar.gz --clobber
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: node node_modules/vite/bin/vite.js build
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Accept Android SDK licenses
+        run: |
+          if [ -n "$ANDROID_HOME" ]; then
+            yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+          fi
+      - name: Sync Capacitor
+        run: node node_modules/@capacitor/cli/bin/capacitor sync android
+      - name: Build APK
+        working-directory: android
+        run: chmod +x gradlew && ./gradlew assembleDebug -x lint -no-daemon
+      - name: Upload asset
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cp android/app/build/outputs/apk/debug/app-debug.apk WhisperNet.apk
+          gh release upload "${{ github.event.inputs.tag }}" WhisperNet.apk --clobber
