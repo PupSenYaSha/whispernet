@@ -8,7 +8,7 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
   const isDm = state.activeChannel !== 'general';
   const dmContact = isDm ? state.contacts.find(c => c.id === state.activeChannel) : null;
   const dmUser = isDm ? state.users.find(u => u.id === state.activeChannel) : null;
-  const displayDm = dmContact || dmUser;
+  const dmNickname = dmContact?.nickname || dmUser?.nickname || state.dmNames[state.activeChannel];
   const isOnline = isDm ? !!dmUser : false;
   const isBlocked = isDm ? blockedUsers.some(b => b.id === state.activeChannel) : false;
 
@@ -45,17 +45,17 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
               'flex items-center justify-center flex-shrink-0 text-[13px] font-bold',
               isDm ? 'bg-accent-primary/15 text-accent-primary' : 'bg-accent-primary'
             )}>
-              {isDm && displayDm ? (
-                <span>{displayDm.nickname.charAt(0).toUpperCase()}</span>
+              {isDm && dmNickname ? (
+                <span>{dmNickname.charAt(0).toUpperCase()}</span>
               ) : (
                 <svg width={isMobile ? "20" : "18"} height={isMobile ? "20" : "18"} viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-text)" strokeWidth="2.5">
                   <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                 </svg>
               )}
             </div>
-            <div>
-              <h1 className={cn(isMobile ? "text-[17px]" : "text-[15px]", "font-bold text-fg-primary leading-tight")}>
-                {isDm ? `@${displayDm?.nickname || '...'}` : t('global_chat')}
+            <div className="flex-1 min-w-0">
+              <h1 className={cn(isMobile ? "text-[17px]" : "text-[15px]", "font-bold text-fg-primary leading-tight truncate")}>
+                {isDm ? `@${dmNickname || '...'}` : t('global_chat')}
               </h1>
               <div className="flex items-center gap-1.5 mt-0.5">
                 {isDm ? (
@@ -73,31 +73,24 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
             </div>
           </div>
 
-          <div className="flex items-center gap-1.5">
+          <div className="flex items-center gap-1.5 flex-shrink-0">
             {isDm && (
               <button
                 onClick={toggleBlock}
                 aria-label={isBlocked ? t('unblock') : t('block')}
                 title={isBlocked ? t('unblock') : t('block')}
                 className={cn(
-                  'p-2 rounded-xl transition-colors',
+                  'flex items-center gap-1.5 h-8 px-2.5 rounded-full text-[12px] font-medium transition-colors border',
                   isBlocked
-                    ? 'bg-status-error/15 text-status-error hover:bg-status-error/25'
-                    : 'text-fg-muted hover:bg-bg-tertiary hover:text-status-error'
+                    ? 'bg-status-error/10 text-status-error border-status-error/30 hover:bg-status-error/20'
+                    : 'bg-transparent text-fg-muted border-border-default hover:bg-status-error/10 hover:text-status-error hover:border-status-error/30'
                 )}
               >
-                {isBlocked ? (
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <circle cx="12" cy="12" r="10" />
-                    <path d="M4.93 4.93l14.14 14.14" />
-                  </svg>
-                ) : (
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <circle cx="12" cy="12" r="10" />
-                    <path d="M4.93 4.93l14.14 14.14" />
-                    <path d="M8 8l8 8" opacity="0.25" />
-                  </svg>
-                )}
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <circle cx="12" cy="12" r="10" />
+                  <path d="M4.93 4.93l14.14 14.14" />
+                </svg>
+                <span>{isBlocked ? t('unblock') : t('block')}</span>
               </button>
             )}
 
@@ -133,7 +126,7 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
               @{state.nickname} (you)
             </span>
             {state.users.map(u => (
-              <button key={u.id} onClick={() => { setShowUsers(false); openDm(u.id); }}
+              <button key={u.id} onClick={() => { setShowUsers(false); openDm(u.id, u.nickname); }}
                 className="px-2.5 py-1 text-[12px] font-medium bg-bg-tertiary text-fg-muted rounded-lg hover:bg-accent-primary/10 hover:text-accent-primary transition-colors cursor-pointer">
                 @{u.nickname}
               </button>

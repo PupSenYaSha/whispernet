@@ -461,7 +461,7 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
 
   return (
     <>
-      <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-40" onClick={onClose} style={{ animation: closing ? 'fadeOut 0.25s ease-in forwards' : 'fadeIn 0.2s ease-out' }} />
+      <div className="fixed inset-0 bg-black/40 z-40" onClick={onClose} style={{ animation: closing ? 'fadeOut 0.25s ease-in forwards' : 'fadeIn 0.2s ease-out' }} />
 
       <div className="fixed right-0 top-0 h-full w-full max-w-sm bg-bg-secondary border-l border-border-default z-50 flex flex-col" style={{ animation: closing ? 'slideOutToRight 0.25s ease-in forwards' : 'slideInFromRight 0.3s cubic-bezier(0.22, 1, 0.36, 1)' }}>
         <div className="flex items-center justify-between px-4 h-14 border-b border-border-default">

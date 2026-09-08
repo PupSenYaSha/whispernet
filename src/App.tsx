@@ -50,6 +50,15 @@ function getDeviceId(): string {
   }
 }
 
+function loadDmNames(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem('wn_dm_names');
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
 const initialState: ConnectionState = {
   status: 'disconnected',
   messages: [],
@@ -64,6 +73,7 @@ const initialState: ConnectionState = {
   needsKeySetup: false,
   activeChannel: 'general',
   contacts: [],
+  dmNames: {},
   dmMessages: {},
   searchResults: [],
   messageSearchResults: [],
@@ -112,6 +122,11 @@ function connectionReducer(state: ConnectionState, action: ConnectionAction): Co
       return { ...state, activeChannel: action.channel };
     case 'SET_CONTACTS':
       return { ...state, contacts: action.contacts };
+    case 'SET_DM_NAME': {
+      const dmNames = { ...state.dmNames, [action.userId]: action.nickname };
+      try { localStorage.setItem('wn_dm_names', JSON.stringify(dmNames)); } catch {}
+      return { ...state, dmNames };
+    }
     case 'SET_SEARCH_RESULTS':
       return { ...state, searchResults: action.results };
     case 'SET_MESSAGE_SEARCH_RESULTS':
@@ -157,6 +172,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(connectionReducer, initialState, (init) => ({
     ...init,
     settings: loadSettings(),
+    dmNames: loadDmNames(),
   }));
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
@@ -264,7 +280,8 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     updateTitle();
   }, [updateTitle]);
 
-  const openDm = useCallback((userId: string) => {
+  const openDm = useCallback((userId: string, nickname?: string) => {
+    if (nickname) dispatch({ type: 'SET_DM_NAME', userId, nickname });
     dispatch({ type: 'SET_ACTIVE_CHANNEL', channel: userId });
     unreadCountRef.current = 0;
     updateTitle();
@@ -517,6 +534,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               const parts = ch.split(':');
               const otherId = parts[0] === userIdRef.current ? parts[1] : parts[0];
               dispatch({ type: 'ADD_DM_MESSAGE', channel: otherId, message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: msgText, timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, channel: otherId, fileKey: message.payload.fileKey, expiresAt: message.payload.expiresAt || undefined } });
+              dispatch({ type: 'SET_DM_NAME', userId: otherId, nickname: message.payload.senderNickname });
               dispatch({ type: 'SET_CONTACTS', contacts: [] });
               ws.send(JSON.stringify({ type: 'dm_contacts', payload: {} }));
               if (!message.payload.isOwn) { unreadCountRef.current++; updateTitle(); fireNotification(`@${message.payload.senderNickname}`, msgText); playNotifSound(); }
@@ -534,6 +552,9 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
             case 'dm_contacts':
               if (message.payload.publicKeys) { publicKeysRef.current = { ...publicKeysRef.current, ...message.payload.publicKeys }; if (userIdRef.current && publicKeyRef.current) publicKeysRef.current[userIdRef.current] = publicKeyRef.current; }
               dispatch({ type: 'SET_CONTACTS', contacts: message.payload.contacts });
+              for (const c of message.payload.contacts || []) {
+                if (c.id && c.nickname) dispatch({ type: 'SET_DM_NAME', userId: c.id, nickname: c.nickname });
+              }
               break;
             case 'prekey_bundles':
               if (message.payload.bundles) preKeyBundlesRef.current = { ...preKeyBundlesRef.current, ...message.payload.bundles };
@@ -1032,7 +1053,7 @@ function AppInner() {
                           const userOnline = state.users.some(u => u.id === contact.id);
                           return (
                             <button key={contact.id}
-                              onClick={() => { openDm(contact.id); setMobileChatOpen(true); }}
+                              onClick={() => { openDm(contact.id, contact.nickname); setMobileChatOpen(true); }}
                               className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left hover:bg-bg-tertiary text-fg-primary">
                               <div className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 relative shadow-sm"
                                 style={{ background: getAvatarGradient(contact.nickname) }}>
@@ -1060,7 +1081,7 @@ function AppInner() {
                     </div>
                     {state.searchResults.map(user => (
                       <button key={user.id}
-                        onClick={() => { openDm(user.id); setMobileChatOpen(true); setSearchQuery(''); }}
+                        onClick={() => { openDm(user.id, user.nickname); setMobileChatOpen(true); setSearchQuery(''); }}
                         className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left hover:bg-bg-tertiary text-fg-primary">
                         <div className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 relative shadow-sm"
                           style={{ background: getAvatarGradient(user.nickname) }}>
@@ -1089,8 +1110,8 @@ function AppInner() {
             </div>
           )}
 
-          {mobileTab === 'home' && mobileChatOpen && (
-            <div className="h-full flex flex-col animate-slide-right">
+          {mobileChatOpen && (
+            <div className={cn('h-full flex flex-col', mobileTab === 'home' ? 'animate-slide-right' : 'hidden')}>
               <ChatArea showContacts={false} isMobile onBack={() => setMobileChatOpen(false)} />
             </div>
           )}

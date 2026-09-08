@@ -17,6 +17,7 @@ export interface ConnectionState {
   needsKeySetup: boolean;
   activeChannel: ActiveChannel;
   contacts: Contact[];
+  dmNames: Record<string, string>;
   dmMessages: Record<string, Message[]>;
   searchResults: { id: string; nickname: string; online: boolean }[];
   messageSearchResults: Message[];
@@ -40,6 +41,7 @@ export type ConnectionAction =
   | { type: 'SET_KEY_SETUP_NEEDED'; needed: boolean }
   | { type: 'SET_ACTIVE_CHANNEL'; channel: ActiveChannel }
   | { type: 'SET_CONTACTS'; contacts: Contact[] }
+  | { type: 'SET_DM_NAME'; userId: string; nickname: string }
   | { type: 'SET_SEARCH_RESULTS'; results: { id: string; nickname: string; online: boolean }[] }
   | { type: 'SET_MESSAGE_SEARCH_RESULTS'; results: Message[] }
   | { type: 'DELETE_MESSAGE'; messageId: string }
@@ -60,7 +62,7 @@ export interface ConnectionContextType {
   sendDm: (to: string, text: string, sealed?: boolean) => void;
   sendDmImage: (to: string, file: File) => Promise<void>;
   sendImage: (file: File) => Promise<void>;
-  openDm: (userId: string) => void;
+  openDm: (userId: string, nickname?: string) => void;
   openGeneral: () => void;
   refreshContacts: () => void;
   searchUsers: (query: string) => void;

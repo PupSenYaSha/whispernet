@@ -66,7 +66,7 @@ export function ContactsPanel({ onSelect }: { onSelect: () => void }) {
               {state.searchResults.map(user => (
                 <button
                   key={user.id}
-                  onClick={() => { openDm(user.id); setQuery(''); onSelect(); }}
+                  onClick={() => { openDm(user.id, user.nickname); setQuery(''); onSelect(); }}
                   className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left hover:bg-bg-tertiary text-fg-primary"
                 >
                   <div className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 relative shadow-sm"
@@ -109,7 +109,7 @@ export function ContactsPanel({ onSelect }: { onSelect: () => void }) {
                   return (
                     <button
                       key={contact.id}
-                      onClick={() => { openDm(contact.id); onSelect(); }}
+                      onClick={() => { openDm(contact.id, contact.nickname); onSelect(); }}
                       className={cn(
                         'w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left',
                         isActive ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-bg-tertiary text-fg-primary'
