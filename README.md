@@ -8,7 +8,7 @@
 
 </div>
 
-Short usage: `npm start` — installs deps if needed, builds the client, then serves the messenger on port **50025** and the marketing site on port **3000**.
+Short usage: `npm start` — installs deps if needed, builds the client, then serves the messenger on port **50025**.
 
 ## Features
 
