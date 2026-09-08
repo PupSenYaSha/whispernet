@@ -16,6 +16,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
   const [reportReason, setReportReason] = useState('');
   const [reportCustom, setReportCustom] = useState('');
   const [reportDone, setReportDone] = useState(false);
+  const [lightbox, setLightbox] = useState<{ url: string; isVideo: boolean } | null>(null);
   const reactionPickerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -27,6 +28,14 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  useEffect(() => {
+    if (!lightbox) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setLightbox(null); };
+    document.addEventListener('keydown', onKey);
+    document.body.style.overflow = 'hidden';
+    return () => { document.removeEventListener('keydown', onKey); document.body.style.overflow = ''; };
+  }, [lightbox]);
 
   const isMedia = /^\[(image|video)\][\s\S]*?\[\/\1\]/.test(message.text);
 
@@ -139,7 +148,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
                   return (
                     <img src={mediaUrl} alt=""
                       className="rounded-xl max-w-[300px] max-h-[300px] object-cover cursor-pointer"
-                      onClick={() => { window.open(mediaUrl, '_blank', 'noopener,noreferrer'); }} />
+                      onClick={() => { setLightbox({ url: mediaUrl, isVideo: false }); }} />
                   );
                 }
                 const [, , url] = mediaMatch;
@@ -157,7 +166,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
                 return (
                   <img src={safeUrl} alt=""
                     className="rounded-xl max-w-[300px] max-h-[300px] object-cover cursor-pointer"
-                    onClick={() => { window.open(safeUrl, '_blank', 'noopener,noreferrer'); }} />
+                    onClick={() => { setLightbox({ url: safeUrl, isVideo: false }); }} />
                 );
               }
               return <p className="whitespace-pre-wrap break-words">{message.text}</p>;
@@ -344,6 +353,23 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
         </>,
         document.body
       )}
+    {lightbox && createPortal(
+      <div className="fixed inset-0 z-[100] bg-black/90 flex items-center justify-center p-4" onClick={() => setLightbox(null)} role="dialog" aria-modal="true"
+        style={{ animation: 'fadeIn 0.15s ease-out' }}>
+        <button
+          onClick={() => setLightbox(null)}
+          className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/10 text-white text-[20px] flex items-center justify-center hover:bg-white/25 transition-colors z-10"
+          aria-label="Close">✕</button>
+        {lightbox.isVideo ? (
+          <video src={lightbox.url} controls autoPlay
+            className="max-h-[90vh] max-w-[92vw] rounded-xl" onClick={(e) => e.stopPropagation()} />
+        ) : (
+          <img src={lightbox.url} alt=""
+            className="max-h-[90vh] max-w-[92vw] object-contain rounded-xl" onClick={(e) => e.stopPropagation()} />
+        )}
+      </div>,
+      document.body
+    )}
     </>
   );
 }
