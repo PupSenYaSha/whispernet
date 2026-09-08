@@ -19,6 +19,19 @@ fi
 echo "== rebuilding client =="
 node node_modules/vite/bin/vite.js build
 
+# Binaries are NOT stored in git (site/downloads/ is gitignored). For the
+# on-site download buttons to keep working, refresh the assets from the
+# GitHub release whenever the local copy is missing.
+echo "== syncing download assets from GitHub Releases =="
+RELEASE_URL="https://github.com/PupSenYaSha/whispernet/releases/download/v1.0.0"
+mkdir -p site/downloads
+for asset in WhisperNet.1.0.0.exe WhisperNet.apk WhisperNet-v1.0.0.zip whispernet-1.0.0.tar.gz; do
+  if [ ! -f "site/downloads/$asset" ]; then
+    echo "  downloading $asset ..."
+    curl -fsSL -o "site/downloads/$asset.tmp" "$RELEASE_URL/$asset" && mv "site/downloads/$asset.tmp" "site/downloads/$asset" || rm -f "site/downloads/$asset.tmp"
+  fi
+done
+
 echo "== restarting server =="
 pkill -f "scripts/start.js" 2>/dev/null || true
 pkill -f "server/index.ts" 2>/dev/null || true

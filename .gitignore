@@ -9,5 +9,6 @@ android/.gradle/
 android/.idea/
 ios/App/build/
 ios/DerivedData/
-site/downloads/WhisperNet-v1.0.0.zip
-site/downloads/whispernet-1.0.0.tar.gz
+# Pre-built app binaries live on GitHub Releases; deploy.sh syncs them into
+# site/downloads/ on the server. They must NOT be committed to the repo.
+site/downloads/
