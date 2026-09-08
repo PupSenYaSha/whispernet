@@ -47,10 +47,12 @@ body {
   overflow: hidden;
 }
 
+/* The glow is baked into the radial-gradient (already fades to transparent).
+   NO filter/blur here: blur on huge fixed layers forces the GPU to
+   re-composite an enormous blurred texture every scroll frame -> 10-15fps. */
 .ambient-orb {
   position: absolute;
   border-radius: 50%;
-  filter: blur(80px);
   opacity: 0.5;
   transform: translateZ(0);
 }
