@@ -1,11 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import type { AccentColor } from '../types';
 import { useConnection } from '../context';
 import { cn, getAvatarText } from '../utils';
-import { encryptPrivateKey, isEncryptedBundle, createBackup, downloadBackup, isKeyBackup } from '../crypto-keys';
 import { generateSafetyNumber } from '../crypto';
 import QRCode from 'qrcode';
-import type { EncryptedKeyBundle } from '../crypto-keys';
 
 declare const __APP_VERSION__: string;
 
@@ -52,44 +50,6 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
-function PasswordModal({ title, onConfirm, onCancel }: {
-  title: string; onConfirm: (password: string) => void; onCancel: () => void;
-}) {
-  const { t } = useConnection();
-  const [password, setPassword] = useState('');
-  const inputRef = useRef<HTMLInputElement>(null);
-  useEffect(() => { inputRef.current?.focus(); }, []);
-  return (
-    <>
-      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60]" onClick={onCancel} />
-      <div className="fixed inset-0 z-[61] flex items-center justify-center p-4">
-        <div className="bg-bg-secondary border border-border-default rounded-2xl shadow-2xl max-w-sm w-full p-6" style={{ animation: 'scaleIn 0.2s cubic-bezier(0.22, 1, 0.36, 1)' }}>
-          <div className="w-14 h-14 rounded-2xl bg-accent-primary/15 flex items-center justify-center mx-auto mb-5">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2">
-              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
-            </svg>
-          </div>
-          <h3 className="text-center text-[17px] font-semibold text-fg-primary mb-4">{title}</h3>
-          <input ref={inputRef} type="password" value={password} onChange={(e) => setPassword(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && password) onConfirm(password); if (e.key === 'Escape') onCancel(); }}
-            className="w-full px-4 py-3 rounded-xl bg-bg-tertiary border border-border-default text-[15px] text-fg-primary placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary mb-4"
-            placeholder="Password" />
-          <div className="flex gap-3">
-            <button onClick={onCancel}
-              className="flex-1 py-3 rounded-2xl border border-border-default text-fg-primary text-[15px] font-medium hover:bg-bg-tertiary transition-colors">
-              {t('cancel')}
-            </button>
-            <button onClick={() => password && onConfirm(password)} disabled={!password}
-              className="flex-1 py-3 rounded-2xl bg-accent-primary text-accent-text text-[15px] font-semibold hover:opacity-90 transition-colors disabled:opacity-40">
-              OK
-            </button>
-          </div>
-        </div>
-      </div>
-    </>
-  );
-}
-
 function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, onConfirm, onCancel }: {
   title: string; message: string; confirmLabel: string; cancelLabel: string; danger?: boolean;
   onConfirm: () => void; onCancel: () => void;
@@ -133,16 +93,8 @@ function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, onCon
 }
 
 export function SettingsPanel({ onClose, closing, inline }: { onClose: () => void; closing?: boolean; inline?: boolean }) {
-  const { state, updateSettings, logout, sessions, requestSessions, showImportModal, t, blockedUsers, blockUser, unblockUser, refreshBlocked } = useConnection();
-  const [blockInput, setBlockInput] = useState('');
-  const blockByNick = () => {
-    const nick = blockInput.trim().replace(/^@/, '');
-    if (!nick) return;
-    blockUser('', nick);
-    setBlockInput('');
-  };
+  const { state, updateSettings, logout, sessions, requestSessions, t } = useConnection();
   const [confirmAction, setConfirmAction] = useState<'logout' | 'clearData' | null>(null);
-  const [exportModal, setExportModal] = useState(false);
 
   useEffect(() => {
     if (!inline) {
@@ -349,23 +301,6 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
         <Option label={t('safety_number')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>}>
           <SafetyNumberButton />
         </Option>
-        <Option label={t('export_keys')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="7 10 12 15 17 10" /><line x1="12" y1="15" x2="12" y2="3" /></svg>}>
-          <button onClick={() => setExportModal(true)} className="text-[13px] text-accent-primary hover:underline">{t('export_keys')}</button>
-        </Option>
-        <Option label={t('import_keys')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>}>
-          <input type="file" accept=".json" className="hidden" id={`import-keys-input${inline ? '-inline' : ''}`} onChange={async (e) => {
-            const file = e.target.files?.[0];
-            if (!file) return;
-            try {
-              const text = await file.text();
-              const data = JSON.parse(text);
-              if (!isKeyBackup(data)) { alert(t('key_import_err')); return; }
-              showImportModal(data, 'settings');
-            } catch { alert(t('key_import_err')); }
-            e.target.value = '';
-          }} />
-          <label htmlFor={`import-keys-input${inline ? '-inline' : ''}`} className="text-[13px] text-accent-primary hover:underline cursor-pointer">{t('import_keys')}</label>
-        </Option>
       </Section>
 
       <Section title={t('sessions')}>
@@ -379,37 +314,6 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
                     <span className="text-[13px] text-fg-primary">{t('sessions')} (you)</span>
                     <span className="text-[11px] text-fg-muted block">{new Date(s.lastActive).toLocaleTimeString()}</span>
                   </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      </Section>
-
-      <Section title={t('blocked_users')}>
-        <div className="px-4 py-3">
-          <div className="flex items-center gap-2 mb-3">
-            <input
-              value={blockInput}
-              onChange={(e) => setBlockInput(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') blockByNick(); }}
-              placeholder={t('blocked_hint')}
-              className="flex-1 min-w-0 px-3 h-9 rounded-xl bg-bg-quaternary text-[13px] text-fg-primary outline-none border border-border-default focus:border-accent-primary transition-colors"
-            />
-            <button onClick={blockByNick} className="px-3 h-9 rounded-xl bg-accent-primary text-accent-text text-[13px] font-medium hover:brightness-110 transition-all shrink-0">{t('block')}</button>
-          </div>
-          <div className="flex items-center gap-2">
-            <button onClick={refreshBlocked} className="text-[12px] text-accent-primary hover:underline">{t('sessions_desc')}</button>
-          </div>
-          {blockedUsers.length > 0 && (
-            <div className="space-y-2 mt-3">
-              {blockedUsers.map((u) => (
-                <div key={u.id} className="flex items-center justify-between py-2 px-3 rounded-xl bg-bg-tertiary">
-                  <span className="text-[13px] text-fg-primary">@{u.nickname}</span>
-                  <button
-                    onClick={() => unblockUser(u.id)}
-                    className="text-[12px] text-accent-primary hover:underline"
-                  >{t('unblock')}</button>
                 </div>
               ))}
             </div>
@@ -505,25 +409,6 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
       {confirmAction === 'clearData' && (
         <ConfirmModal title={t('confirm_clear_data')} message={t('confirm_clear_data_desc')} confirmLabel={t('confirm_clear')} cancelLabel={t('cancel')} danger
           onConfirm={() => { (() => { const keys = Object.keys(localStorage).filter(k => k.startsWith('wn_')); keys.forEach(k => localStorage.removeItem(k)); })(); window.location.reload(); }} onCancel={() => setConfirmAction(null)} />
-      )}
-      {exportModal && (
-        <PasswordModal title={t('enter_backup_password')} onCancel={() => setExportModal(false)} onConfirm={async (pass) => {
-          try {
-            const nick = state.nickname.toLowerCase();
-            const savedKey = localStorage.getItem(`wn_pk_${nick}`);
-            const savedPubKey = localStorage.getItem(`wn_pub_${nick}`);
-            if (!savedKey || !savedPubKey) return;
-            const parsed = JSON.parse(savedKey);
-            let bundle: EncryptedKeyBundle;
-            if (isEncryptedBundle(parsed)) { bundle = parsed; } else {
-              bundle = await encryptPrivateKey(parsed, pass);
-              bundle.publicKey = JSON.parse(savedPubKey);
-            }
-            const backup = createBackup(state.nickname, bundle.publicKey, bundle);
-            downloadBackup(backup);
-          } catch {}
-          setExportModal(false);
-        }} />
       )}
     </>
   );

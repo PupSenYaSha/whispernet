@@ -94,11 +94,12 @@ interface StoredMessage {
   channel?: string;
   encrypted?: any;
   fileKey?: any;
-  sealed?: string;
+sealed?: string;
   quotedMessageId?: string;
+  quotedMessageText?: string;
+  quotedMessageSender?: string;
   editedAt?: number;
   expiresAt?: number;
-  sealedSender?: boolean;
 }
 
 function isValidUser(u: any): u is StoredUser {
@@ -396,11 +397,13 @@ export async function saveMessage(
   sealed?: string,
   quotedMessageId?: string,
   editedAt?: number,
-  expiresAt?: number
+  expiresAt?: number,
+  quotedMessageText?: string,
+  quotedMessageSender?: string
 ): Promise<void> {
   await withMutex(messagesMutex, async () => {
     const messages = await loadMessages();
-    messages.push({ id, senderId, senderNickname, text, timestamp, encrypted: encrypted || null, channel, fileKey: fileKey || null, sealed: sealed || undefined, quotedMessageId, editedAt, expiresAt });
+    messages.push({ id, senderId, senderNickname, text, timestamp, encrypted: encrypted || null, channel, fileKey: fileKey || null, sealed: sealed || undefined, quotedMessageId, quotedMessageText, quotedMessageSender, editedAt, expiresAt });
     if (messages.length > 5000) messages.splice(0, messages.length - 5000);
     await saveMessages(messages);
   });

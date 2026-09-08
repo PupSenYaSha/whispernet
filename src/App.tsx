@@ -6,7 +6,7 @@ import { encryptPrivateKey, decryptPrivateKey, isEncryptedBundle, isKeyBackup } 
 import { encryptPassword, decryptPassword } from './device-crypto';
 import { uploadFile } from './upload';
 import { encryptFile, buildFileKeyMap, unwrapAndDecrypt, wrapForMedia } from './media-crypto';
-import { ConnectionContext, useConnection, type ConnectionState, type ConnectionAction } from './context';
+import { ConnectionContext, useConnection, type ConnectionState, type ConnectionAction, type ReplyTarget } from './context';
 import { loadSettings, defaultSettings, translations, cn, getAvatarText, getAvatarGradient, formatTime } from './utils';
 
 declare const __APP_VERSION__: string;
@@ -77,6 +77,7 @@ const initialState: ConnectionState = {
   dmMessages: {},
   searchResults: [],
   messageSearchResults: [],
+  replyTo: null,
 };
 
 function connectionReducer(state: ConnectionState, action: ConnectionAction): ConnectionState {
@@ -116,10 +117,12 @@ function connectionReducer(state: ConnectionState, action: ConnectionAction): Co
       return { ...initialState, settings: state.settings };
     case 'SET_E2EE_READY':
       return { ...state, e2eeReady: action.ready };
+    case 'SET_REPLY':
+      return { ...state, replyTo: action.reply };
     case 'SET_KEY_SETUP_NEEDED':
       return { ...state, needsKeySetup: action.needed };
     case 'SET_ACTIVE_CHANNEL':
-      return { ...state, activeChannel: action.channel };
+      return { ...state, activeChannel: action.channel, replyTo: null };
     case 'SET_CONTACTS':
       return { ...state, contacts: action.contacts };
     case 'SET_DM_NAME': {
@@ -324,6 +327,10 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
 
   const unblockUser = useCallback((userId: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'unblock_user', payload: { userId } }));
+  }, []);
+
+  const reportUser = useCallback((targetId: string, reason: string, messageId?: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'report_user', payload: { targetId, reason, ...(messageId ? { messageId } : {}) } }));
   }, []);
 
   const searchUsers = useCallback((query: string) => {
@@ -704,12 +711,14 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const sendMessage = useCallback(async (text: string) => {
+  const sendMessage = useCallback(async (text: string, quoted?: ReplyTarget) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !text.trim()) return;
-    wsRef.current.send(JSON.stringify({ type: 'chat_message', payload: { text: text.trim(), ttl: ttlSeconds() } }));
+    const payload: any = { text: text.trim(), ttl: ttlSeconds() };
+    if (quoted) payload.quoted = { id: quoted.id, text: quoted.text, sender: quoted.senderNickname };
+    wsRef.current.send(JSON.stringify({ type: 'chat_message', payload }));
   }, [ttlSeconds]);
 
-  const sendDm = useCallback(async (to: string, text: string, sealed: boolean = false) => {
+  const sendDm = useCallback(async (to: string, text: string, sealed: boolean = false, quoted?: ReplyTarget) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !text.trim()) return;
     const trimmed = text.trim();
     const recipientKey = publicKeysRef.current[to];
@@ -720,6 +729,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         const encrypted = await encryptWithSignal(sessionId, trimmed);
         const payload: any = { toKey: recipientKey, text: '', signalEncrypted: encrypted, ttl: ttlSeconds() };
         if (sealed) payload.sealed = true;
+        if (quoted) payload.quoted = { id: quoted.id, text: quoted.text, sender: quoted.senderNickname };
         if (pendingX3dhRef.current[to]) {
           payload.x3dhMessage = pendingX3dhRef.current[to].x3dhMessage;
           payload.ratchetPublicKey = Array.from(pendingX3dhRef.current[to].ratchetPublicKey);
@@ -730,6 +740,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         const encrypted = await encryptMessage(trimmed, buildEncryptKeys({ [to]: recipientKey }));
         const payload: any = { toKey: recipientKey, text: '', encrypted, ttl: ttlSeconds() };
         if (sealed) payload.sealed = true;
+        if (quoted) payload.quoted = { id: quoted.id, text: quoted.text, sender: quoted.senderNickname };
         wsRef.current.send(JSON.stringify({ type: 'dm_send', payload }));
       }
     } catch (e) { console.error('Encryption failed'); }
@@ -858,9 +869,11 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         openDm, openGeneral, refreshContacts,
         searchUsers, searchMessages, deleteMessage,
         addReaction, removeReaction, editMessage,
+        setReply:
+          (reply) => dispatch({ type: 'SET_REPLY', reply }),
         t, updateSettings, getMyPublicKey, getPublicKey, decryptMedia,
         sessions, requestSessions, revokeSession,
-        blockedUsers, refreshBlocked, blockUser, unblockUser,
+        blockedUsers, refreshBlocked, blockUser, unblockUser, reportUser,
         showImportModal: (data: any, mode: 'setup' | 'settings') => setImportModal({ data, mode }),
       }}>
         {children}

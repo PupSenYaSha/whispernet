@@ -60,15 +60,22 @@ try {
   await page.getByText(text, { exact: true }).first().waitFor({ state: 'visible', timeout: 10000 });
   assert(true, 'text message sent and rendered in UI: ' + text);
 
-  // 5) Settings opens and shows new UI sections in English
-  await page.getByRole('button', { name: /settings|настройки/i }).first().click();
-  const blockedSection = page.getByText('Blocked Users', { exact: true });
-  await blockedSection.waitFor({ state: 'visible', timeout: 10000 });
-  assert(true, 'settings opens; "Blocked Users" section present');
-  const securitySection = page.getByText('Security', { exact: false });
-  assert((await securitySection.count()) > 0, 'security section present');
+// 5) Settings opens and shows new UI sections in English
+  await page.getByRole('button', { name: /settings|�?���?�'�?�?�����/i }).first().click();
+  const blockedGone = await page.getByText('Blocked Users', { exact: true }).count();
+  assert(blockedGone === 0, 'blocking no longer appears in Settings (moved into chat header)');
+  await page.getByText('Security', { exact: false }).first().waitFor({ state: 'visible', timeout: 10000 });
+  assert(true, 'security section present');
   await page.keyboard.press('Escape');
   await page.getByText(text, { exact: true }).first().waitFor({ state: 'visible', timeout: 10000 });
+
+  // 5a) Reply affordance is visible on messages (always-visible footer action)
+  const replyBtn = page.getByRole('button', { name: /Reply|�?�?�'�����/i }).first();
+  await replyBtn.waitFor({ state: 'visible', timeout: 10000 });
+  assert(true, 'reply action visible under message footer');
+
+  // 5b) (Block dialog is a custom modal reachable in a DM header — needs a second peer, covered by unit/server tests)
+  null;
 
   // 6) No runtime errors in the real browser
   assert(pageErrors.length === 0, 'no page/console errors (' + pageErrors.length + ')');

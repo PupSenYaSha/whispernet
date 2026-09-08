@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useConnection } from '../context';
 
 export function MessageInput() {
-  const { state, sendMessage, sendDm, sendImage, sendDmImage, t } = useConnection();
+  const { state, sendMessage, sendDm, sendImage, sendDmImage, blockedUsers, unblockUser, setReply, t } = useConnection();
   const [hasText, setHasText] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [sealedMode, setSealedMode] = useState(false);
@@ -11,6 +11,9 @@ export function MessageInput() {
   const isConnected = state.status === 'connected';
   const isDm = state.activeChannel !== 'general';
   const dmTarget = isDm ? state.activeChannel : null;
+  const isBlockedChat = isDm && !!dmTarget && blockedUsers.some(b => b.id === dmTarget);
+  const blockedNick = isBlockedChat ? (state.dmNames[dmTarget] || '') : '';
+  const replyTo = state.replyTo;
 
   const autoResize = () => {
     const ta = textareaRef.current;
@@ -22,16 +25,19 @@ export function MessageInput() {
 
   useEffect(() => { autoResize(); }, [hasText]);
 
+  useEffect(() => { if (replyTo) textareaRef.current?.focus(); }, [replyTo]);
+
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const ta = textareaRef.current;
     const val = ta?.value?.trim();
     if (!val || !isConnected) return;
     if (isDm && dmTarget) {
-      sendDm(dmTarget, val, sealedMode);
+      sendDm(dmTarget, val, sealedMode, replyTo || undefined);
     } else {
-      sendMessage(val);
+      sendMessage(val, replyTo || undefined);
     }
+    setReply(null);
     if (ta) {
       ta.value = '';
       ta.style.height = 'auto';
@@ -61,10 +67,46 @@ export function MessageInput() {
     setUploading(false);
   };
 
-  return (
+  return isBlockedChat ? (
+    <div className="px-3 py-3 border-t border-border-default bg-bg-secondary/60">
+      <div className="flex items-center justify-between gap-3 rounded-2xl px-4 py-3 border border-border-default bg-bg-tertiary/50">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-8 h-8 rounded-full bg-status-error/15 flex items-center justify-center flex-shrink-0">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-status-error)" strokeWidth="2">
+              <circle cx="12" cy="12" r="10" /><path d="M4.93 4.93l14.14 14.14" />
+            </svg>
+          </div>
+          <span className="text-[13px] text-fg-muted truncate">
+            {t('blocked_chat_hint')}{blockedNick ? ` @${blockedNick}` : ''}
+          </span>
+        </div>
+        <button
+          onClick={() => unblockUser(dmTarget)}
+          className="flex-shrink-0 px-3.5 h-9 rounded-full border border-border-default text-[13px] font-medium text-fg-primary hover:bg-bg-tertiary transition-colors"
+        >
+          {t('unblock')}
+        </button>
+      </div>
+    </div>
+  ) : (
     <form onSubmit={handleSubmit} className="px-3 py-2.5">
       <input ref={fileRef} type="file" hidden accept="image/*,video/*"
         onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ''; }} />
+      {replyTo && (
+        <div className="flex items-center gap-2 mb-2 px-3 py-2 rounded-xl bg-bg-tertiary border border-border-default">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0">
+            <path d="M12 19l-7-7 7-7" /><path d="M19 12H5" />
+          </svg>
+          <div className="min-w-0 flex-1">
+            <div className="text-[12px] font-semibold text-accent-primary truncate">@{replyTo.senderNickname}</div>
+            <div className="text-[12px] text-fg-muted truncate">{replyTo.text}</div>
+          </div>
+          <button type="button" onClick={() => setReply(null)} aria-label={t('cancel')}
+            className="flex-shrink-0 p-1 rounded-full text-fg-muted hover:text-fg-primary hover:bg-bg-hover transition-colors">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+          </button>
+        </div>
+      )}
       <div className="flex items-end gap-2">
         <button type="button" disabled={!isConnected || uploading}
           onClick={() => fileRef.current?.click()}

@@ -545,7 +545,7 @@ export function handleConnection(ws: WebSocket): void {
     send(ws, { type: 'key_backup', payload: { blob: blob || null }, timestamp: Date.now() });
   }
 
-  async function handleChatMessage(senderId: string, ws: WebSocket, payload: { text: string; fileKey?: Record<string, string>; ttl?: number }): Promise<void> {
+  async function handleChatMessage(senderId: string, ws: WebSocket, payload: { text: string; fileKey?: Record<string, string>; ttl?: number; quoted?: { id?: string; text?: string; sender?: string } }): Promise<void> {
     if (!checkMessageRateLimit(ip) || !checkMessageRateLimit(senderId)) {
       logSecurity('RATE_LIMIT_MESSAGE', { ip, senderId });
       send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down. Max 1 message per second.' }, timestamp: Date.now() });
@@ -567,7 +567,10 @@ export function handleConnection(ws: WebSocket): void {
     const timestamp = Date.now();
     const fileKey = payload?.fileKey && typeof payload.fileKey === 'object' ? payload.fileKey : undefined;
     const expiresAt = resolveExpiry(payload?.ttl, timestamp);
-    await saveMessage(messageId, senderId, sender.nickname, text, timestamp, undefined, 'general', fileKey, undefined, undefined, undefined, expiresAt);
+    const quoted = payload?.quoted && typeof payload.quoted === 'object' && typeof payload.quoted.sender === 'string'
+      ? { id: String(payload.quoted.id || ''), text: sanitizeText(String(payload.quoted.text || '')).slice(0, 4096), sender: sanitizeText(payload.quoted.sender).slice(0, 64) }
+      : null;
+    await saveMessage(messageId, senderId, sender.nickname, text, timestamp, undefined, 'general', fileKey, undefined, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined);
 
     const messagePayload = {
       id: messageId,
@@ -578,13 +581,16 @@ export function handleConnection(ws: WebSocket): void {
       isOwn: false,
       fileKey,
       expiresAt,
+      quotedMessageId: quoted?.id,
+      quotedMessageText: quoted?.text,
+      quotedMessageSender: quoted?.sender,
     };
 
     broadcast({ type: 'chat_message', payload: { ...messagePayload, channel: 'general' }, timestamp }, senderId);
     send(ws, { type: 'chat_message', payload: { ...messagePayload, isOwn: true, channel: 'general' }, timestamp });
   }
 
-    async function handleDmSend(senderId: string, ws: WebSocket, payload: { to?: string; toKey?: any; text: string; encrypted?: any; signalEncrypted?: any; fileKey?: Record<string, string>; sealed?: string; ttl?: number; reaction?: { messageId: string; userId: string; emoji: string } }): Promise<void> {
+    async function handleDmSend(senderId: string, ws: WebSocket, payload: { to?: string; toKey?: any; text: string; encrypted?: any; signalEncrypted?: any; fileKey?: Record<string, string>; sealed?: string; ttl?: number; reaction?: { messageId: string; userId: string; emoji: string }; quoted?: { id?: string; text?: string; sender?: string } }): Promise<void> {
     if (!checkMessageRateLimit(ip)) {
       send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down.' }, timestamp: Date.now() });
       return;
@@ -644,6 +650,9 @@ export function handleConnection(ws: WebSocket): void {
     const isEncrypted = !!payload?.encrypted;
     const isSignalEncrypted = !!payload?.signalEncrypted;
     const expiresAt = resolveExpiry(payload?.ttl, timestamp);
+    const quoted = payload?.quoted && typeof payload.quoted === 'object' && typeof payload.quoted.sender === 'string'
+      ? { id: String(payload.quoted.id || ''), text: sanitizeText(String(payload.quoted.text || '')).slice(0, 4096), sender: sanitizeText(payload.quoted.sender).slice(0, 64) }
+      : null;
 
     if (payload?.reaction && typeof payload.reaction === 'object') {
       const { messageId, userId, emoji } = payload.reaction;
@@ -655,11 +664,11 @@ export function handleConnection(ws: WebSocket): void {
     }
 
     if (isSignalEncrypted) {
-      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey, undefined, undefined, undefined, expiresAt);
+      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey, undefined, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined);
     } else if (isSealed) {
-      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey, payload.sealed, undefined, undefined, expiresAt);
+      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey, payload.sealed, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined);
     } else if (isEncrypted) {
-      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, payload.encrypted, channelId, fileKey, undefined, undefined, undefined, expiresAt);
+      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, payload.encrypted, channelId, fileKey, undefined, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined);
     } else {
       send(ws, { type: 'error', payload: { code: 'ENCRYPTION_REQUIRED', message: 'Direct messages must be encrypted' }, timestamp: Date.now() });
       logSecurity('PLAINTEXT_DM_REJECTED', { from: senderId, to: recipientUser.id });
@@ -678,6 +687,9 @@ export function handleConnection(ws: WebSocket): void {
       channel: channelId,
       fileKey,
       expiresAt,
+      quotedMessageId: quoted?.id,
+      quotedMessageText: quoted?.text,
+      quotedMessageSender: quoted?.sender,
     };
     for (const dev of recipientDevices) {
       send(dev.ws, { type: 'dm_message', payload: { ...dmPayload, isOwn: false }, timestamp });

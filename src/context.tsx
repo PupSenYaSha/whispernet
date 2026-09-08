@@ -3,6 +3,8 @@ import type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChann
 
 export type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor };
 
+export type ReplyTarget = { id: string; senderNickname: string; text: string } | null;
+
 export interface ConnectionState {
   status: ConnectionStatus;
   messages: Message[];
@@ -21,6 +23,7 @@ export interface ConnectionState {
   dmMessages: Record<string, Message[]>;
   searchResults: { id: string; nickname: string; online: boolean }[];
   messageSearchResults: Message[];
+  replyTo: ReplyTarget;
 }
 
 export type ConnectionAction =
@@ -48,6 +51,7 @@ export type ConnectionAction =
   | { type: 'ADD_REACTION'; messageId: string; emoji: string; userId: string }
   | { type: 'REMOVE_REACTION'; messageId: string; emoji: string; userId: string }
   | { type: 'UPDATE_MESSAGE'; messageId: string; text: string; editedAt: number }
+  | { type: 'SET_REPLY'; reply: ReplyTarget }
   | { type: 'CLEAR_GENERAL' }
   | { type: 'RESET' };
 
@@ -58,8 +62,8 @@ export interface ConnectionContextType {
   reconnect: () => void;
   disconnect: () => void;
   logout: () => void;
-  sendMessage: (text: string) => void;
-  sendDm: (to: string, text: string, sealed?: boolean) => void;
+  sendMessage: (text: string, quoted?: ReplyTarget) => void;
+  sendDm: (to: string, text: string, sealed?: boolean, quoted?: ReplyTarget) => void;
   sendDmImage: (to: string, file: File) => Promise<void>;
   sendImage: (file: File) => Promise<void>;
   openDm: (userId: string, nickname?: string) => void;
@@ -71,6 +75,7 @@ export interface ConnectionContextType {
   addReaction: (messageId: string, emoji: string) => void;
   removeReaction: (messageId: string, emoji: string) => void;
   editMessage: (messageId: string, text: string) => void;
+  setReply: (reply: ReplyTarget) => void;
   t: (key: string) => string;
   updateSettings: (settings: Partial<AppSettings>) => void;
   getMyPublicKey: () => JsonWebKey | null;
@@ -83,6 +88,7 @@ export interface ConnectionContextType {
   refreshBlocked: () => void;
   blockUser: (userId: string, nickname?: string) => void;
   unblockUser: (userId: string) => void;
+  reportUser: (targetId: string, reason: string, messageId?: string) => void;
   showImportModal: (data: any, mode: 'setup' | 'settings') => void;
 }
 

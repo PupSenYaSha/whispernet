@@ -5,6 +5,7 @@ import { cn } from '../utils';
 export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick: () => void; isMobile?: boolean; onBack?: () => void }) {
   const { state, openGeneral, openDm, t, blockedUsers, blockUser, unblockUser } = useConnection();
   const [showUsers, setShowUsers] = useState(false);
+  const [blockModalOpen, setBlockModalOpen] = useState(false);
   const isDm = state.activeChannel !== 'general';
   const dmContact = isDm ? state.contacts.find(c => c.id === state.activeChannel) : null;
   const dmUser = isDm ? state.users.find(u => u.id === state.activeChannel) : null;
@@ -16,9 +17,14 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
     if (!isDm) return;
     if (isBlocked) {
       unblockUser(state.activeChannel);
-    } else if (confirm(t('block_confirm'))) {
-      blockUser(state.activeChannel);
+    } else {
+      setBlockModalOpen(true);
     }
+  };
+
+  const confirmBlock = () => {
+    setBlockModalOpen(false);
+    blockUser(state.activeChannel);
   };
 
   return (
@@ -133,6 +139,37 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
             ))}
           </div>
         </div>
+      )}
+
+      {blockModalOpen && (
+        <>
+          <div className="fixed inset-0 bg-black/50 z-[80]" onClick={() => setBlockModalOpen(false)} />
+          <div className="fixed inset-0 z-[81] flex items-center justify-center p-4">
+            <div className="bg-bg-secondary border border-border-default rounded-3xl shadow-2xl max-w-sm w-full p-6"
+              style={{ animation: 'scaleIn 0.2s cubic-bezier(0.22, 1, 0.36, 1)' }}>
+              <div className="w-14 h-14 rounded-2xl bg-status-error/15 flex items-center justify-center mx-auto mb-5">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--color-status-error)" strokeWidth="2">
+                  <circle cx="12" cy="12" r="10" />
+                  <path d="M4.93 4.93l14.14 14.14" />
+                </svg>
+              </div>
+              <h3 className="text-center text-[17px] font-semibold text-fg-primary mb-2">{t('block_dialog_title')}</h3>
+              <p className="text-center text-[14px] text-fg-muted mb-6 leading-relaxed">
+                {t('block_dialog_desc')}{dmNickname ? ` @${dmNickname}` : ''}
+              </p>
+              <div className="flex gap-3">
+                <button onClick={() => setBlockModalOpen(false)}
+                  className="flex-1 py-3 rounded-2xl border border-border-default text-fg-primary text-[15px] font-medium hover:bg-bg-tertiary transition-colors">
+                  {t('cancel')}
+                </button>
+                <button onClick={confirmBlock}
+                  className="flex-1 py-3 rounded-2xl bg-status-error text-white text-[15px] font-semibold hover:brightness-110 transition-all">
+                  {t('block')}
+                </button>
+              </div>
+            </div>
+          </div>
+        </>
       )}
     </header>
   );

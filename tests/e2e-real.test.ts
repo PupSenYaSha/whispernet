@@ -335,6 +335,26 @@ describe('WhisperNet real E2E', () => {
     a.client.ws.close(); b.client.ws.close();
   }, 25000);
 
+  it('replies: quoted payload propagates to other participants (general + DM)', async () => {
+    const a = await makeUser(PORT, 'rqa' + Date.now());
+    const b = await makeUser(PORT, 'rqb' + Date.now());
+    await sleep(1100);
+    // general chat reply
+    a.client.send('chat_message', { text: 'replying now', ttl: 0, quoted: { id: 'msg-general', text: 'original line', sender: 'someone' } });
+    const gen = await b.client.next((m) => m.type === 'chat_message' && m.payload.quotedMessageText);
+    expect(gen.payload.quotedMessageId).toBe('msg-general');
+    expect(gen.payload.quotedMessageText).toBe('original line');
+    expect(gen.payload.quotedMessageSender).toBe('someone');
+    // DM reply
+    const enc = await encryptMessage('dm reply body', { [b.userId]: b.publicKey });
+    a.client.send('dm_send', { to: b.userId, text: '', encrypted: enc, quoted: { id: 'msg-dm', text: 'dm original', sender: 'someone' } });
+    const dm = await b.client.next((m) => m.type === 'dm_message' && m.payload.quotedMessageText);
+    expect(dm.payload.quotedMessageId).toBe('msg-dm');
+    expect(dm.payload.quotedMessageText).toBe('dm original');
+    expect(dm.payload.quotedMessageSender).toBe('someone');
+    a.client.ws.close(); b.client.ws.close();
+  }, 25000);
+
   it('search privacy: third user cannot read others DM; public search works', async () => {
     const a = await makeUser(PORT, 'sa' + Date.now());
     const b = await makeUser(PORT, 'sb' + Date.now());
