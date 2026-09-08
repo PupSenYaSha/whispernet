@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, addReport, getReports, isAdminNickname } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { appendFileSync } from 'fs';
@@ -27,6 +27,7 @@ export interface ConnectedClient {
   nickname: string;
   lastHeartbeat: number;
   ip: string;
+  deviceInfo: string;
 }
 
 // Keyed by deviceId: a single user account may have several connected devices.
@@ -53,9 +54,9 @@ function isUserOnline(userId: string): boolean {
 }
 
 // Register (or reconnect) a device. Replaces any prior socket for the same deviceId.
-// Enforces a soft cap of MAX_SESSIONS_PER_USER concurrent sessions per account:
-// when a new device connects beyond the cap, the least recently active older
-// session of that user is dropped with close code 4002.
+// The session cap is enforced at auth time (see sessionCapReached): a *new* device
+// beyond MAX_SESSIONS_PER_USER is rejected before it is registered. Existing
+// sessions are NEVER evicted to make room for a new one.
 function registerDevice(deviceId: string, client: ConnectedClient): void {
   const prev = clients.get(deviceId);
   if (prev && prev.ws !== client.ws) {
@@ -63,21 +64,16 @@ function registerDevice(deviceId: string, client: ConnectedClient): void {
   }
   clients.set(deviceId, client);
   if (!userDevices.has(client.userId)) userDevices.set(client.userId, new Set());
-  const devs = userDevices.get(client.userId)!;
-  devs.add(deviceId);
-  if (devs.size > MAX_SESSIONS_PER_USER) {
-    const oldest = [...devs]
-      .filter(id => id !== deviceId)
-      .map(id => ({ id, t: clients.get(id)?.lastHeartbeat || 0 }))
-      .sort((a, b) => a.t - b.t)[0];
-    if (oldest) {
-      const oc = clients.get(oldest.id);
-      if (oc) {
-        try { oc.ws.close(4002, 'Too many active sessions (max 3)'); } catch {}
-        unregisterDevice(oldest.id);
-      }
-    }
-  }
+  userDevices.get(client.userId)!.add(deviceId);
+}
+
+// True when a *new* device (one that isn't already connected for this user)
+// would push the user past MAX_SESSIONS_PER_USER.
+function sessionCapReached(userId: string, deviceId: string | null): boolean {
+  const devs = userDevices.get(userId);
+  if (!devs) return false;
+  if (deviceId && devs.has(deviceId)) return false; // reconnecting an existing device
+  return devs.size >= MAX_SESSIONS_PER_USER;
 }
 
 // Remove a device from the connection tables (called on disconnect / revoke).
@@ -378,12 +374,15 @@ export function handleConnection(ws: WebSocket): void {
       case 'admin_reports':
         await handleAdminReports(userId, ws, message.payload);
         break;
+      case 'get_banned':
+        await handleGetBanned(userId, ws, message.payload);
+        break;
       default:
         send(ws, { type: 'error', payload: { code: 'UNKNOWN_MESSAGE', message: 'Unknown message type' }, timestamp: Date.now() });
     }
   }
 
-  async function handleAuthLogin(ws: WebSocket, payload: { nickname: string; password: string; preKeyBundle?: any; deviceId?: string }): Promise<void> {
+  async function handleAuthLogin(ws: WebSocket, payload: { nickname: string; password: string; preKeyBundle?: any; deviceId?: string; deviceInfo?: string }): Promise<void> {
     if (!checkAuthRateLimit(ip)) {
       logSecurity('RATE_LIMIT_AUTH', { ip });
       send(ws, { type: 'auth_failure', payload: { reason: 'Too many attempts. Try again in 1 minute.' }, timestamp: Date.now() });
@@ -440,9 +439,16 @@ export function handleConnection(ws: WebSocket): void {
 
     const deviceId = typeof payload.deviceId === 'string' && payload.deviceId.length > 0 && payload.deviceId.length <= 64
       ? payload.deviceId : crypto.randomUUID();
+
+    if (sessionCapReached(user.id, deviceId)) {
+      logSecurity('SESSION_LIMIT', { nickname: cleanNick, ip, deviceId });
+      send(ws, { type: 'auth_failure', payload: { reason: `Session limit reached (${MAX_SESSIONS_PER_USER} max). Log out on another device or revoke one in Settings.` }, timestamp: Date.now() });
+      return;
+    }
+
     currentUserId = user.id;
     currentDeviceId = deviceId;
-    registerDevice(deviceId, { deviceId, ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip });
+    registerDevice(deviceId, { deviceId, ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip, deviceInfo: typeof payload?.deviceInfo === 'string' ? payload.deviceInfo.slice(0, 60) : '' });
 
     if (payload.preKeyBundle && isValidPreKeyBundle(payload.preKeyBundle)) {
       await setPreKeyBundle(user.id, payload.preKeyBundle);
@@ -451,7 +457,7 @@ export function handleConnection(ws: WebSocket): void {
     await onAuthenticated(user.id, user.nickname, ws, deviceId);
   }
 
-  async function handleAuthRegister(ws: WebSocket, payload: { nickname: string; password: string; publicKey?: any; preKeyBundle?: any; deviceId?: string }): Promise<void> {
+  async function handleAuthRegister(ws: WebSocket, payload: { nickname: string; password: string; publicKey?: any; preKeyBundle?: any; deviceId?: string; deviceInfo?: string }): Promise<void> {
     if (!checkAuthRateLimit(ip)) {
       send(ws, { type: 'auth_failure', payload: { reason: 'Too many attempts. Try again in 1 minute.' }, timestamp: Date.now() });
       return;
@@ -506,7 +512,7 @@ export function handleConnection(ws: WebSocket): void {
       ? payload.deviceId : crypto.randomUUID();
     currentUserId = user.id;
     currentDeviceId = deviceId;
-    registerDevice(deviceId, { deviceId, ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip });
+    registerDevice(deviceId, { deviceId, ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip, deviceInfo: typeof payload?.deviceInfo === 'string' ? payload.deviceInfo.slice(0, 60) : '' });
 
     await onAuthenticated(user.id, user.nickname, ws, deviceId);
   }
@@ -935,10 +941,10 @@ function broadcastSystem(text: string, excludeUserId?: string): void {
 }
 
   function handleGetSessions(userId: string, ws: WebSocket, currentDeviceId: string | null): void {
-    const sessions: { id: string; nickname: string; lastActive: number; current: boolean }[] = [];
+    const sessions: { id: string; nickname: string; name: string; lastActive: number; current: boolean }[] = [];
     for (const [deviceId, client] of clients) {
       if (client.userId === userId) {
-        sessions.push({ id: deviceId, nickname: client.nickname, lastActive: client.lastHeartbeat, current: deviceId === currentDeviceId });
+        sessions.push({ id: deviceId, nickname: client.nickname, name: client.deviceInfo || '', lastActive: client.lastHeartbeat, current: deviceId === currentDeviceId });
       }
     }
     send(ws, { type: 'sessions_list', payload: { sessions }, timestamp: Date.now() });
@@ -1073,21 +1079,25 @@ function broadcastSystem(text: string, excludeUserId?: string): void {
       send(ws, { type: 'error', payload: { code: 'FORBIDDEN', message: 'Unauthorized' }, timestamp: Date.now() });
       return;
     }
-    const ok = await setUserBannedByIdent(typeof payload?.userId === 'string' ? payload.userId : null, typeof payload?.nickname === 'string' ? payload.nickname : null, true);
+    const targetId = (typeof payload?.userId === 'string'
+      ? payload.userId
+      : (payload?.nickname ? (await getUserByNickname(sanitize(payload.nickname)))?.id : null)) || null;
+    const ok = await setUserBannedByIdent(targetId, typeof payload?.nickname === 'string' ? payload.nickname : null, true);
     if (!ok) {
       send(ws, { type: 'error', payload: { code: 'USER_NOT_FOUND', message: 'User not found' }, timestamp: Date.now() });
       return;
     }
     logSecurity('ADMIN_BAN', { admin, target: payload?.userId || payload?.nickname });
     // Force-disconnect any online devices of the banned user.
-    const targetId = payload?.userId || (payload?.nickname ? (await getUserByNickname(payload.nickname))?.id : null);
     if (targetId) {
       for (const c of devicesForUser(targetId)) {
         c.ws.close(4003, 'Account banned');
       }
       for (const id of [...(userDevices.get(targetId) || [])]) unregisterDevice(id);
     }
-    send(ws, { type: 'admin_action', payload: { ok: true, action: 'ban' }, timestamp: Date.now() });
+    // A ban that actually took effect also clears all open reports against the user.
+    const reportsRemoved = targetId ? await removeReportsForTarget(targetId) : 0;
+    send(ws, { type: 'admin_action', payload: { ok: true, action: 'ban', targetId, reportsRemoved }, timestamp: Date.now() });
   }
 
   async function handleAdminUnban(userId: string | null, ws: WebSocket, payload: { key?: string; userId?: string; nickname?: string }): Promise<void> {
@@ -1113,6 +1123,16 @@ function broadcastSystem(text: string, excludeUserId?: string): void {
     }
     const reports = await getReports();
     send(ws, { type: 'admin_reports', payload: { reports }, timestamp: Date.now() });
+  }
+
+  async function handleGetBanned(userId: string | null, ws: WebSocket, payload: { key?: string }): Promise<void> {
+    const admin = await adminIdentity(userId, ws, payload);
+    if (!admin) {
+      send(ws, { type: 'error', payload: { code: 'FORBIDDEN', message: 'Unauthorized' }, timestamp: Date.now() });
+      return;
+    }
+    const banned = await getBannedUsers();
+    send(ws, { type: 'banned_list', payload: { banned }, timestamp: Date.now() });
   }
 
 export function startHeartbeatCheck(): void {

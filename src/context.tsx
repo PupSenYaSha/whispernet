@@ -1,7 +1,7 @@
 import React from 'react';
-import type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor } from './types';
+import type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor, Session, BannedUser } from './types';
 
-export type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor };
+export type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor, Session, BannedUser };
 
 export type ReplyTarget = { id: string; senderNickname: string; text: string } | null;
 
@@ -100,9 +100,13 @@ export interface ConnectionContextType {
   getMyPublicKey: () => JsonWebKey | null;
   getPublicKey: (userId: string) => JsonWebKey | null;
   decryptMedia: (message: { id: string; text: string; fileKey?: Record<string, string> }) => Promise<string | null>;
-  sessions: { id: string; lastActive: number; current: boolean }[];
+  sessions: Session[];
   requestSessions: () => void;
   revokeSession: (sessionId: string) => void;
+  bannedUsers: BannedUser[];
+  adminGetBanned: () => void;
+  adminError: string | null;
+  dismissAdminError: () => void;
   blockedUsers: { id: string; nickname: string }[];
   refreshBlocked: () => void;
   blockUser: (userId: string, nickname?: string) => void;

@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useReducer, ReactNode } from 'react';
-import type { User, AppSettings, Message } from './types';
+import type { User, AppSettings, Message, Session, BannedUser } from './types';
 import { generateKeyPair, encryptMessage, decryptMessage } from './crypto';
 import { encryptPrivateKey, decryptPrivateKey, isEncryptedBundle, isKeyBackup } from './crypto-keys';
 import { encryptPassword, decryptPassword } from './device-crypto';
 import { uploadFile } from './upload';
 import { encryptFile, buildFileKeyMap, unwrapAndDecrypt, wrapForMedia } from './media-crypto';
 import { ConnectionContext, useConnection, type ConnectionState, type ConnectionAction, type ReplyTarget, type AdminReport } from './context';
-import { loadSettings, defaultSettings, translations, cn, getAvatarText, getAvatarGradient, formatTime } from './utils';
+import { loadSettings, defaultSettings, translations, cn, getAvatarText, getAvatarGradient, formatTime, getDeviceName } from './utils';
 
 declare const __APP_VERSION__: string;
 import {
@@ -210,12 +210,14 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const signalInitializedRef = useRef(false);
   const preKeyBundlesRef = useRef<Record<string, any>>({});
   const pendingX3dhRef = useRef<Record<string, { x3dhMessage: any; ratchetPublicKey: Uint8Array }>>({});
-  const [sessions, setSessions] = useState<{ id: string; lastActive: number; current: boolean }[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
   const [blockedUsers, setBlockedUsers] = useState<{ id: string; nickname: string }[]>([]);
   const [importModal, setImportModal] = useState<{ data: any; mode: 'setup' | 'settings' } | null>(null);
   const [editingTarget, setEditingTarget] = useState<Message | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [reports, setReports] = useState<AdminReport[]>([]);
+  const [bannedUsers, setBannedUsers] = useState<BannedUser[]>([]);
+  const [adminError, setAdminError] = useState<string | null>(null);
 
   // Fetches the server-stored encrypted key-backup (used to sync the account key
   // across devices). The backup blob is opaque to the server; it is decrypted
@@ -343,6 +345,12 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'revoke_session', payload: { sessionId } }));
   }, []);
 
+  const adminGetBanned = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'get_banned', payload: {} }));
+  }, []);
+
+  const dismissAdminError = useCallback(() => setAdminError(null), []);
+
   const refreshBlocked = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'get_blocked', payload: {} }));
   }, []);
@@ -424,7 +432,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
             await initPreKeyManager(auth.password);
             signalInitializedRef.current = true;
             const preKeyBundle = getPreKeyBundleForServer();
-            ws.send(JSON.stringify({ type: 'auth_register', payload: { nickname: auth.nickname, password: auth.password, publicKey: keys.publicKey, preKeyBundle, deviceId: getDeviceId() } }));
+            ws.send(JSON.stringify({ type: 'auth_register', payload: { nickname: auth.nickname, password: auth.password, publicKey: keys.publicKey, preKeyBundle, deviceId: getDeviceId(), deviceInfo: getDeviceName() } }));
           } else {
             let savedKey = localStorage.getItem(`wn_pk_${nick}`);
             let savedPubKey = localStorage.getItem(`wn_pub_${nick}`);
@@ -455,7 +463,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
             await initPreKeyManager(auth.password);
             signalInitializedRef.current = true;
             const preKeyBundle = getPreKeyBundleForServer();
-            ws.send(JSON.stringify({ type: 'auth_login', payload: { nickname: auth.nickname, password: auth.password, preKeyBundle, deviceId: getDeviceId() } }));
+            ws.send(JSON.stringify({ type: 'auth_login', payload: { nickname: auth.nickname, password: auth.password, preKeyBundle, deviceId: getDeviceId(), deviceInfo: getDeviceName() } }));
           }
         }
       };
@@ -632,6 +640,15 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
             case 'admin_reports':
               setReports(message.payload?.reports || []);
               break;
+            case 'banned_list':
+              setBannedUsers(message.payload?.banned || []);
+              break;
+            case 'admin_action':
+              if (message.payload?.ok) {
+                adminReports();
+                adminGetBanned();
+              }
+              break;
             case 'blocked_list':
               setBlockedUsers((message.payload.users || []));
               break;
@@ -645,6 +662,9 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               dispatch({ type: 'ADD_MESSAGE', message: { id: crypto.randomUUID(), senderId: 'system', senderNickname: '', text: message.payload.text, timestamp: Date.now(), isOwn: false } });
               break;
             case 'error':
+              if (message.payload?.code === 'USER_NOT_FOUND' || message.payload?.code === 'FORBIDDEN') {
+                setAdminError(message.payload?.message || message.payload?.code || 'Error');
+              }
               console.error('Server error:', message.payload);
               break;
             case 'key_updated': {
@@ -917,6 +937,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         isAdmin, reports, adminReports, adminBan, adminUnban,
         t, updateSettings, getMyPublicKey, getPublicKey, decryptMedia,
         sessions, requestSessions, revokeSession,
+        bannedUsers, adminGetBanned, adminError, dismissAdminError,
         blockedUsers, refreshBlocked, blockUser, unblockUser, reportUser,
         showImportModal: (data: any, mode: 'setup' | 'settings') => setImportModal({ data, mode }),
       }}>

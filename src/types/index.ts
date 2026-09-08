@@ -28,6 +28,20 @@ export interface Contact {
   online?: boolean;
 }
 
+export interface Session {
+  id: string;
+  nickname: string;
+  name: string;
+  lastActive: number;
+  current: boolean;
+}
+
+export interface BannedUser {
+  userId: string;
+  nickname: string;
+  bannedAt: number;
+}
+
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'reconnecting';
 
 export type ActiveChannel = 'general' | string;

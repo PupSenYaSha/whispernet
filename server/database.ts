@@ -578,6 +578,14 @@ export async function getUserBanned(userId: string): Promise<boolean> {
   return !!user?.isBanned;
 }
 
+export async function getBannedUsers(): Promise<{ userId: string; nickname: string; bannedAt: number }[]> {
+  const users = await loadUsers();
+  return users
+    .filter(u => u.isBanned)
+    .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0))
+    .map(u => ({ userId: u.id, nickname: u.nickname, bannedAt: u.createdAt || 0 }));
+}
+
 export async function getBlockedUserIds(userId: string): Promise<string[]> {
   const users = await loadUsers();
   const user = users.find(u => u.id === userId);
@@ -636,6 +644,16 @@ export async function addReport(report: StoredReport): Promise<void> {
 
 export async function getReports(): Promise<StoredReport[]> {
   return loadReports();
+}
+
+export async function removeReportsForTarget(targetId: string): Promise<number> {
+  return withMutex(reportsMutex, async () => {
+    const reports = await loadReports();
+    const remaining = reports.filter(r => r.targetId !== targetId);
+    const removed = reports.length - remaining.length;
+    if (removed > 0) await saveReports(remaining);
+    return removed;
+  });
 }
 
 // --- Admins by nickname (server-side moderation identity) ---

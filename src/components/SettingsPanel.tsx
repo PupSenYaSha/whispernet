@@ -49,14 +49,17 @@ function Segmented<T extends string>({ value, onChange, options }: {
   );
 }
 
-function Option({ label, icon, children }: { label: string; icon?: React.ReactNode; children: React.ReactNode }) {
+function Option({ label, icon, children, stacked }: { label: string; icon?: React.ReactNode; children: React.ReactNode; stacked?: boolean }) {
   return (
-    <div className="flex items-center justify-between gap-3 py-3.5 px-4 hover:bg-bg-tertiary/40 transition-colors">
-      <div className="flex items-center gap-3 min-w-0">
-        {icon && <div className="w-9 h-9 rounded-2xl bg-gradient-to-br from-bg-tertiary to-bg-tertiary/60 border border-border-default flex items-center justify-center text-fg-muted flex-shrink-0">{icon}</div>}
-        <span className="text-[15px] text-fg-primary">{label}</span>
+    <div className="py-3.5 px-4 hover:bg-bg-tertiary/40 transition-colors">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          {icon && <div className="w-9 h-9 rounded-2xl bg-gradient-to-br from-bg-tertiary to-bg-tertiary/60 border border-border-default flex items-center justify-center text-fg-muted flex-shrink-0">{icon}</div>}
+          <span className="text-[15px] text-fg-primary">{label}</span>
+        </div>
+        {!stacked && <div className="flex-shrink-0">{children}</div>}
       </div>
-      {children}
+      {stacked && <div className="mt-3">{children}</div>}
     </div>
   );
 }
@@ -118,19 +121,20 @@ function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, onCon
 }
 
 export function SettingsPanel({ onClose, closing, inline }: { onClose: () => void; closing?: boolean; inline?: boolean }) {
-  const { state, updateSettings, logout, sessions, requestSessions, isAdmin, reports, adminReports, adminBan, adminUnban, t } = useConnection();
+  const { state, updateSettings, logout, sessions, requestSessions, isAdmin, reports, adminReports, adminBan, adminUnban, bannedUsers, adminGetBanned, adminError, dismissAdminError, revokeSession: revoke, t } = useConnection();
   const [confirmAction, setConfirmAction] = useState<'logout' | 'clearData' | 'adminBan' | 'adminUnban' | null>(null);
   const [banNick, setBanNick] = useState('');
   const [pendingBan, setPendingBan] = useState<string | null>(null);
+  const [banListOpen, setBanListOpen] = useState(false);
 
   useEffect(() => {
     requestSessions();
-    if (isAdmin) adminReports();
+    if (isAdmin) { adminReports(); adminGetBanned(); }
     if (!inline) {
       document.body.style.overflow = 'hidden';
       return () => { document.body.style.overflow = ''; };
     }
-  }, [inline, requestSessions, isAdmin, adminReports]);
+  }, [inline, requestSessions, isAdmin, adminReports, adminGetBanned]);
 
   const accentColors: AccentColor[] = ['purple', 'blue', 'green', 'red', 'orange', 'pink', 'teal', 'indigo'];
   const accentColorPreview: Record<AccentColor, string> = {
@@ -224,14 +228,12 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
   const content = (
     <div className="flex-1 overflow-y-auto p-4 space-y-6">
       <Section title={t('sec_appearance')}>
-        <Option label={t('theme')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>}>
-          <div className="w-[120px] flex-shrink-0">
-            <Segmented
-              value={state.settings.theme}
-              onChange={(theme) => updateSettings({ theme })}
-              options={[{ value: 'dark', label: t('theme_dark') }, { value: 'light', label: t('theme_light') }]}
-            />
-          </div>
+        <Option label={t('theme')} stacked icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>}>
+          <Segmented
+            value={state.settings.theme}
+            onChange={(theme) => updateSettings({ theme })}
+            options={[{ value: 'dark', label: t('theme_dark') }, { value: 'light', label: t('theme_light') }]}
+          />
         </Option>
         <Option label={t('accent_color')} icon={<div className="w-4 h-4 rounded-full" style={{ backgroundColor: accentColorPreview[state.settings.accentColor || 'purple'] }} />}>
           <div className="flex gap-1.5 flex-wrap justify-end max-w-[180px]">
@@ -249,26 +251,22 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
             ))}
           </div>
         </Option>
-        <Option label={t('language')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" /></svg>}>
-          <div className="w-[120px] flex-shrink-0">
-            <Segmented
-              value={state.settings.language}
-              onChange={(lang) => updateSettings({ language: lang })}
-              options={[{ value: 'en', label: 'English' }, { value: 'ru', label: 'Russian' }]}
-            />
-          </div>
+        <Option label={t('language')} stacked icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" /></svg>}>
+          <Segmented
+            value={state.settings.language}
+            onChange={(lang) => updateSettings({ language: lang })}
+            options={[{ value: 'en', label: 'English' }, { value: 'ru', label: 'Russian' }]}
+          />
         </Option>
       </Section>
 
       <Section title={t('sec_text')}>
-        <Option label={t('font_size')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="4 7 4 4 20 4 20 7" /><line x1="9" y1="20" x2="15" y2="20" /><line x1="12" y1="4" x2="12" y2="20" /></svg>}>
-          <div className="w-[120px] flex-shrink-0">
-            <Segmented
-              value={state.settings.fontSize}
-              onChange={(size) => updateSettings({ fontSize: size })}
-              options={[{ value: 'small', label: t('font_small') }, { value: 'normal', label: t('font_normal') }, { value: 'large', label: t('font_large') }]}
-            />
-          </div>
+        <Option label={t('font_size')} stacked icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="4 7 4 4 20 4 20 7" /><line x1="9" y1="20" x2="15" y2="20" /><line x1="12" y1="4" x2="12" y2="20" /></svg>}>
+          <Segmented
+            value={state.settings.fontSize}
+            onChange={(size) => updateSettings({ fontSize: size })}
+            options={[{ value: 'small', label: t('font_small') }, { value: 'normal', label: t('font_normal') }, { value: 'large', label: t('font_large') }]}
+          />
         </Option>
         <Option label={t('compact_mode')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="21" y1="10" x2="3" y2="10" /><line x1="21" y1="6" x2="3" y2="6" /><line x1="21" y1="14" x2="3" y2="14" /><line x1="21" y1="18" x2="3" y2="18" /></svg>}>
           <Toggle checked={state.settings.compactMode || false} onChange={(v) => updateSettings({ compactMode: v })} />
@@ -285,19 +283,17 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
       </Section>
 
       <Section title={t('sec_privacy')}>
-        <Option label={t('disappearing_messages')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>}>
-          <div className="w-[130px] flex-shrink-0">
-            <Segmented
-              value={state.settings.disappearingTTL}
-              onChange={(ttl) => updateSettings({ disappearingTTL: ttl })}
-              options={[
-                { value: 'off', label: t('disappearing_off') },
-                { value: '24h', label: t('disappearing_24h') },
-                { value: '7d', label: t('disappearing_7d') },
-                { value: '30d', label: t('disappearing_30d') },
-              ]}
-            />
-          </div>
+        <Option label={t('disappearing_messages')} stacked icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>}>
+          <Segmented
+            value={state.settings.disappearingTTL}
+            onChange={(ttl) => updateSettings({ disappearingTTL: ttl })}
+            options={[
+              { value: 'off', label: t('disappearing_off') },
+              { value: '24h', label: t('disappearing_24h') },
+              { value: '7d', label: t('disappearing_7d') },
+              { value: '30d', label: t('disappearing_30d') },
+            ]}
+          />
         </Option>
         <Option label={t('screenshot_prot')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="3" x2="21" y2="21" /></svg>}>
           <Toggle checked={!!localStorage.getItem('wn_screenshot_prot')} onChange={(v) => {
@@ -320,17 +316,23 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
             <p className="text-[13px] text-fg-muted py-1">{t('sessions_desc')}</p>
           ) : (
             sessions.map((s) => (
-              <div key={s.id} className="flex items-center justify-between px-3 py-2.5 rounded-xl bg-bg-tertiary border border-border-default">
+              <div key={s.id} className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl bg-bg-tertiary border border-border-default">
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-2 min-w-0">
                     <span className="w-2 h-2 rounded-full bg-status-success flex-shrink-0" />
-                    <span className="text-[13px] text-fg-primary font-mono truncate">…{s.id.slice(-6)}</span>
+                    <span className="text-[13px] text-fg-primary truncate">{s.name || `…${s.id.slice(-6)}`}</span>
                     {s.current && (
                       <span className="flex-shrink-0 px-2 py-0.5 rounded-full bg-accent-primary/15 text-accent-primary text-[10px] font-bold">{t('current_session')}</span>
                     )}
                   </div>
-                  <span className="text-[11px] text-fg-muted block mt-0.5">{new Date(s.lastActive).toLocaleTimeString()}</span>
+                  <span className="text-[11px] text-fg-muted block mt-0.5">{new Date(s.lastActive).toLocaleString()}</span>
                 </div>
+                {!s.current && (
+                  <button onClick={() => revoke(s.id)}
+                    className="flex-shrink-0 px-2.5 py-1.5 rounded-lg border border-border-default text-fg-muted text-[11px] font-medium hover:text-status-error hover:border-status-error/40 transition-colors">
+                    {t('revoke')}
+                  </button>
+                )}
               </div>
             ))
           )}
@@ -339,50 +341,102 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
 
       {isAdmin && (
         <Section title={t('admin_section')}>
-          <div className="px-4 py-3 space-y-3">
-            <div className="flex gap-2">
-              <input
-                value={banNick}
-                onChange={(e) => setBanNick(e.target.value)}
-                placeholder={t('admin_ban_hint')}
-                maxLength={16}
-                className="flex-1 min-w-0 px-3.5 py-2.5 rounded-xl bg-bg-tertiary border border-border-default text-[14px] text-fg-primary placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary" />
-              <button
-                onClick={() => { if (banNick.trim()) { setPendingBan(banNick.trim()); setConfirmAction('adminBan'); } }}
-                className="flex-shrink-0 px-4 py-2.5 rounded-xl bg-status-error text-white text-[14px] font-semibold hover:brightness-110 transition-all">
-                {t('admin_ban')}
-              </button>
-              <button
-                onClick={() => { if (banNick.trim()) { setPendingBan(banNick.trim()); setConfirmAction('adminUnban'); } }}
-                className="flex-shrink-0 px-4 py-2.5 rounded-xl border border-border-default text-fg-primary text-[14px] font-medium hover:bg-bg-tertiary transition-colors">
-                {t('admin_unban')}
-              </button>
+          <div className="px-4 py-3 space-y-4">
+            {adminError && (
+              <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-status-error/10 border border-status-error/30 text-status-error text-[12px]">
+                <span className="min-w-0 leading-relaxed">{adminError}</span>
+                <button onClick={dismissAdminError} className="flex-shrink-0 text-status-error/70 hover:text-status-error text-[16px] leading-none px-1" aria-label="Dismiss">✕</button>
+              </div>
+            )}
+
+            <div>
+              <p className="text-[11px] font-bold text-fg-muted uppercase tracking-wider mb-1.5">{t('admin_ban_nick')}</p>
+              <div className="flex gap-2 flex-wrap">
+                <input
+                  value={banNick}
+                  onChange={(e) => setBanNick(e.target.value)}
+                  placeholder={t('admin_ban_hint')}
+                  maxLength={16}
+                  className="flex-1 min-w-[140px] px-3.5 py-2.5 rounded-xl bg-bg-tertiary border border-border-default text-[14px] text-fg-primary placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary" />
+                <button
+                  onClick={() => { if (banNick.trim()) { setPendingBan(banNick.trim()); setConfirmAction('adminBan'); } }}
+                  disabled={!banNick.trim()}
+                  className="flex-shrink-0 px-4 py-2.5 rounded-xl bg-status-error text-white text-[13px] font-semibold hover:brightness-110 transition-all disabled:opacity-40">
+                  {t('admin_ban')}
+                </button>
+              </div>
+              <p className="text-[11px] text-fg-muted mt-1.5 leading-relaxed">{t('admin_ban_nick_hint')}</p>
             </div>
-            <div className="space-y-2">
+
+            <div>
+              <button onClick={() => setBanListOpen(!banListOpen)}
+                className="w-full flex items-center justify-between px-3.5 py-2.5 rounded-xl bg-bg-tertiary border border-border-default hover:bg-bg-tertiary/60 transition-colors">
+                <div className="flex items-center gap-2 min-w-0">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-status-error flex-shrink-0">
+                    <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+                  </svg>
+                  <span className="text-[14px] font-semibold text-fg-primary">{t('admin_blocked')}</span>
+                  {bannedUsers.length > 0 && (
+                    <span className="px-1.5 py-0.5 rounded-full bg-status-error/15 text-status-error text-[10px] font-bold">{bannedUsers.length}</span>
+                  )}
+                </div>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"
+                  className={`flex-shrink-0 text-fg-muted transition-transform duration-200 ${banListOpen ? 'rotate-180' : ''}`}>
+                  <polyline points="6 9 12 15 18 9" />
+                </svg>
+              </button>
+              <p className="text-[11px] text-fg-muted mt-1.5 leading-relaxed">{t('admin_banned_note')}</p>
+              {banListOpen && (
+                <div className="mt-2 space-y-1.5">
+                  {bannedUsers.length === 0 ? (
+                    <p className="text-[12px] text-fg-muted py-1">{t('admin_blocked_empty')}</p>
+                  ) : (
+                    bannedUsers.map((u) => (
+                      <div key={u.userId} className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-bg-tertiary border border-border-default">
+                        <div className="min-w-0">
+                          <div className="text-[13px] text-fg-primary truncate">@{u.nickname}</div>
+                          <div className="text-[11px] text-fg-muted">{new Date(u.bannedAt).toLocaleString()}</div>
+                        </div>
+                        <button
+                          onClick={() => { setPendingBan(u.nickname); setConfirmAction('adminUnban'); }}
+                          className="flex-shrink-0 px-2.5 py-1.5 rounded-lg bg-accent-primary/15 text-accent-primary text-[12px] font-semibold hover:bg-accent-primary/25 transition-colors">
+                          {t('admin_unblock')}
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+            </div>
+
+            <div>
+              <p className="text-[11px] font-bold text-fg-muted uppercase tracking-wider mb-1.5">{t('admin_reports')}</p>
               {reports.length === 0 ? (
                 <p className="text-[13px] text-fg-muted py-1">{t('admin_no_reports')}</p>
               ) : (
-                reports.map((r) => (
-                  <div key={r.id} className="px-3 py-2.5 rounded-xl bg-bg-tertiary border border-border-default space-y-1">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="text-[13px] font-bold text-fg-primary truncate">@{r.targetNick || '?'}</span>
-                      <span className="text-[10px] text-fg-muted flex-shrink-0">{new Date(r.timestamp).toLocaleTimeString()}</span>
+                <div className="space-y-2">
+                  {reports.map((r) => (
+                    <div key={r.id} className="px-3 py-2.5 rounded-xl bg-bg-tertiary border border-border-default space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-[13px] font-bold text-fg-primary truncate">@{r.targetNick || '?'}</span>
+                        <span className="text-[10px] text-fg-muted flex-shrink-0">{new Date(r.timestamp).toLocaleString()}</span>
+                      </div>
+                      {r.messageText && <p className="text-[12px] text-fg-muted leading-relaxed break-words">"{r.messageText}"</p>}
+                      <div className="flex items-center gap-1.5 flex-wrap">
+                        <span className="px-1.5 py-0.5 rounded-full bg-accent-primary/15 text-accent-primary text-[10px] font-semibold">
+                          {r.channel === 'general' ? t('admin_channel_general') : t('admin_channel_dm')}
+                        </span>
+                        <span className="text-[12px] text-fg-primary">{r.reason}</span>
+                      </div>
+                      <div className="text-[11px] text-fg-subtle">from @{r.reporterNick || '?'}</div>
+                      <button
+                        onClick={() => { if (r.targetNick) { setPendingBan(r.targetNick); setConfirmAction('adminBan'); } }}
+                        className="mt-0.5 px-3 py-1.5 rounded-lg bg-status-error/10 text-status-error text-[12px] font-semibold hover:bg-status-error/20 transition-colors">
+                        {t('admin_ban')} @{r.targetNick}
+                      </button>
                     </div>
-                    {r.messageText && <p className="text-[12px] text-fg-muted truncate">"{r.messageText}"</p>}
-                    <div className="flex items-center gap-1.5 flex-wrap">
-                      <span className="px-1.5 py-0.5 rounded-full bg-accent-primary/15 text-accent-primary text-[10px] font-semibold">
-                        {r.channel === 'general' ? 'General chat' : t('admin_channel_dm')}
-                      </span>
-                      <span className="text-[12px] text-fg-primary">{r.reason}</span>
-                    </div>
-                    <div className="text-[11px] text-fg-subtle">from @{r.reporterNick || '?'}</div>
-                    <button
-                      onClick={() => { if (r.targetNick) { setPendingBan(r.targetNick); setConfirmAction('adminBan'); } }}
-                      className="mt-0.5 px-3 py-1.5 rounded-lg bg-status-error/10 text-status-error text-[12px] font-semibold hover:bg-status-error/20 transition-colors">
-                      {t('admin_ban')} @{r.targetNick}
-                    </button>
-                  </div>
-                ))
+                  ))}
+                </div>
               )}
             </div>
           </div>

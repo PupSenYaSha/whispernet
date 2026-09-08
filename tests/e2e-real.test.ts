@@ -519,42 +519,48 @@ describe('WhisperNet real E2E', () => {
     a.client.ws.close(); b.client.ws.close();
   }, 25000);
 
-  it('sessions: max 3 devices per account (oldest kicked with 4002)', async () => {
+  it('sessions: 4th new device is rejected (existing sessions are never evicted)', async () => {
     const a = await makeUser(PORT, 'sesA' + Date.now());
     a.client.ws.close();
     await sleep(500);
 
-    const devices: { c: Client; code: number | null }[] = [];
+    const devices: Client[] = [];
     for (let i = 1; i <= 3; i++) {
       const c = new Client(PORT);
       await c.open();
       c.send('auth_login', { nickname: a.nick, password: 'Passw0rd123', deviceId: `tk-dev-${i}` });
       const r = await c.next((m) => m.type === 'auth_success' || m.type === 'auth_failure');
       expect(r.type).toBe('auth_success');
-      devices.push({ c, code: null });
+      devices.push(c);
     }
 
-    // 4th device exceeds the cap -> the oldest session (device 1) must close with 4002
+    // A brand-new 4th device must be rejected; existing sessions must stay alive.
     const fourth = new Client(PORT);
     await fourth.open();
-    const closeInfo: { code: number | null } = { code: null };
-    devices[0].c.ws.on('close', (code: number) => { closeInfo.code = code; });
     fourth.send('auth_login', { nickname: a.nick, password: 'Passw0rd123', deviceId: 'tk-dev-4' });
     const r4 = await fourth.next((m) => m.type === 'auth_success' || m.type === 'auth_failure');
-    expect(r4.type).toBe('auth_success');
+    expect(r4.type).toBe('auth_failure');
+    expect(String(r4.payload.reason)).toContain('Session limit');
+    fourth.ws.close();
 
-    await sleep(1200);
-    expect(closeInfo.code).toBe(4002);
-    expect(devices[1].c.ws.readyState).toBe(WebSocket.OPEN);
-    expect(devices[2].c.ws.readyState).toBe(WebSocket.OPEN);
-    expect(fourth.ws.readyState).toBe(WebSocket.OPEN);
+    await sleep(400);
+    expect(devices[0].ws.readyState).toBe(WebSocket.OPEN);
+    expect(devices[1].ws.readyState).toBe(WebSocket.OPEN);
+    expect(devices[2].ws.readyState).toBe(WebSocket.OPEN);
 
-    // sessions_list now reports exactly 3 sessions
-    fourth.send('get_sessions', {});
-    const list = await fourth.next((m) => m.type === 'sessions_list');
+    // sessions_list still reports exactly 3 sessions
+    devices[1].send('get_sessions', {});
+    const list = await devices[1].next((m) => m.type === 'sessions_list');
     expect(list.payload.sessions.length).toBe(3);
 
-    for (const d of [...devices, { c: fourth, code: null }]) d.c.ws.close();
+    // Reconnecting an already-registered device works even at the limit
+    const again = new Client(PORT);
+    await again.open();
+    again.send('auth_login', { nickname: a.nick, password: 'Passw0rd123', deviceId: 'tk-dev-1' });
+    const rAgain = await again.next((m) => m.type === 'auth_success' || m.type === 'auth_failure');
+    expect(rAgain.type).toBe('auth_success');
+
+    for (const d of [...devices, again]) d.ws.close();
   }, 30000);
 
   it('report_user: stores targetNick + channel + message text for a general-chat message', async () => {
@@ -609,5 +615,46 @@ describe('WhisperNet real E2E', () => {
     expect(banned.client.ws.readyState).toBe(WebSocket.CLOSED);
 
     adminClient.ws.close();
+  }, 30000);
+
+  it('moderation: get_banned lists banned users; banning from a report removes the report', async () => {
+    const reporter = await makeUser(PORT, 'brA' + Date.now());
+    const target = await makeUser(PORT, 'brB' + Date.now());
+    await sleep(1100);
+
+    // Target posts in general chat, reporter file a report against that message
+    target.client.send('chat_message', { text: 'bad behavior example' });
+    const msg = await target.client.next((m) => m.type === 'chat_message' && m.payload.text === 'bad behavior example');
+    reporter.client.send('report_user', { targetId: target.userId, reason: 'harassment', messageId: msg.payload.id });
+    await reporter.client.next((m) => m.type === 'report_received');
+
+    // Confirm the report exists
+    reporter.client.send('admin_reports', { key: 'wn-test-admin-key' });
+    const before = await reporter.client.next((m) => m.type === 'admin_reports');
+    expect((before.payload.reports as any[]).some((r) => r.targetId === target.userId)).toBe(true);
+
+    // Ban by nickname (the "block" button on a report row)
+    reporter.client.send('admin_ban', { key: 'wn-test-admin-key', nickname: target.nick });
+    const act = await reporter.client.next((m) => m.type === 'admin_action' || m.type === 'error');
+    expect(act.type).toBe('admin_action');
+    expect(act.payload.ok).toBe(true);
+
+    // The report must be removed after a successful ban
+    reporter.client.send('admin_reports', { key: 'wn-test-admin-key' });
+    const after = await reporter.client.next((m) => m.type === 'admin_reports');
+    expect((after.payload.reports as any[]).some((r) => r.targetId === target.userId)).toBe(false);
+
+    // And the banned user must appear in the moderation blocked list
+    reporter.client.send('get_banned', { key: 'wn-test-admin-key' });
+    const bl = await reporter.client.next((m) => m.type === 'banned_list');
+    expect(bl.payload.banned.some((b: any) => b.nickname === target.nick)).toBe(true);
+
+    // Unban restores the account (and the user can log in again)
+    reporter.client.send('admin_unban', { key: 'wn-test-admin-key', nickname: target.nick });
+    const ub = await reporter.client.next((m) => m.type === 'admin_action' || m.type === 'error');
+    expect(ub.type).toBe('admin_action');
+    expect(ub.payload.ok).toBe(true);
+
+    reporter.client.ws.close(); target.client.ws.close();
   }, 30000);
 });

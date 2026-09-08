@@ -103,6 +103,15 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
               ? 'bg-bubble-mine text-bubble-mine-text rounded-2xl rounded-br-sm'
               : 'bg-bubble-other text-bubble-other-text border border-border-default rounded-2xl rounded-bl-sm'
           )}>
+            {message.quotedMessageText && (
+              <div className="mb-2 p-2 rounded-xl bg-black/70 border border-white/15 flex items-start gap-2">
+                <span className="text-[14px] text-accent-primary leading-tight flex-shrink-0">↩</span>
+                <div className="min-w-0">
+                  <div className="text-[11px] font-bold text-accent-primary truncate">@{message.quotedMessageSender || '?'}</div>
+                  <div className="text-[13px] text-white truncate">{message.quotedMessageText}</div>
+                </div>
+              </div>
+            )}
             {(() => {
               const mediaMatch = message.text.match(/^\[(image|video)\]([\s\S]*?)\[\/\1\]/);
               if (mediaMatch) {
@@ -153,12 +162,6 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
               }
               return <p className="whitespace-pre-wrap break-words">{message.text}</p>;
             })()}
-            {message.quotedMessageText && (
-              <div className="mt-2 p-2 rounded-xl bg-bg-tertiary/50 border border-border-default text-xs text-fg-muted">
-                <div className="font-medium text-fg-primary">{message.quotedMessageSender}</div>
-                <div className="truncate">{message.quotedMessageText}</div>
-              </div>
-            )}
           </div>
 
           {showReactions && (

@@ -15,6 +15,28 @@ export function cn(...classes: (string | boolean | undefined | null)[]): string 
   return classes.filter(Boolean).join(' ');
 }
 
+// Short, human-readable device label for the Sessions list, e.g. "Chrome · Windows 11".
+export function getDeviceName(ua: string = navigator.userAgent): string {
+  const lower = ua.toLowerCase();
+  let browser = 'Web';
+  if (/edg\//.test(lower)) browser = 'Edge';
+  else if (/opr\/|opera/.test(lower)) browser = 'Opera';
+  else if (/chrome\//.test(lower) && !/chromium/.test(lower)) browser = 'Chrome';
+  else if (/chromium/.test(lower)) browser = 'Chromium';
+  else if (/firefox\//.test(lower)) browser = 'Firefox';
+  else if (/safari\//.test(lower)) browser = 'Safari';
+
+  let os = 'Desktop';
+  if (/iphone|ipad|ipod/.test(lower)) os = 'iPhone/iPad';
+  else if (/windows nt 10/.test(lower)) os = 'Windows 10/11';
+  else if (/windows nt 6\.[1-3]/.test(lower)) os = 'Windows';
+  else if (/android/.test(lower)) os = 'Android';
+  else if (/mac os x|macintosh/.test(lower)) os = 'macOS';
+  else if (/linux/.test(lower)) os = 'Linux';
+
+  return `${browser} · ${os}`;
+}
+
 export function formatTime(timestamp: number): string {
   const date = new Date(timestamp);
   const now = new Date();
@@ -162,7 +184,7 @@ export const translations = {
     screenshot_prot_desc: 'Block screen capture of this app',
     sessions: 'Active Sessions',
     sessions_desc: 'Manage connected devices',
-    sessions_note: 'Up to 3 active sessions. A new session replaces the oldest one.',
+    sessions_note: 'Up to 3 active sessions. Logging in from a new device while at the limit is rejected until you revoke an older session.',
     current_session: 'This device',
     editing_message: 'Editing message',
     admin_section: 'Moderation',
@@ -170,10 +192,16 @@ export const translations = {
     admin_no_reports: 'No reports yet',
     admin_ban: 'Ban',
     admin_unban: 'Unban',
-    admin_ban_hint: 'Ban / unban by @nickname',
+    admin_ban_nick: 'Ban by nickname',
+    admin_ban_hint: '@nickname',
+    admin_ban_nick_hint: 'For reports you receive in person or users you want to block yourself. Banned users are disconnected from all devices and can no longer log in.',
     admin_confirm_ban: 'Ban this user?',
     admin_confirm_unban: 'Unban this user?',
-    admin_blocked: 'banned',
+    admin_blocked: 'Blocked users',
+    admin_blocked_empty: 'No one is banned',
+    admin_banned_note: 'Banned users are disconnected from all devices and lose access until unbanned.',
+    admin_unblock: 'Unblock',
+    admin_channel_general: 'General chat',
     admin_channel_dm: 'DM',
     blocked_users: 'Blocked Users',
     blocked_hint: '@nickname to block',
@@ -323,7 +351,7 @@ export const translations = {
     screenshot_prot_desc: 'Блокировать захват экрана',
     sessions: 'Активные сессии',
     sessions_desc: 'Управление подключёнными устройствами',
-    sessions_note: 'До 3 активных сессий. Новая сессия вытесняет самую старую.',
+    sessions_note: 'До 3 активных сессий. Новый вход при достижении лимита отклоняется, пока вы не отзовёте старую сессию.',
     current_session: 'Это устройство',
     editing_message: 'Редактирование сообщения',
     admin_section: 'Модерация',
@@ -331,10 +359,16 @@ export const translations = {
     admin_no_reports: 'Жалоб пока нет',
     admin_ban: 'Заблокировать',
     admin_unban: 'Разблокировать',
-    admin_ban_hint: 'Бан / разбан по @никнейму',
+    admin_ban_nick: 'Блокировка по нику',
+    admin_ban_hint: '@никнейм',
+    admin_ban_nick_hint: 'Для жалоб, полученных лично, или пользователей, которых вы решили заблокировать сами. Заблокированные отключаются от всех устройств и теряют доступ.',
     admin_confirm_ban: 'Заблокировать этого пользователя?',
     admin_confirm_unban: 'Разблокировать этого пользователя?',
-    admin_blocked: 'в бане',
+    admin_blocked: 'Заблокированные пользователи',
+    admin_blocked_empty: 'Пока никто не заблокирован',
+    admin_banned_note: 'Заблокированные отключаются от всех устройств и теряют доступ до разблокировки.',
+    admin_unblock: 'Разблокировать',
+    admin_channel_general: 'Общий чат',
     admin_channel_dm: 'ЛС',
     blocked_users: 'Заблокированные',
     blocked_hint: '@ник для блокировки',
