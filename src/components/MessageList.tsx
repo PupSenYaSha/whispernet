@@ -1,10 +1,8 @@
-import { useRef, useEffect } from 'react';
+import { useRef, useEffect, memo } from 'react';
 import type { Message } from '../types';
-import { useConnection } from '../context';
 import { MessageItem } from './MessageItem';
 
-export function MessageList({ messages }: { messages: Message[] }) {
-  const { t } = useConnection();
+function MessageListImpl({ messages, fontSizeClass, t }: { messages: Message[]; fontSizeClass: string; t: (key: string) => string }) {
   const endRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
@@ -94,6 +92,7 @@ export function MessageList({ messages }: { messages: Message[] }) {
                   key={msg.id}
                   message={msg}
                   showAvatar={j === 0}
+                  fontSizeClass={fontSizeClass}
                 />
               ))}
             </div>
@@ -104,3 +103,5 @@ export function MessageList({ messages }: { messages: Message[] }) {
     </div>
   );
 }
+
+export const MessageList = memo(MessageListImpl);

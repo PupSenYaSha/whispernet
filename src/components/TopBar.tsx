@@ -3,13 +3,23 @@ import { useConnection } from '../context';
 import { cn } from '../utils';
 
 export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick: () => void; isMobile?: boolean; onBack?: () => void }) {
-  const { state, openGeneral, openDm, t } = useConnection();
+  const { state, openGeneral, openDm, t, blockedUsers, blockUser, unblockUser } = useConnection();
   const [showUsers, setShowUsers] = useState(false);
   const isDm = state.activeChannel !== 'general';
   const dmContact = isDm ? state.contacts.find(c => c.id === state.activeChannel) : null;
   const dmUser = isDm ? state.users.find(u => u.id === state.activeChannel) : null;
   const displayDm = dmContact || dmUser;
   const isOnline = isDm ? !!dmUser : false;
+  const isBlocked = isDm ? blockedUsers.some(b => b.id === state.activeChannel) : false;
+
+  const toggleBlock = () => {
+    if (!isDm) return;
+    if (isBlocked) {
+      unblockUser(state.activeChannel);
+    } else if (confirm(t('block_confirm'))) {
+      blockUser(state.activeChannel);
+    }
+  };
 
   return (
     <header className="sticky top-0 z-30 bg-bg-secondary/80 backdrop-blur-xl border-b border-border-default">
@@ -64,6 +74,33 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
           </div>
 
           <div className="flex items-center gap-1.5">
+            {isDm && (
+              <button
+                onClick={toggleBlock}
+                aria-label={isBlocked ? t('unblock') : t('block')}
+                title={isBlocked ? t('unblock') : t('block')}
+                className={cn(
+                  'p-2 rounded-xl transition-colors',
+                  isBlocked
+                    ? 'bg-status-error/15 text-status-error hover:bg-status-error/25'
+                    : 'text-fg-muted hover:bg-bg-tertiary hover:text-status-error'
+                )}
+              >
+                {isBlocked ? (
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="10" />
+                    <path d="M4.93 4.93l14.14 14.14" />
+                  </svg>
+                ) : (
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <circle cx="12" cy="12" r="10" />
+                    <path d="M4.93 4.93l14.14 14.14" />
+                    <path d="M8 8l8 8" opacity="0.25" />
+                  </svg>
+                )}
+              </button>
+            )}
+
             {!isDm && state.users.length > 0 && (
               <button
                 onClick={() => setShowUsers(!showUsers)}

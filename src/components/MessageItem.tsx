@@ -1,16 +1,12 @@
 import type { Message } from '../types';
-import { useState, useRef, useEffect, useMemo } from 'react';
+import { useState, useRef, useEffect, useMemo, memo } from 'react';
 import { useConnection } from '../context';
 import { cn, formatTime, getAvatarText, getAvatarGradient } from '../utils';
 
-export function MessageItem({ message, showAvatar = true }: { message: Message; showAvatar?: boolean }) {
+function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15px]' }: { message: Message; showAvatar?: boolean; fontSizeClass?: string }) {
   const { state, deleteMessage: deleteMsg, addReaction, removeReaction, editMessage, decryptMedia, t } = useConnection();
   const isSystem = message.senderId === 'system';
   const isOwn = message.isOwn;
-
-  const fontSizeClass = state.settings.fontSize === 'small' ? 'text-[13px]'
-    : state.settings.fontSize === 'large' ? 'text-[17px]'
-    : 'text-[15px]';
 
   const [showReactions, setShowReactions] = useState(false);
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
@@ -247,3 +243,5 @@ export function MessageItem({ message, showAvatar = true }: { message: Message; 
     </div>
   );
 }
+
+export const MessageItem = memo(MessageItemImpl);
