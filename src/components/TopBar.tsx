@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useConnection } from '../context';
 import { cn } from '../utils';
 
@@ -141,7 +142,7 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
         </div>
       )}
 
-      {blockModalOpen && (
+      {blockModalOpen && createPortal(
         <>
           <div className="fixed inset-0 bg-black/50 z-[80]" onClick={() => setBlockModalOpen(false)} />
           <div className="fixed inset-0 z-[81] flex items-center justify-center p-4">
@@ -169,7 +170,8 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
               </div>
             </div>
           </div>
-        </>
+        </>,
+        document.body
       )}
     </header>
   );

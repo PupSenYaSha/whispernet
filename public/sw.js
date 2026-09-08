@@ -1,4 +1,4 @@
-const CACHE_NAME = 'whispernet-v4-titled';
+const CACHE_NAME = 'whispernet-v5';
 
 self.addEventListener('install', () => {
   self.skipWaiting();

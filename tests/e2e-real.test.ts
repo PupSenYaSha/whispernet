@@ -493,4 +493,121 @@ describe('WhisperNet real E2E', () => {
 
     reporter.client.ws.close(); target.client.ws.close();
   }, 25000);
+
+  it('reactions: one reaction per user (re-add replaces the previous emoji)', async () => {
+    const a = await makeUser(PORT, 'rxA' + Date.now());
+    const b = await makeUser(PORT, 'rxB' + Date.now());
+    await sleep(1100);
+
+    a.client.send('chat_message', { text: 'react me' });
+    const echo = await a.client.next((m) => m.type === 'chat_message' && m.payload.text === 'react me');
+    const msgId = echo.payload.id;
+
+    a.client.send('add_reaction', { messageId: msgId, emoji: '❤️' });
+    await a.client.next((m) => m.type === 'reaction_update' && m.payload.action === 'add');
+    a.client.send('add_reaction', { messageId: msgId, emoji: '👍' });
+    const replace = await a.client.next((m) => m.type === 'reaction_update' && m.payload.action === 'add' && m.payload.emoji === '👍');
+
+    const mine = (replace.payload.reactions as any[]).filter((r) => r.userId === a.userId);
+    expect(mine.length).toBe(1);
+    expect(mine[0].emoji).toBe('👍');
+
+    b.client.send('remove_reaction', { messageId: msgId, emoji: '👍' });
+    const rem = await b.client.next((m) => m.type === 'reaction_update' && m.payload.action === 'remove');
+    expect((rem.payload.reactions as any[]).filter((r) => r.userId === b.userId).length).toBe(0);
+
+    a.client.ws.close(); b.client.ws.close();
+  }, 25000);
+
+  it('sessions: max 3 devices per account (oldest kicked with 4002)', async () => {
+    const a = await makeUser(PORT, 'sesA' + Date.now());
+    a.client.ws.close();
+    await sleep(500);
+
+    const devices: { c: Client; code: number | null }[] = [];
+    for (let i = 1; i <= 3; i++) {
+      const c = new Client(PORT);
+      await c.open();
+      c.send('auth_login', { nickname: a.nick, password: 'Passw0rd123', deviceId: `tk-dev-${i}` });
+      const r = await c.next((m) => m.type === 'auth_success' || m.type === 'auth_failure');
+      expect(r.type).toBe('auth_success');
+      devices.push({ c, code: null });
+    }
+
+    // 4th device exceeds the cap -> the oldest session (device 1) must close with 4002
+    const fourth = new Client(PORT);
+    await fourth.open();
+    const closeInfo: { code: number | null } = { code: null };
+    devices[0].c.ws.on('close', (code: number) => { closeInfo.code = code; });
+    fourth.send('auth_login', { nickname: a.nick, password: 'Passw0rd123', deviceId: 'tk-dev-4' });
+    const r4 = await fourth.next((m) => m.type === 'auth_success' || m.type === 'auth_failure');
+    expect(r4.type).toBe('auth_success');
+
+    await sleep(1200);
+    expect(closeInfo.code).toBe(4002);
+    expect(devices[1].c.ws.readyState).toBe(WebSocket.OPEN);
+    expect(devices[2].c.ws.readyState).toBe(WebSocket.OPEN);
+    expect(fourth.ws.readyState).toBe(WebSocket.OPEN);
+
+    // sessions_list now reports exactly 3 sessions
+    fourth.send('get_sessions', {});
+    const list = await fourth.next((m) => m.type === 'sessions_list');
+    expect(list.payload.sessions.length).toBe(3);
+
+    for (const d of [...devices, { c: fourth, code: null }]) d.c.ws.close();
+  }, 30000);
+
+  it('report_user: stores targetNick + channel + message text for a general-chat message', async () => {
+    const reporter = await makeUser(PORT, 'rp2A' + Date.now());
+    const target = await makeUser(PORT, 'rp2B' + Date.now());
+    await sleep(1100);
+
+    reporter.client.send('chat_message', { text: 'reported content here' });
+    const echo = await reporter.client.next((m) => m.type === 'chat_message' && m.payload.text === 'reported content here');
+
+    reporter.client.send('report_user', { targetId: target.userId, reason: 'scam', messageId: echo.payload.id });
+    await reporter.client.next((m) => m.type === 'report_received');
+
+    reporter.client.send('admin_reports', { key: 'wn-test-admin-key' });
+    const res = await reporter.client.next((m) => m.type === 'admin_reports');
+    const found = (res.payload.reports as any[]).find((r) => r.targetId === target.userId && r.reason === 'scam');
+    expect(found).toBeTruthy();
+    expect(found.targetNick).toBe(target.nick);
+    expect(found.channel).toBe('general');
+    expect(found.messageText).toBe('reported content here');
+
+    reporter.client.ws.close(); target.client.ws.close();
+  }, 25000);
+
+  it('auth_success: role reflects nickname in data/admins.json (seeded with "admin")', async () => {
+    const adminClient = new Client(PORT);
+    await adminClient.open();
+    const keys = await generateKeyPair();
+    adminClient.send('auth_register', {
+      nickname: 'admin',
+      password: 'Passw0rd123',
+      publicKey: keys.publicKey,
+      preKeyBundle: {
+        bundleVersion: 1,
+        identityKey: 'ik-admin',
+        ed25519PublicKey: 'ek-admin',
+        signedPreKey: { publicKey: 'spk-admin', signature: [1, 2, 3] },
+        oneTimePreKey: null,
+      },
+    });
+    const adminResp = await adminClient.next((m) => m.type === 'auth_success' || m.type === 'auth_failure');
+    expect(adminResp.type).toBe('auth_success');
+    expect(adminResp.payload.role).toBe('admin');
+
+    // a nickname-based admin (the seeded 'admin' account) can ban WITHOUT the ADMIN_KEY
+    const banned = await makeUser(PORT, 'byNick' + Date.now());
+    adminClient.send('admin_ban', { nickname: banned.nick });
+    const act = await adminClient.next((m) => m.type === 'admin_action' || m.type === 'error');
+    expect(act.type).toBe('admin_action');
+    expect(act.payload.ok).toBe(true);
+    await sleep(400);
+    expect(banned.client.ws.readyState).toBe(WebSocket.CLOSED);
+
+    adminClient.ws.close();
+  }, 30000);
 });

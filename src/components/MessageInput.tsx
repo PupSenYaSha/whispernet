@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { useConnection } from '../context';
 
 export function MessageInput() {
-  const { state, sendMessage, sendDm, sendImage, sendDmImage, blockedUsers, unblockUser, setReply, t } = useConnection();
+  const { state, sendMessage, sendDm, sendImage, sendDmImage, blockedUsers, unblockUser, setReply, editingTarget, setEditing, editMessage, t } = useConnection();
   const [hasText, setHasText] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [sealedMode, setSealedMode] = useState(false);
@@ -14,6 +14,7 @@ export function MessageInput() {
   const isBlockedChat = isDm && !!dmTarget && blockedUsers.some(b => b.id === dmTarget);
   const blockedNick = isBlockedChat ? (state.dmNames[dmTarget] || '') : '';
   const replyTo = state.replyTo;
+  const isEditing = !!editingTarget;
 
   const autoResize = () => {
     const ta = textareaRef.current;
@@ -25,25 +26,42 @@ export function MessageInput() {
 
   useEffect(() => { autoResize(); }, [hasText]);
 
-  useEffect(() => { if (replyTo) textareaRef.current?.focus(); }, [replyTo]);
+  useEffect(() => { if (replyTo && !editingTarget) textareaRef.current?.focus(); }, [replyTo, editingTarget]);
+
+  useEffect(() => {
+    if (editingTarget && textareaRef.current) {
+      textareaRef.current.value = editingTarget.text;
+      setHasText(editingTarget.text.trim().length > 0);
+      textareaRef.current.focus();
+      autoResize();
+    }
+  }, [editingTarget]);
+
+  const clearComposer = () => {
+    setReply(null);
+    setEditing(null);
+    const ta = textareaRef.current;
+    if (ta) { ta.value = ''; ta.style.height = 'auto'; }
+    setHasText(false);
+    setSealedMode(false);
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const ta = textareaRef.current;
     const val = ta?.value?.trim();
     if (!val || !isConnected) return;
+    if (isEditing && editingTarget) {
+      if (val !== editingTarget.text) editMessage(editingTarget.id, val);
+      clearComposer();
+      return;
+    }
     if (isDm && dmTarget) {
       sendDm(dmTarget, val, sealedMode, replyTo || undefined);
     } else {
       sendMessage(val, replyTo || undefined);
     }
-    setReply(null);
-    if (ta) {
-      ta.value = '';
-      ta.style.height = 'auto';
-    }
-    setHasText(false);
-    setSealedMode(false);
+    clearComposer();
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -92,7 +110,22 @@ export function MessageInput() {
     <form onSubmit={handleSubmit} className="px-3 py-2.5">
       <input ref={fileRef} type="file" hidden accept="image/*,video/*"
         onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ''; }} />
-      {replyTo && (
+      {editingTarget && (
+        <div className="flex items-center gap-2 mb-2 px-3 py-2 rounded-xl bg-accent-primary/10 border border-accent-primary/30">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0">
+            <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
+          </svg>
+          <div className="min-w-0 flex-1">
+            <div className="text-[12px] font-semibold text-accent-primary">{t('editing_message')}</div>
+            <div className="text-[12px] text-fg-muted truncate">{editingTarget.text}</div>
+          </div>
+          <button type="button" onClick={() => setEditing(null)} aria-label={t('cancel')}
+            className="flex-shrink-0 p-1 rounded-full text-fg-muted hover:text-fg-primary hover:bg-bg-hover transition-colors">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+          </button>
+        </div>
+      )}
+      {replyTo && !editingTarget && (
         <div className="flex items-center gap-2 mb-2 px-3 py-2 rounded-xl bg-bg-tertiary border border-border-default">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0">
             <path d="M12 19l-7-7 7-7" /><path d="M19 12H5" />

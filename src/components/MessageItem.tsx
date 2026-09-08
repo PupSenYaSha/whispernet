@@ -1,10 +1,11 @@
 import type { Message } from '../types';
 import { useState, useRef, useEffect, useMemo, memo } from 'react';
+import { createPortal } from 'react-dom';
 import { useConnection } from '../context';
 import { cn, formatTime, getAvatarText, getAvatarGradient } from '../utils';
 
 function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15px]' }: { message: Message; showAvatar?: boolean; fontSizeClass?: string }) {
-  const { state, deleteMessage: deleteMsg, addReaction, removeReaction, editMessage, decryptMedia, setReply, reportUser, t } = useConnection();
+  const { state, deleteMessage: deleteMsg, addReaction, removeReaction, setEditing, decryptMedia, setReply, reportUser, t } = useConnection();
   const isSystem = message.senderId === 'system';
   const isOwn = message.isOwn;
 
@@ -54,11 +55,13 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
     );
   }
 
-  const reactionEntries = Object.entries(message.reactions || {}).map(([emoji, users]) => ({
+  const reactionEntries = Object.entries(message.reactions || {})
+    .map(([emoji, users]) => ({
     emoji,
     count: users.length,
     hasOwn: users.includes(state.userId || '')
-  }));
+    }))
+    .filter(e => e.count > 0);
 
   const expiresIn = useMemo(() => {
     if (!message.expiresAt) return null;
@@ -207,12 +210,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
             </button>
             {isOwn && !isMedia && (
               <button
-                onClick={() => {
-                  const newText = prompt(t('edit_message_prompt'), message.text);
-                  if (newText && newText.trim() && newText !== message.text) {
-                    editMessage(message.id, newText.trim());
-                  }
-                }}
+                onClick={() => setEditing(message)}
                 className="p-1.5 rounded-full text-fg-subtle hover:text-fg-primary hover:bg-bg-tertiary transition-colors"
                 title={t('edit_message')} aria-label={t('edit_message')}>
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -270,7 +268,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
         </div>
       </div>
     </div>
-    {reportOpen && (
+    {reportOpen && createPortal(
         <>
           <div className="fixed inset-0 bg-black/50 z-[90]" onClick={() => setReportOpen(false)} />
           <div className="fixed inset-0 z-[91] flex items-center justify-center p-4">
@@ -299,7 +297,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
                   <h3 className="text-center text-[17px] font-semibold text-fg-primary mb-1.5">{t('report_title')}</h3>
                   <p className="text-center text-[13px] text-fg-muted mb-5 leading-relaxed">{t('report_desc')}</p>
                   <div className="flex flex-col gap-2 mb-4">
-                    {['report_reason_spam', 'report_reason_harassment', 'report_reason_inappropriate', 'report_reason_other'].map(key => (
+                    {['report_reason_scam', 'report_reason_harassment', 'report_reason_inappropriate', 'report_reason_other'].map(key => (
                       <button key={key}
                         onClick={() => setReportReason(key)}
                         className={`px-4 py-2.5 rounded-xl text-left text-[14px] border transition-colors ${
@@ -327,7 +325,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
                       onClick={() => {
                         const reason = reportReason === 'report_reason_other'
                           ? (reportCustom.trim() || t('report_reason_other'))
-                          : t(reportReason || 'report_reason_spam');
+                          : t(reportReason || 'report_reason_scam');
                         reportUser(message.senderId, reason, message.id);
                         setReportDone(true);
                       }}
@@ -340,7 +338,8 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
               )}
             </div>
           </div>
-        </>
+        </>,
+        document.body
       )}
     </>
   );

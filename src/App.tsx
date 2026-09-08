@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useReducer, ReactNode } from 'react';
-import type { User, AppSettings } from './types';
+import type { User, AppSettings, Message } from './types';
 import { generateKeyPair, encryptMessage, decryptMessage } from './crypto';
 import { encryptPrivateKey, decryptPrivateKey, isEncryptedBundle, isKeyBackup } from './crypto-keys';
 import { encryptPassword, decryptPassword } from './device-crypto';
 import { uploadFile } from './upload';
 import { encryptFile, buildFileKeyMap, unwrapAndDecrypt, wrapForMedia } from './media-crypto';
-import { ConnectionContext, useConnection, type ConnectionState, type ConnectionAction, type ReplyTarget } from './context';
+import { ConnectionContext, useConnection, type ConnectionState, type ConnectionAction, type ReplyTarget, type AdminReport } from './context';
 import { loadSettings, defaultSettings, translations, cn, getAvatarText, getAvatarGradient, formatTime } from './utils';
 
 declare const __APP_VERSION__: string;
@@ -79,6 +79,23 @@ const initialState: ConnectionState = {
   messageSearchResults: [],
   replyTo: null,
 };
+
+function applyAddReaction(msg: Message, emoji: string, userId: string): Message {
+  const reactions = { ...(msg.reactions || {}) };
+  for (const e of Object.keys(reactions)) {
+    reactions[e] = (reactions[e] as string[]).filter(u => u !== userId);
+  }
+  reactions[emoji] = [...(reactions[emoji] || []), userId];
+  return { ...msg, reactions };
+}
+
+function applyRemoveReaction(msg: Message, emoji: string, userId: string): Message {
+  const reactions = { ...(msg.reactions || {}) };
+  const next = (reactions[emoji] || []).filter(u => u !== userId);
+  if (next.length === 0) delete reactions[emoji];
+  else reactions[emoji] = next;
+  return { ...msg, reactions };
+}
 
 function connectionReducer(state: ConnectionState, action: ConnectionAction): ConnectionState {
   switch (action.type) {
@@ -153,17 +170,17 @@ function connectionReducer(state: ConnectionState, action: ConnectionAction): Co
     case 'ADD_REACTION':
       return {
         ...state,
-        messages: state.messages.map(m => m.id === action.messageId ? { ...m, reactions: { ...m.reactions, [action.emoji]: [...(m.reactions?.[action.emoji] || []), action.userId] } } : m),
+        messages: state.messages.map(m => m.id === action.messageId ? applyAddReaction(m, action.emoji, action.userId) : m),
         dmMessages: Object.fromEntries(
-          Object.entries(state.dmMessages).map(([ch, msgs]) => [ch, msgs.map(m => m.id === action.messageId ? { ...m, reactions: { ...m.reactions, [action.emoji]: [...(m.reactions?.[action.emoji] || []), action.userId] } } : m)])
+          Object.entries(state.dmMessages).map(([ch, msgs]) => [ch, msgs.map(m => m.id === action.messageId ? applyAddReaction(m, action.emoji, action.userId) : m)])
         ),
       };
     case 'REMOVE_REACTION':
       return {
         ...state,
-        messages: state.messages.map(m => m.id === action.messageId ? { ...m, reactions: { ...m.reactions, [action.emoji]: (m.reactions?.[action.emoji] || []).filter(u => u !== action.userId) } } : m),
+        messages: state.messages.map(m => m.id === action.messageId ? applyRemoveReaction(m, action.emoji, action.userId) : m),
         dmMessages: Object.fromEntries(
-          Object.entries(state.dmMessages).map(([ch, msgs]) => [ch, msgs.map(m => m.id === action.messageId ? { ...m, reactions: { ...m.reactions, [action.emoji]: (m.reactions?.[action.emoji] || []).filter(u => u !== action.userId) } } : m)])
+          Object.entries(state.dmMessages).map(([ch, msgs]) => [ch, msgs.map(m => m.id === action.messageId ? applyRemoveReaction(m, action.emoji, action.userId) : m)])
         ),
       };
     default:
@@ -188,6 +205,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const nicknameRef = useRef<string | null>(null);
   const unreadCountRef = useRef(0);
   const titleRef = useRef(document.title);
+  const activePeerRef = useRef<string | null>(null);
   const notifSoundRef = useRef<HTMLAudioElement | null>(null);
   const signalInitializedRef = useRef(false);
   const preKeyBundlesRef = useRef<Record<string, any>>({});
@@ -195,6 +213,9 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const [sessions, setSessions] = useState<{ id: string; lastActive: number; current: boolean }[]>([]);
   const [blockedUsers, setBlockedUsers] = useState<{ id: string; nickname: string }[]>([]);
   const [importModal, setImportModal] = useState<{ data: any; mode: 'setup' | 'settings' } | null>(null);
+  const [editingTarget, setEditingTarget] = useState<Message | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [reports, setReports] = useState<AdminReport[]>([]);
 
   // Fetches the server-stored encrypted key-backup (used to sync the account key
   // across devices). The backup blob is opaque to the server; it is decrypted
@@ -221,6 +242,8 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   useEffect(() => { userIdRef.current = state.userId; }, [state.userId]);
   useEffect(() => { nicknameRef.current = state.nickname; }, [state.nickname]);
 
+  useEffect(() => { setEditingTarget(null); }, [state.activeChannel]);
+
   useEffect(() => {
     const root = document.documentElement;
     if (state.settings.theme === 'light') {
@@ -241,7 +264,8 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
 
   const updateTitle = useCallback(() => {
     const count = unreadCountRef.current;
-    const base = state.nickname ? `WhisperNet @${state.nickname}` : 'WhisperNet';
+    const peer = activePeerRef.current;
+    const base = peer ? `WhisperNet @${peer}` : (state.nickname ? `WhisperNet @${state.nickname}` : 'WhisperNet');
     const newTitle = count > 0 ? `${base} (${count})` : base;
     document.title = newTitle;
     titleRef.current = newTitle;
@@ -280,6 +304,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const openGeneral = useCallback(() => {
     dispatch({ type: 'SET_ACTIVE_CHANNEL', channel: 'general' });
     unreadCountRef.current = 0;
+    activePeerRef.current = null;
     updateTitle();
   }, [updateTitle]);
 
@@ -287,6 +312,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     if (nickname) dispatch({ type: 'SET_DM_NAME', userId, nickname });
     dispatch({ type: 'SET_ACTIVE_CHANNEL', channel: userId });
     unreadCountRef.current = 0;
+    activePeerRef.current = nickname || state.dmNames[userId] || null;
     updateTitle();
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'dm_history', payload: { with: userId } }));
@@ -303,7 +329,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         } catch (e) { console.error('Failed to create Signal session:', e); }
       }
     }
-  }, []);
+  }, [updateTitle, state.dmNames]);
 
   const refreshContacts = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'dm_contacts', payload: {} }));
@@ -331,6 +357,18 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
 
   const reportUser = useCallback((targetId: string, reason: string, messageId?: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'report_user', payload: { targetId, reason, ...(messageId ? { messageId } : {}) } }));
+  }, []);
+
+  const adminReports = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'admin_reports', payload: {} }));
+  }, []);
+
+  const adminBan = useCallback((nickname: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'admin_ban', payload: { nickname } }));
+  }, []);
+
+  const adminUnban = useCallback((nickname: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'admin_unban', payload: { nickname } }));
   }, []);
 
   const searchUsers = useCallback((query: string) => {
@@ -428,6 +466,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
           switch (message.type) {
             case 'auth_success':
               if (message.payload.deviceId) localStorage.setItem('wn_device_id', message.payload.deviceId);
+              setIsAdmin(message.payload.role === 'admin');
               dispatch({ type: 'SET_USER', userId: message.payload.userId, nickname: message.payload.nickname });
               dispatch({ type: 'SET_STATUS', status: 'connected' });
               dispatch({ type: 'SET_RECONNECT_ATTEMPTS', attempts: 0 });
@@ -491,7 +530,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               ws.close();
               break;
             case 'chat_history':
-              dispatch({ type: 'SET_MESSAGES', messages: message.payload.messages.map((m: any) => ({ id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text: m.text || '', timestamp: m.timestamp, isOwn: m.isOwn, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined })) });
+              dispatch({ type: 'SET_MESSAGES', messages: message.payload.messages.map((m: any) => ({ id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text: m.text || '', timestamp: m.timestamp, isOwn: m.isOwn, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined })) });
               break;
             case 'dm_history': {
               if (message.payload.publicKeys) {
@@ -515,7 +554,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
                 } else if (m.encrypted && privateKeyRef.current && userIdRef.current) {
                   try { text = await decryptMessage(m.encrypted, userIdRef.current, privateKeyRef.current); } catch { if (!text) text = '[encrypted]'; }
                 }
-                return { id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text, timestamp: m.timestamp, isOwn: m.senderId === userIdRef.current, channel: otherId, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined };
+                return { id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text, timestamp: m.timestamp, isOwn: m.senderId === userIdRef.current, channel: otherId, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined };
               }));
               dispatch({ type: 'SET_DM_MESSAGES', channel: otherId, messages: msgs });
               break;
@@ -540,7 +579,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               const ch = message.payload.channel;
               const parts = ch.split(':');
               const otherId = parts[0] === userIdRef.current ? parts[1] : parts[0];
-              dispatch({ type: 'ADD_DM_MESSAGE', channel: otherId, message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: msgText, timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, channel: otherId, fileKey: message.payload.fileKey, expiresAt: message.payload.expiresAt || undefined } });
+              dispatch({ type: 'ADD_DM_MESSAGE', channel: otherId, message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: msgText, timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, channel: otherId, fileKey: message.payload.fileKey, expiresAt: message.payload.expiresAt || undefined, quotedMessageId: message.payload.quotedMessageId ?? undefined, quotedMessageText: message.payload.quotedMessageText ?? undefined, quotedMessageSender: message.payload.quotedMessageSender ?? undefined } });
               dispatch({ type: 'SET_DM_NAME', userId: otherId, nickname: message.payload.senderNickname });
               dispatch({ type: 'SET_CONTACTS', contacts: [] });
               ws.send(JSON.stringify({ type: 'dm_contacts', payload: {} }));
@@ -548,7 +587,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               break;
             }
             case 'chat_message':
-              dispatch({ type: 'ADD_MESSAGE', message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: message.payload.text || '', timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, fileKey: message.payload.fileKey, expiresAt: message.payload.expiresAt || undefined } });
+              dispatch({ type: 'ADD_MESSAGE', message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: message.payload.text || '', timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, fileKey: message.payload.fileKey, expiresAt: message.payload.expiresAt || undefined, quotedMessageId: message.payload.quotedMessageId ?? undefined, quotedMessageText: message.payload.quotedMessageText ?? undefined, quotedMessageSender: message.payload.quotedMessageSender ?? undefined } });
               if (!message.payload.isOwn) { unreadCountRef.current++; updateTitle(); fireNotification(`@${message.payload.senderNickname}`, message.payload.text || ''); playNotifSound(); }
               break;
             case 'chat_cleared':
@@ -589,6 +628,9 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               break;
             case 'session_revoked':
               if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'get_sessions', payload: {} }));
+              break;
+            case 'admin_reports':
+              setReports(message.payload?.reports || []);
               break;
             case 'blocked_list':
               setBlockedUsers((message.payload.users || []));
@@ -871,6 +913,8 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         addReaction, removeReaction, editMessage,
         setReply:
           (reply) => dispatch({ type: 'SET_REPLY', reply }),
+        editingTarget, setEditing: setEditingTarget,
+        isAdmin, reports, adminReports, adminBan, adminUnban,
         t, updateSettings, getMyPublicKey, getPublicKey, decryptMedia,
         sessions, requestSessions, revokeSession,
         blockedUsers, refreshBlocked, blockUser, unblockUser, reportUser,

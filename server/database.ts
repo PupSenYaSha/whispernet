@@ -13,6 +13,7 @@ let MESSAGES_FILE = path.join(DATA_DIR, 'messages.json');
 let PREKEYS_FILE = path.join(DATA_DIR, 'prekeys.json');
 let KEYBACKUP_FILE = path.join(DATA_DIR, 'keybackups.json');
 let REPORTS_FILE = path.join(DATA_DIR, 'reports.json');
+let ADMINS_FILE = path.join(DATA_DIR, 'admins.json');
 let MEDIA_DIR = path.join(DATA_DIR, 'media');
 
 let usersMutex = { v: false };
@@ -20,6 +21,7 @@ let messagesMutex = { v: false };
 let preKeysMutex = { v: false };
 let keyBackupMutex = { v: false };
 let reportsMutex = { v: false };
+let adminsMutex = { v: false };
 
 try {
   mkdirSync(DATA_DIR, { recursive: true });
@@ -66,6 +68,7 @@ export function setDataDir(dir: string): void {
   PREKEYS_FILE = path.join(DATA_DIR, 'prekeys.json');
   KEYBACKUP_FILE = path.join(DATA_DIR, 'keybackups.json');
   REPORTS_FILE = path.join(DATA_DIR, 'reports.json');
+  ADMINS_FILE = path.join(DATA_DIR, 'admins.json');
   MEDIA_DIR = path.join(DATA_DIR, 'media');
   mkdirSync(DATA_DIR, { recursive: true });
   mkdirSync(MEDIA_DIR, { recursive: true });
@@ -537,7 +540,10 @@ export function initializeDatabase(): void {
 
 export async function addReaction(messageId: string, userId: string, emoji: string): Promise<void> {
   return withMutex(messagesMutex, async () => {
-    const reactions = await loadReactions();
+    let reactions = await loadReactions();
+    // One reaction per user per message: re-adding replaces the previous emoji.
+    reactions = reactions.filter(r => !(r.messageId === messageId && r.userId === userId));
+    if (reactions.filter(r => r.messageId === messageId).length >= 50) return;
     reactions.push({ messageId, userId, emoji, timestamp: Date.now() });
     await saveReactions(reactions);
   });
@@ -596,8 +602,10 @@ interface StoredReport {
   reporterId: string;
   reporterNick?: string;
   targetId: string;
+  targetNick?: string;
   channel: string;
   messageId?: string;
+  messageText?: string;
   reason: string;
   timestamp: number;
 }
@@ -628,6 +636,62 @@ export async function addReport(report: StoredReport): Promise<void> {
 
 export async function getReports(): Promise<StoredReport[]> {
   return loadReports();
+}
+
+// --- Admins by nickname (server-side moderation identity) ---
+// Nicknames are stored lowercased in data/admins.json. The file is created with
+// a default entry when the server first starts, so the owner can hand roles to
+// specific accounts without sharing the ADMIN_KEY. Case-insensitive membership.
+
+const DEFAULT_ADMINS = ['admin'];
+
+async function loadAdmins(): Promise<string[]> {
+  if (!existsSync(ADMINS_FILE)) {
+    try {
+      mkdirSync(DATA_DIR, { recursive: true });
+      await atomicWrite(ADMINS_FILE, JSON.stringify(DEFAULT_ADMINS, null, 2));
+    } catch {}
+    return [...DEFAULT_ADMINS];
+  }
+  try {
+    const data = await readFile(ADMINS_FILE, 'utf-8');
+    const parsed = JSON.parse(data);
+    return Array.isArray(parsed) ? parsed.filter((x: unknown) => typeof x === 'string').map((x: string) => x.toLowerCase()) : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function getAdminNicknames(): Promise<string[]> {
+  return withMutex(adminsMutex, async () => (await loadAdmins()).map(n => n.toLowerCase()));
+}
+
+export async function isAdminNickname(nickname: string): Promise<boolean> {
+  if (!nickname) return false;
+  const admins = await getAdminNicknames();
+  return admins.includes(nickname.toLowerCase());
+}
+
+export async function addAdminNickname(nickname: string): Promise<void> {
+  return withMutex(adminsMutex, async () => {
+    const admins = await loadAdmins();
+    const n = nickname.toLowerCase();
+    if (!admins.includes(n)) {
+      admins.push(n);
+      await atomicWrite(ADMINS_FILE, JSON.stringify(admins, null, 2));
+    }
+  });
+}
+
+export async function removeAdminNickname(nickname: string): Promise<boolean> {
+  return withMutex(adminsMutex, async () => {
+    const admins = await loadAdmins();
+    const idx = admins.indexOf(nickname.toLowerCase());
+    if (idx === -1) return false;
+    admins.splice(idx, 1);
+    await atomicWrite(ADMINS_FILE, JSON.stringify(admins, null, 2));
+    return true;
+  });
 }
 
 export async function getReactionsForMessage(messageId: string): Promise<StoredReaction[]> {

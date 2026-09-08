@@ -5,6 +5,18 @@ export type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChann
 
 export type ReplyTarget = { id: string; senderNickname: string; text: string } | null;
 
+export type AdminReport = {
+  id: string;
+  reporterNick?: string;
+  targetId: string;
+  targetNick?: string;
+  channel: string;
+  messageId?: string;
+  messageText?: string;
+  reason: string;
+  timestamp: number;
+};
+
 export interface ConnectionState {
   status: ConnectionStatus;
   messages: Message[];
@@ -76,6 +88,13 @@ export interface ConnectionContextType {
   removeReaction: (messageId: string, emoji: string) => void;
   editMessage: (messageId: string, text: string) => void;
   setReply: (reply: ReplyTarget) => void;
+  editingTarget: Message | null;
+  setEditing: (msg: Message | null) => void;
+  isAdmin: boolean;
+  reports: AdminReport[];
+  adminReports: () => void;
+  adminBan: (nickname: string) => void;
+  adminUnban: (nickname: string) => void;
   t: (key: string) => string;
   updateSettings: (settings: Partial<AppSettings>) => void;
   getMyPublicKey: () => JsonWebKey | null;

@@ -16,7 +16,7 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
       onClick={() => onChange(!checked)}
       className={cn(
         'relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200',
-        checked ? 'bg-accent-primary' : 'bg-bg-tertiary border-border-default'
+        checked ? 'bg-accent-primary shadow-[0_0_10px_var(--color-accent-bg)]' : 'bg-bg-tertiary border-border-default'
       )}
     >
       <span className={cn(
@@ -27,11 +27,33 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: (v: boolean
   );
 }
 
+function Segmented<T extends string>({ value, onChange, options }: {
+  value: T;
+  onChange: (v: T) => void;
+  options: { value: T; label: string }[];
+}) {
+  return (
+    <div className="flex gap-1 p-1 rounded-xl bg-bg-tertiary/70 border border-border-default w-full min-w-0">
+      {options.map(o => (
+        <button key={o.value} onClick={() => onChange(o.value)}
+          className={cn(
+            'flex-1 min-w-0 px-1.5 py-1.5 rounded-lg text-[12px] font-semibold transition-all whitespace-nowrap',
+            value === o.value
+              ? 'bg-accent-primary text-accent-text shadow-sm'
+              : 'text-fg-muted hover:text-fg-primary'
+          )}>
+          {o.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function Option({ label, icon, children }: { label: string; icon?: React.ReactNode; children: React.ReactNode }) {
   return (
-    <div className="flex items-center justify-between py-3.5 px-4">
-      <div className="flex items-center gap-3">
-        {icon && <div className="w-9 h-9 rounded-xl bg-bg-tertiary flex items-center justify-center text-fg-muted flex-shrink-0">{icon}</div>}
+    <div className="flex items-center justify-between gap-3 py-3.5 px-4 hover:bg-bg-tertiary/40 transition-colors">
+      <div className="flex items-center gap-3 min-w-0">
+        {icon && <div className="w-9 h-9 rounded-2xl bg-gradient-to-br from-bg-tertiary to-bg-tertiary/60 border border-border-default flex items-center justify-center text-fg-muted flex-shrink-0">{icon}</div>}
         <span className="text-[15px] text-fg-primary">{label}</span>
       </div>
       {children}
@@ -42,8 +64,11 @@ function Option({ label, icon, children }: { label: string; icon?: React.ReactNo
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="space-y-0">
-      <h3 className="text-[11px] font-semibold text-fg-muted uppercase tracking-wider px-1 mb-2">{title}</h3>
-      <div className="rounded-2xl border border-border-default divide-y divide-border-default overflow-hidden">
+      <div className="flex items-center gap-2 px-1 mb-2">
+        <span className="w-1 h-3.5 rounded-full bg-accent-primary/70" />
+        <h3 className="text-[11px] font-bold text-fg-muted uppercase tracking-wider">{title}</h3>
+      </div>
+      <div className="rounded-2xl border border-border-default divide-y divide-border-default overflow-hidden bg-bg-primary/40 shadow-sm">
         {children}
       </div>
     </section>
@@ -93,15 +118,19 @@ function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, onCon
 }
 
 export function SettingsPanel({ onClose, closing, inline }: { onClose: () => void; closing?: boolean; inline?: boolean }) {
-  const { state, updateSettings, logout, sessions, requestSessions, t } = useConnection();
-  const [confirmAction, setConfirmAction] = useState<'logout' | 'clearData' | null>(null);
+  const { state, updateSettings, logout, sessions, requestSessions, isAdmin, reports, adminReports, adminBan, adminUnban, t } = useConnection();
+  const [confirmAction, setConfirmAction] = useState<'logout' | 'clearData' | 'adminBan' | 'adminUnban' | null>(null);
+  const [banNick, setBanNick] = useState('');
+  const [pendingBan, setPendingBan] = useState<string | null>(null);
 
   useEffect(() => {
+    requestSessions();
+    if (isAdmin) adminReports();
     if (!inline) {
       document.body.style.overflow = 'hidden';
       return () => { document.body.style.overflow = ''; };
     }
-  }, [inline]);
+  }, [inline, requestSessions, isAdmin, adminReports]);
 
   const accentColors: AccentColor[] = ['purple', 'blue', 'green', 'red', 'orange', 'pink', 'teal', 'indigo'];
   const accentColorPreview: Record<AccentColor, string> = {
@@ -196,18 +225,12 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
     <div className="flex-1 overflow-y-auto p-4 space-y-6">
       <Section title={t('sec_appearance')}>
         <Option label={t('theme')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" /></svg>}>
-          <div className="flex gap-1.5">
-            {(['dark', 'light'] as const).map((theme) => (
-              <button key={theme} onClick={() => updateSettings({ theme })}
-                className={cn(
-                  'flex-1 px-2 py-1.5 rounded-xl text-[13px] font-medium transition-all whitespace-nowrap',
-                  state.settings.theme === theme
-                    ? 'bg-accent-primary text-accent-text'
-                    : 'bg-bg-tertiary text-fg-muted hover:text-fg-primary'
-                )}>
-                {theme === 'dark' ? t('theme_dark') : t('theme_light')}
-              </button>
-            ))}
+          <div className="w-[120px] flex-shrink-0">
+            <Segmented
+              value={state.settings.theme}
+              onChange={(theme) => updateSettings({ theme })}
+              options={[{ value: 'dark', label: t('theme_dark') }, { value: 'light', label: t('theme_light') }]}
+            />
           </div>
         </Option>
         <Option label={t('accent_color')} icon={<div className="w-4 h-4 rounded-full" style={{ backgroundColor: accentColorPreview[state.settings.accentColor || 'purple'] }} />}>
@@ -227,36 +250,24 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
           </div>
         </Option>
         <Option label={t('language')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><line x1="2" y1="12" x2="22" y2="12" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" /></svg>}>
-          <div className="flex gap-1.5">
-            {(['en', 'ru'] as const).map((lang) => (
-              <button key={lang} onClick={() => updateSettings({ language: lang })}
-                className={cn(
-                  'flex-1 min-w-0 px-1.5 py-1.5 rounded-xl text-[11px] font-medium transition-all',
-                  state.settings.language === lang
-                    ? 'bg-accent-primary text-accent-text'
-                    : 'bg-bg-tertiary text-fg-muted hover:text-fg-primary'
-                )}>
-                {lang === 'en' ? 'English' : 'Russian'}
-              </button>
-            ))}
+          <div className="w-[120px] flex-shrink-0">
+            <Segmented
+              value={state.settings.language}
+              onChange={(lang) => updateSettings({ language: lang })}
+              options={[{ value: 'en', label: 'English' }, { value: 'ru', label: 'Russian' }]}
+            />
           </div>
         </Option>
       </Section>
 
       <Section title={t('sec_text')}>
         <Option label={t('font_size')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="4 7 4 4 20 4 20 7" /><line x1="9" y1="20" x2="15" y2="20" /><line x1="12" y1="4" x2="12" y2="20" /></svg>}>
-          <div className="flex gap-1.5">
-            {(['small', 'normal', 'large'] as const).map((size) => (
-              <button key={size} onClick={() => updateSettings({ fontSize: size })}
-                className={cn(
-                  'flex-1 min-w-0 px-1.5 py-1.5 rounded-xl text-[11px] font-medium transition-all',
-                  state.settings.fontSize === size
-                    ? 'bg-accent-primary text-accent-text'
-                    : 'bg-bg-tertiary text-fg-muted hover:text-fg-primary'
-                )}>
-                  {t(`font_${size}`)}
-                </button>
-            ))}
+          <div className="w-[120px] flex-shrink-0">
+            <Segmented
+              value={state.settings.fontSize}
+              onChange={(size) => updateSettings({ fontSize: size })}
+              options={[{ value: 'small', label: t('font_small') }, { value: 'normal', label: t('font_normal') }, { value: 'large', label: t('font_large') }]}
+            />
           </div>
         </Option>
         <Option label={t('compact_mode')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="21" y1="10" x2="3" y2="10" /><line x1="21" y1="6" x2="3" y2="6" /><line x1="21" y1="14" x2="3" y2="14" /><line x1="21" y1="18" x2="3" y2="18" /></svg>}>
@@ -275,18 +286,17 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
 
       <Section title={t('sec_privacy')}>
         <Option label={t('disappearing_messages')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>}>
-          <div className="flex gap-1.5">
-            {(['off', '24h', '7d', '30d'] as const).map((ttl) => (
-              <button key={ttl} onClick={() => updateSettings({ disappearingTTL: ttl })}
-                className={cn(
-                  'flex-1 min-w-0 px-1.5 py-1.5 rounded-xl text-[11px] font-medium transition-all',
-                  state.settings.disappearingTTL === ttl
-                    ? 'bg-accent-primary text-accent-text'
-                    : 'bg-bg-tertiary text-fg-muted hover:text-fg-primary'
-                )}>
-                {ttl === 'off' ? t('disappearing_off') : ttl === '24h' ? t('disappearing_24h') : ttl === '7d' ? t('disappearing_7d') : t('disappearing_30d')}
-              </button>
-            ))}
+          <div className="w-[130px] flex-shrink-0">
+            <Segmented
+              value={state.settings.disappearingTTL}
+              onChange={(ttl) => updateSettings({ disappearingTTL: ttl })}
+              options={[
+                { value: 'off', label: t('disappearing_off') },
+                { value: '24h', label: t('disappearing_24h') },
+                { value: '7d', label: t('disappearing_7d') },
+                { value: '30d', label: t('disappearing_30d') },
+              ]}
+            />
           </div>
         </Option>
         <Option label={t('screenshot_prot')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="3" x2="21" y2="21" /></svg>}>
@@ -304,22 +314,80 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
       </Section>
 
       <Section title={t('sessions')}>
-        <div className="px-4 py-3">
-          <button onClick={requestSessions} className="text-[13px] text-accent-primary hover:underline mb-2">{t('sessions_desc')}</button>
-          {sessions.length > 0 && (
-            <div className="space-y-2 mt-2">
-              {sessions.map((s) => (
-                <div key={s.id} className="flex items-center justify-between py-2 px-3 rounded-xl bg-bg-tertiary">
-                  <div>
-                    <span className="text-[13px] text-fg-primary">{t('sessions')} (you)</span>
-                    <span className="text-[11px] text-fg-muted block">{new Date(s.lastActive).toLocaleTimeString()}</span>
+        <div className="px-4 py-3 space-y-2">
+          <p className="text-[12px] text-fg-muted leading-relaxed">{t('sessions_note')}</p>
+          {sessions.length === 0 ? (
+            <p className="text-[13px] text-fg-muted py-1">{t('sessions_desc')}</p>
+          ) : (
+            sessions.map((s) => (
+              <div key={s.id} className="flex items-center justify-between px-3 py-2.5 rounded-xl bg-bg-tertiary border border-border-default">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="w-2 h-2 rounded-full bg-status-success flex-shrink-0" />
+                    <span className="text-[13px] text-fg-primary font-mono truncate">…{s.id.slice(-6)}</span>
+                    {s.current && (
+                      <span className="flex-shrink-0 px-2 py-0.5 rounded-full bg-accent-primary/15 text-accent-primary text-[10px] font-bold">{t('current_session')}</span>
+                    )}
                   </div>
+                  <span className="text-[11px] text-fg-muted block mt-0.5">{new Date(s.lastActive).toLocaleTimeString()}</span>
                 </div>
-              ))}
-            </div>
+              </div>
+            ))
           )}
         </div>
       </Section>
+
+      {isAdmin && (
+        <Section title={t('admin_section')}>
+          <div className="px-4 py-3 space-y-3">
+            <div className="flex gap-2">
+              <input
+                value={banNick}
+                onChange={(e) => setBanNick(e.target.value)}
+                placeholder={t('admin_ban_hint')}
+                maxLength={16}
+                className="flex-1 min-w-0 px-3.5 py-2.5 rounded-xl bg-bg-tertiary border border-border-default text-[14px] text-fg-primary placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary" />
+              <button
+                onClick={() => { if (banNick.trim()) { setPendingBan(banNick.trim()); setConfirmAction('adminBan'); } }}
+                className="flex-shrink-0 px-4 py-2.5 rounded-xl bg-status-error text-white text-[14px] font-semibold hover:brightness-110 transition-all">
+                {t('admin_ban')}
+              </button>
+              <button
+                onClick={() => { if (banNick.trim()) { setPendingBan(banNick.trim()); setConfirmAction('adminUnban'); } }}
+                className="flex-shrink-0 px-4 py-2.5 rounded-xl border border-border-default text-fg-primary text-[14px] font-medium hover:bg-bg-tertiary transition-colors">
+                {t('admin_unban')}
+              </button>
+            </div>
+            <div className="space-y-2">
+              {reports.length === 0 ? (
+                <p className="text-[13px] text-fg-muted py-1">{t('admin_no_reports')}</p>
+              ) : (
+                reports.map((r) => (
+                  <div key={r.id} className="px-3 py-2.5 rounded-xl bg-bg-tertiary border border-border-default space-y-1">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="text-[13px] font-bold text-fg-primary truncate">@{r.targetNick || '?'}</span>
+                      <span className="text-[10px] text-fg-muted flex-shrink-0">{new Date(r.timestamp).toLocaleTimeString()}</span>
+                    </div>
+                    {r.messageText && <p className="text-[12px] text-fg-muted truncate">"{r.messageText}"</p>}
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="px-1.5 py-0.5 rounded-full bg-accent-primary/15 text-accent-primary text-[10px] font-semibold">
+                        {r.channel === 'general' ? 'General chat' : t('admin_channel_dm')}
+                      </span>
+                      <span className="text-[12px] text-fg-primary">{r.reason}</span>
+                    </div>
+                    <div className="text-[11px] text-fg-subtle">from @{r.reporterNick || '?'}</div>
+                    <button
+                      onClick={() => { if (r.targetNick) { setPendingBan(r.targetNick); setConfirmAction('adminBan'); } }}
+                      className="mt-0.5 px-3 py-1.5 rounded-lg bg-status-error/10 text-status-error text-[12px] font-semibold hover:bg-status-error/20 transition-colors">
+                      {t('admin_ban')} @{r.targetNick}
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </Section>
+      )}
 
       <Section title={t('sec_account')}>
         <Option label={state.nickname ? `@${state.nickname}` : ''} icon={<div className="w-9 h-9 rounded-xl bg-accent-primary/15 flex items-center justify-center text-[13px] font-bold text-accent-primary">{state.nickname ? getAvatarText(state.nickname) : ''}</div>}>
@@ -409,6 +477,16 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
       {confirmAction === 'clearData' && (
         <ConfirmModal title={t('confirm_clear_data')} message={t('confirm_clear_data_desc')} confirmLabel={t('confirm_clear')} cancelLabel={t('cancel')} danger
           onConfirm={() => { (() => { const keys = Object.keys(localStorage).filter(k => k.startsWith('wn_')); keys.forEach(k => localStorage.removeItem(k)); })(); window.location.reload(); }} onCancel={() => setConfirmAction(null)} />
+      )}
+      {confirmAction === 'adminBan' && pendingBan && (
+        <ConfirmModal title={t('admin_confirm_ban')} message={`@${pendingBan}`} confirmLabel={t('admin_ban')} cancelLabel={t('cancel')} danger
+          onConfirm={() => { adminBan(pendingBan); setConfirmAction(null); setPendingBan(null); setBanNick(''); }}
+          onCancel={() => { setConfirmAction(null); setPendingBan(null); }} />
+      )}
+      {confirmAction === 'adminUnban' && pendingBan && (
+        <ConfirmModal title={t('admin_confirm_unban')} message={`@${pendingBan}`} confirmLabel={t('admin_unban')} cancelLabel={t('cancel')}
+          onConfirm={() => { adminUnban(pendingBan); setConfirmAction(null); setPendingBan(null); setBanNick(''); }}
+          onCancel={() => { setConfirmAction(null); setPendingBan(null); }} />
       )}
     </>
   );

@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, addReport, getReports } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, addReport, getReports, isAdminNickname } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { appendFileSync } from 'fs';
@@ -53,6 +53,9 @@ function isUserOnline(userId: string): boolean {
 }
 
 // Register (or reconnect) a device. Replaces any prior socket for the same deviceId.
+// Enforces a soft cap of MAX_SESSIONS_PER_USER concurrent sessions per account:
+// when a new device connects beyond the cap, the least recently active older
+// session of that user is dropped with close code 4002.
 function registerDevice(deviceId: string, client: ConnectedClient): void {
   const prev = clients.get(deviceId);
   if (prev && prev.ws !== client.ws) {
@@ -60,7 +63,21 @@ function registerDevice(deviceId: string, client: ConnectedClient): void {
   }
   clients.set(deviceId, client);
   if (!userDevices.has(client.userId)) userDevices.set(client.userId, new Set());
-  userDevices.get(client.userId)!.add(deviceId);
+  const devs = userDevices.get(client.userId)!;
+  devs.add(deviceId);
+  if (devs.size > MAX_SESSIONS_PER_USER) {
+    const oldest = [...devs]
+      .filter(id => id !== deviceId)
+      .map(id => ({ id, t: clients.get(id)?.lastHeartbeat || 0 }))
+      .sort((a, b) => a.t - b.t)[0];
+    if (oldest) {
+      const oc = clients.get(oldest.id);
+      if (oc) {
+        try { oc.ws.close(4002, 'Too many active sessions (max 3)'); } catch {}
+        unregisterDevice(oldest.id);
+      }
+    }
+  }
 }
 
 // Remove a device from the connection tables (called on disconnect / revoke).
@@ -84,7 +101,8 @@ const CLIENT_TIMEOUT = 90000;
 
 const RATE_LIMIT_WINDOW = 60000;
 const MAX_AUTH_ATTEMPTS = 5;
-const MIN_MESSAGE_INTERVAL = 1000;
+const MIN_MESSAGE_INTERVAL = 500;
+const MAX_SESSIONS_PER_USER = 3;
 const MAX_CONNECTIONS_PER_IP = 10;
 const MAX_FAILED_LOGINS = 5;
 const ACCOUNT_LOCKOUT_DURATION = 300000;
@@ -352,13 +370,13 @@ export function handleConnection(ws: WebSocket): void {
         if (userId) await handleReportUser(userId, ws, message.payload);
         break;
       case 'admin_ban':
-        if (userId) await handleAdminBan(ws, message.payload);
+        await handleAdminBan(userId, ws, message.payload);
         break;
       case 'admin_unban':
-        if (userId) await handleAdminUnban(ws, message.payload);
+        await handleAdminUnban(userId, ws, message.payload);
         break;
       case 'admin_reports':
-        if (userId) await handleAdminReports(ws, message.payload);
+        await handleAdminReports(userId, ws, message.payload);
         break;
       default:
         send(ws, { type: 'error', payload: { code: 'UNKNOWN_MESSAGE', message: 'Unknown message type' }, timestamp: Date.now() });
@@ -502,7 +520,7 @@ export function handleConnection(ws: WebSocket): void {
       if (!seen.has(c.userId)) { seen.add(c.userId); onlineUsers.push({ id: c.userId, nickname: c.nickname }); }
     }
 
-    send(ws, { type: 'auth_success', payload: { userId, nickname, deviceId, publicKeys, preKeyBundles: {}, onlineUsers }, timestamp: Date.now() });
+    send(ws, { type: 'auth_success', payload: { userId, nickname, deviceId, publicKeys, preKeyBundles: {}, onlineUsers, role: await isAdminNickname(nickname) ? 'admin' : 'user' }, timestamp: Date.now() });
 
     const history = await getRecentMessages(100);
     send(ws, {
@@ -519,6 +537,9 @@ export function handleConnection(ws: WebSocket): void {
           isOwn: m.senderId === userId,
           fileKey: m.fileKey || null,
           expiresAt: m.expiresAt || null,
+          quotedMessageId: m.quotedMessageId ?? null,
+          quotedMessageText: m.quotedMessageText ?? null,
+          quotedMessageSender: m.quotedMessageSender ?? null,
         })),
       },
       timestamp: Date.now(),
@@ -548,7 +569,7 @@ export function handleConnection(ws: WebSocket): void {
   async function handleChatMessage(senderId: string, ws: WebSocket, payload: { text: string; fileKey?: Record<string, string>; ttl?: number; quoted?: { id?: string; text?: string; sender?: string } }): Promise<void> {
     if (!checkMessageRateLimit(ip) || !checkMessageRateLimit(senderId)) {
       logSecurity('RATE_LIMIT_MESSAGE', { ip, senderId });
-      send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down. Max 1 message per second.' }, timestamp: Date.now() });
+      send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down. Max 2 messages per second.' }, timestamp: Date.now() });
       return;
     }
 
@@ -791,6 +812,9 @@ function canonicalJwk(jwk: any): string {
           isOwn: m.senderId === userId,
           fileKey: m.fileKey || null,
           expiresAt: m.expiresAt || null,
+          quotedMessageId: m.quotedMessageId ?? null,
+          quotedMessageText: m.quotedMessageText ?? null,
+          quotedMessageSender: m.quotedMessageSender ?? null,
         })),
       },
       timestamp: Date.now(),
@@ -994,9 +1018,17 @@ function broadcastSystem(text: string, excludeUserId?: string): void {
 
   const ADMIN_KEY = process.env.ADMIN_KEY || '';
 
-  function adminAuthorized(ws: WebSocket, payload: { key?: string }): boolean {
-    if (!ADMIN_KEY) return false;
-    return typeof payload?.key === 'string' && payload.key === ADMIN_KEY;
+  // Moderation identity: either the operator's shared ADMIN_KEY (sent as a
+  // payload key) or an authenticated account whose nickname is listed in
+  // data/admins.json. Returns the acting admin's identifier, or null.
+  async function adminIdentity(userId: string | null, ws: WebSocket, payload: { key?: string }): Promise<string | null> {
+    if (ADMIN_KEY && typeof payload?.key === 'string' && payload.key === ADMIN_KEY) return 'admin';
+    if (!userId) return null;
+    const ids = userDevices.get(userId);
+    const client = ids ? clients.get([...ids][0] || '') : null;
+    const nick = client ? client.nickname : '';
+    if (nick && await isAdminNickname(nick)) return nick;
+    return null;
   }
 
   async function handleReportUser(userId: string, ws: WebSocket, payload: { targetId?: string; messageId?: string; reason?: string }): Promise<void> {
@@ -1008,21 +1040,36 @@ function broadcastSystem(text: string, excludeUserId?: string): void {
     }
     const reporter = clients.get([...userDevices.get(userId) || []][0] || '') || null;
     const reporterNick = reporter ? reporter.nickname : 'unknown';
+    const target = await getUserById(targetId);
+    const targetNick = target ? target.nickname : undefined;
+    let channel = 'dm';
+    let messageText: string | undefined;
+    if (typeof payload?.messageId === 'string') {
+      const msg = await getMessageById(payload.messageId);
+      if (msg) {
+        if (!msg.channel || msg.channel === 'general') channel = 'general';
+        else if (msg.channel === getDmChannelId(userId, targetId)) channel = 'dm';
+        messageText = sanitizeText(msg.text || '').slice(0, 500) || undefined;
+      }
+    }
     await addReport({
       id: crypto.randomUUID(),
       reporterId: userId,
       reporterNick,
       targetId,
-      channel: 'dm',
+      targetNick,
+      channel,
       messageId: typeof payload?.messageId === 'string' ? payload.messageId : undefined,
+      messageText,
       reason,
       timestamp: Date.now(),
     });
     send(ws, { type: 'report_received', payload: { ok: true }, timestamp: Date.now() });
   }
 
-  async function handleAdminBan(ws: WebSocket, payload: { key?: string; userId?: string; nickname?: string }): Promise<void> {
-    if (!adminAuthorized(ws, payload)) {
+  async function handleAdminBan(userId: string | null, ws: WebSocket, payload: { key?: string; userId?: string; nickname?: string }): Promise<void> {
+    const admin = await adminIdentity(userId, ws, payload);
+    if (!admin) {
       send(ws, { type: 'error', payload: { code: 'FORBIDDEN', message: 'Unauthorized' }, timestamp: Date.now() });
       return;
     }
@@ -1031,7 +1078,7 @@ function broadcastSystem(text: string, excludeUserId?: string): void {
       send(ws, { type: 'error', payload: { code: 'USER_NOT_FOUND', message: 'User not found' }, timestamp: Date.now() });
       return;
     }
-    logSecurity('ADMIN_BAN', { admin: '', target: payload?.userId || payload?.nickname });
+    logSecurity('ADMIN_BAN', { admin, target: payload?.userId || payload?.nickname });
     // Force-disconnect any online devices of the banned user.
     const targetId = payload?.userId || (payload?.nickname ? (await getUserByNickname(payload.nickname))?.id : null);
     if (targetId) {
@@ -1043,8 +1090,9 @@ function broadcastSystem(text: string, excludeUserId?: string): void {
     send(ws, { type: 'admin_action', payload: { ok: true, action: 'ban' }, timestamp: Date.now() });
   }
 
-  async function handleAdminUnban(ws: WebSocket, payload: { key?: string; userId?: string; nickname?: string }): Promise<void> {
-    if (!adminAuthorized(ws, payload)) {
+  async function handleAdminUnban(userId: string | null, ws: WebSocket, payload: { key?: string; userId?: string; nickname?: string }): Promise<void> {
+    const admin = await adminIdentity(userId, ws, payload);
+    if (!admin) {
       send(ws, { type: 'error', payload: { code: 'FORBIDDEN', message: 'Unauthorized' }, timestamp: Date.now() });
       return;
     }
@@ -1053,12 +1101,13 @@ function broadcastSystem(text: string, excludeUserId?: string): void {
       send(ws, { type: 'error', payload: { code: 'USER_NOT_FOUND', message: 'User not found' }, timestamp: Date.now() });
       return;
     }
-    logSecurity('ADMIN_UNBAN', { admin: '', target: payload?.userId || payload?.nickname });
+    logSecurity('ADMIN_UNBAN', { admin, target: payload?.userId || payload?.nickname });
     send(ws, { type: 'admin_action', payload: { ok: true, action: 'unban' }, timestamp: Date.now() });
   }
 
-  async function handleAdminReports(ws: WebSocket, payload: { key?: string }): Promise<void> {
-    if (!adminAuthorized(ws, payload)) {
+  async function handleAdminReports(userId: string | null, ws: WebSocket, payload: { key?: string }): Promise<void> {
+    const admin = await adminIdentity(userId, ws, payload);
+    if (!admin) {
       send(ws, { type: 'error', payload: { code: 'FORBIDDEN', message: 'Unauthorized' }, timestamp: Date.now() });
       return;
     }
