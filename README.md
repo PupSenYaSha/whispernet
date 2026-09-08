@@ -38,6 +38,13 @@
 
 > Both client and server source code are fully open in this repository. End-to-end encryption ensures the server never sees plaintext DM content or long-term keys.
 
+## Moderation & Privacy
+
+- **Contact blocking** — block/unblock any user from Settings; a blocked user cannot DM you and their messages are rejected server-side
+- **Reporting** — users can report abuse; reports are stored for review
+- **Admin moderation** — operator can ban/unban accounts. Set `ADMIN_KEY` env var on the server, then use the admin WS messages (`admin_ban`, `admin_unban`, `admin_reports`) with `{ key }`. Banned accounts are rejected on login and their live sessions are force-disconnected
+- **Rate limiting** — auth attempts, message sending, connections, and uploads are rate-limited per IP
+
 ## Download
 
 Pre-built binaries on [Releases](https://github.com/PupSenYaSha/whispernet/releases):

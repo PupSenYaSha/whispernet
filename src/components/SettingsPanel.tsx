@@ -133,7 +133,14 @@ function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, onCon
 }
 
 export function SettingsPanel({ onClose, closing, inline }: { onClose: () => void; closing?: boolean; inline?: boolean }) {
-  const { state, updateSettings, logout, sessions, requestSessions, showImportModal, t } = useConnection();
+  const { state, updateSettings, logout, sessions, requestSessions, showImportModal, t, blockedUsers, blockUser, unblockUser, refreshBlocked } = useConnection();
+  const [blockInput, setBlockInput] = useState('');
+  const blockByNick = () => {
+    const nick = blockInput.trim().replace(/^@/, '');
+    if (!nick) return;
+    blockUser('', nick);
+    setBlockInput('');
+  };
   const [confirmAction, setConfirmAction] = useState<'logout' | 'clearData' | null>(null);
   const [exportModal, setExportModal] = useState(false);
 
@@ -372,6 +379,37 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
                     <span className="text-[13px] text-fg-primary">{t('sessions')} (you)</span>
                     <span className="text-[11px] text-fg-muted block">{new Date(s.lastActive).toLocaleTimeString()}</span>
                   </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </Section>
+
+      <Section title={t('blocked_users')}>
+        <div className="px-4 py-3">
+          <div className="flex items-center gap-2 mb-3">
+            <input
+              value={blockInput}
+              onChange={(e) => setBlockInput(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') blockByNick(); }}
+              placeholder={t('blocked_hint')}
+              className="flex-1 min-w-0 px-3 h-9 rounded-xl bg-bg-quaternary text-[13px] text-fg-primary outline-none border border-border-default focus:border-accent-primary transition-colors"
+            />
+            <button onClick={blockByNick} className="px-3 h-9 rounded-xl bg-accent-primary text-accent-text text-[13px] font-medium hover:brightness-110 transition-all shrink-0">{t('block')}</button>
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={refreshBlocked} className="text-[12px] text-accent-primary hover:underline">{t('sessions_desc')}</button>
+          </div>
+          {blockedUsers.length > 0 && (
+            <div className="space-y-2 mt-3">
+              {blockedUsers.map((u) => (
+                <div key={u.id} className="flex items-center justify-between py-2 px-3 rounded-xl bg-bg-tertiary">
+                  <span className="text-[13px] text-fg-primary">@{u.nickname}</span>
+                  <button
+                    onClick={() => unblockUser(u.id)}
+                    className="text-[12px] text-accent-primary hover:underline"
+                  >{t('unblock')}</button>
                 </div>
               ))}
             </div>

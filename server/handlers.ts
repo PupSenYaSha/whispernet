@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, addReport, getReports } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { appendFileSync } from 'fs';
@@ -339,12 +339,33 @@ export function handleConnection(ws: WebSocket): void {
       case 'revoke_session':
         if (userId) handleRevokeSession(userId, ws, message.payload, currentDeviceId);
         break;
+      case 'block_user':
+        if (userId) await handleBlockUser(userId, ws, message.payload);
+        break;
+      case 'unblock_user':
+        if (userId) await handleUnblockUser(userId, ws, message.payload);
+        break;
+      case 'get_blocked':
+        if (userId) await handleGetBlocked(userId, ws);
+        break;
+      case 'report_user':
+        if (userId) await handleReportUser(userId, ws, message.payload);
+        break;
+      case 'admin_ban':
+        if (userId) await handleAdminBan(ws, message.payload);
+        break;
+      case 'admin_unban':
+        if (userId) await handleAdminUnban(ws, message.payload);
+        break;
+      case 'admin_reports':
+        if (userId) await handleAdminReports(ws, message.payload);
+        break;
       default:
         send(ws, { type: 'error', payload: { code: 'UNKNOWN_MESSAGE', message: 'Unknown message type' }, timestamp: Date.now() });
     }
   }
 
-  async function handleAuthLogin(ws: WebSocket, payload: { nickname: string; password: string; preKeyBundle?: any }): Promise<void> {
+  async function handleAuthLogin(ws: WebSocket, payload: { nickname: string; password: string; preKeyBundle?: any; deviceId?: string }): Promise<void> {
     if (!checkAuthRateLimit(ip)) {
       logSecurity('RATE_LIMIT_AUTH', { ip });
       send(ws, { type: 'auth_failure', payload: { reason: 'Too many attempts. Try again in 1 minute.' }, timestamp: Date.now() });
@@ -393,6 +414,12 @@ export function handleConnection(ws: WebSocket): void {
     logSecurity('LOGIN_SUCCESS', { nickname: cleanNick, ip });
     failedLogins.delete(lockKey);
 
+    if (await getUserBanned(user.id)) {
+      logSecurity('LOGIN_BANNED', { nickname: cleanNick, ip });
+      send(ws, { type: 'auth_failure', payload: { reason: 'Account banned' }, timestamp: Date.now() });
+      return;
+    }
+
     const deviceId = typeof payload.deviceId === 'string' && payload.deviceId.length > 0 && payload.deviceId.length <= 64
       ? payload.deviceId : crypto.randomUUID();
     currentUserId = user.id;
@@ -406,7 +433,7 @@ export function handleConnection(ws: WebSocket): void {
     await onAuthenticated(user.id, user.nickname, ws, deviceId);
   }
 
-  async function handleAuthRegister(ws: WebSocket, payload: { nickname: string; password: string; publicKey?: any; preKeyBundle?: any }): Promise<void> {
+  async function handleAuthRegister(ws: WebSocket, payload: { nickname: string; password: string; publicKey?: any; preKeyBundle?: any; deviceId?: string }): Promise<void> {
     if (!checkAuthRateLimit(ip)) {
       send(ws, { type: 'auth_failure', payload: { reason: 'Too many attempts. Try again in 1 minute.' }, timestamp: Date.now() });
       return;
@@ -592,6 +619,18 @@ export function handleConnection(ws: WebSocket): void {
     }
     if (!recipientUser) {
       send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Recipient not found' }, timestamp: Date.now() });
+      return;
+    }
+
+    // Blocking: a direct message is only delivered when neither party has blocked the other.
+    const recvBlocked = await getBlockedUserIds(recipientUser.id);
+    const senderBlocked = await getBlockedUserIds(senderId);
+    if (recvBlocked.includes(senderId)) {
+      send(ws, { type: 'error', payload: { code: 'BLOCKED', message: 'You cannot message this user' }, timestamp: Date.now() });
+      return;
+    }
+    if (senderBlocked.includes(recipientUser.id)) {
+      send(ws, { type: 'error', payload: { code: 'BLOCKED', message: 'Unblock this user to message them' }, timestamp: Date.now() });
       return;
     }
 
@@ -887,6 +926,132 @@ function broadcastSystem(text: string, excludeUserId?: string): void {
     target.ws.close(4001, 'Session revoked');
     unregisterDevice(targetId);
     send(ws, { type: 'session_revoked', payload: { sessionId: targetId }, timestamp: Date.now() });
+  }
+
+  // --- Blocking (user-level privacy) ---
+
+  async function sendBlockedList(userId: string, ws: WebSocket): Promise<void> {
+    const blockedIds = await getBlockedUserIds(userId);
+    const users = await getAllUsers();
+    send(ws, {
+      type: 'blocked_list',
+      payload: { blockedIds, users: blockedIds.map(id => ({ id, nickname: (users.find(u => u.id === id)?.nickname) || 'unknown' })) },
+      timestamp: Date.now(),
+    });
+  }
+
+  async function handleBlockUser(userId: string, ws: WebSocket, payload: { userId?: string; nickname?: string }): Promise<void> {
+    if (!payload || (typeof payload.userId !== 'string' && typeof payload.nickname !== 'string')) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Missing user id or nickname' }, timestamp: Date.now() });
+      return;
+    }
+    const targetId = typeof payload.userId === 'string'
+      ? payload.userId
+      : (await getUserByNickname(sanitize(payload.nickname || '')))?.id || '';
+    if (!targetId) {
+      send(ws, { type: 'error', payload: { code: 'USER_NOT_FOUND', message: 'User not found' }, timestamp: Date.now() });
+      return;
+    }
+    if (targetId === userId) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Cannot block yourself' }, timestamp: Date.now() });
+      return;
+    }
+    const target = await getUserById(targetId);
+    if (!target) {
+      send(ws, { type: 'error', payload: { code: 'USER_NOT_FOUND', message: 'User not found' }, timestamp: Date.now() });
+      return;
+    }
+    await setUserBlocked(userId, targetId, true);
+    await sendBlockedList(userId, ws);
+  }
+
+  async function handleUnblockUser(userId: string, ws: WebSocket, payload: { userId?: string }): Promise<void> {
+    if (!payload || typeof payload.userId !== 'string') {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Missing user id' }, timestamp: Date.now() });
+      return;
+    }
+    await setUserBlocked(userId, payload.userId, false);
+    await sendBlockedList(userId, ws);
+  }
+
+  async function handleGetBlocked(userId: string, ws: WebSocket): Promise<void> {
+    await sendBlockedList(userId, ws);
+  }
+
+  // --- Reporting + admin moderation ---
+
+  const ADMIN_KEY = process.env.ADMIN_KEY || '';
+
+  function adminAuthorized(ws: WebSocket, payload: { key?: string }): boolean {
+    if (!ADMIN_KEY) return false;
+    return typeof payload?.key === 'string' && payload.key === ADMIN_KEY;
+  }
+
+  async function handleReportUser(userId: string, ws: WebSocket, payload: { targetId?: string; messageId?: string; reason?: string }): Promise<void> {
+    const targetId = typeof payload?.targetId === 'string' ? payload.targetId : '';
+    const reason = typeof payload?.reason === 'string' ? sanitizeText(payload.reason).slice(0, 500) : '';
+    if (!targetId || targetId === userId || !reason) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Invalid report' }, timestamp: Date.now() });
+      return;
+    }
+    const reporter = clients.get([...userDevices.get(userId) || []][0] || '') || null;
+    const reporterNick = reporter ? reporter.nickname : 'unknown';
+    await addReport({
+      id: crypto.randomUUID(),
+      reporterId: userId,
+      reporterNick,
+      targetId,
+      channel: 'dm',
+      messageId: typeof payload?.messageId === 'string' ? payload.messageId : undefined,
+      reason,
+      timestamp: Date.now(),
+    });
+    send(ws, { type: 'report_received', payload: { ok: true }, timestamp: Date.now() });
+  }
+
+  async function handleAdminBan(ws: WebSocket, payload: { key?: string; userId?: string; nickname?: string }): Promise<void> {
+    if (!adminAuthorized(ws, payload)) {
+      send(ws, { type: 'error', payload: { code: 'FORBIDDEN', message: 'Unauthorized' }, timestamp: Date.now() });
+      return;
+    }
+    const ok = await setUserBannedByIdent(typeof payload?.userId === 'string' ? payload.userId : null, typeof payload?.nickname === 'string' ? payload.nickname : null, true);
+    if (!ok) {
+      send(ws, { type: 'error', payload: { code: 'USER_NOT_FOUND', message: 'User not found' }, timestamp: Date.now() });
+      return;
+    }
+    logSecurity('ADMIN_BAN', { admin: '', target: payload?.userId || payload?.nickname });
+    // Force-disconnect any online devices of the banned user.
+    const targetId = payload?.userId || (payload?.nickname ? (await getUserByNickname(payload.nickname))?.id : null);
+    if (targetId) {
+      for (const c of devicesForUser(targetId)) {
+        c.ws.close(4003, 'Account banned');
+      }
+      for (const id of [...(userDevices.get(targetId) || [])]) unregisterDevice(id);
+    }
+    send(ws, { type: 'admin_action', payload: { ok: true, action: 'ban' }, timestamp: Date.now() });
+  }
+
+  async function handleAdminUnban(ws: WebSocket, payload: { key?: string; userId?: string; nickname?: string }): Promise<void> {
+    if (!adminAuthorized(ws, payload)) {
+      send(ws, { type: 'error', payload: { code: 'FORBIDDEN', message: 'Unauthorized' }, timestamp: Date.now() });
+      return;
+    }
+    const ok = await setUserBannedByIdent(typeof payload?.userId === 'string' ? payload.userId : null, typeof payload?.nickname === 'string' ? payload.nickname : null, false);
+    if (!ok) {
+      send(ws, { type: 'error', payload: { code: 'USER_NOT_FOUND', message: 'User not found' }, timestamp: Date.now() });
+      return;
+    }
+    logSecurity('ADMIN_UNBAN', { admin: '', target: payload?.userId || payload?.nickname });
+    send(ws, { type: 'admin_action', payload: { ok: true, action: 'unban' }, timestamp: Date.now() });
+  }
+
+  async function handleAdminReports(ws: WebSocket, payload: { key?: string }): Promise<void> {
+    if (!adminAuthorized(ws, payload)) {
+      send(ws, { type: 'error', payload: { code: 'FORBIDDEN', message: 'Unauthorized' }, timestamp: Date.now() });
+      return;
+    }
+    const reports = await getReports();
+    send(ws, { type: 'admin_reports', payload: { reports }, timestamp: Date.now() });
   }
 
 export function startHeartbeatCheck(): void {

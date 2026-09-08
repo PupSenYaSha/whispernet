@@ -12,12 +12,14 @@ let USERS_FILE = path.join(DATA_DIR, 'users.json');
 let MESSAGES_FILE = path.join(DATA_DIR, 'messages.json');
 let PREKEYS_FILE = path.join(DATA_DIR, 'prekeys.json');
 let KEYBACKUP_FILE = path.join(DATA_DIR, 'keybackups.json');
+let REPORTS_FILE = path.join(DATA_DIR, 'reports.json');
 let MEDIA_DIR = path.join(DATA_DIR, 'media');
 
 let usersMutex = { v: false };
 let messagesMutex = { v: false };
 let preKeysMutex = { v: false };
 let keyBackupMutex = { v: false };
+let reportsMutex = { v: false };
 
 try {
   mkdirSync(DATA_DIR, { recursive: true });
@@ -62,6 +64,8 @@ export function setDataDir(dir: string): void {
   USERS_FILE = path.join(DATA_DIR, 'users.json');
   MESSAGES_FILE = path.join(DATA_DIR, 'messages.json');
   PREKEYS_FILE = path.join(DATA_DIR, 'prekeys.json');
+  KEYBACKUP_FILE = path.join(DATA_DIR, 'keybackups.json');
+  REPORTS_FILE = path.join(DATA_DIR, 'reports.json');
   MEDIA_DIR = path.join(DATA_DIR, 'media');
   mkdirSync(DATA_DIR, { recursive: true });
   mkdirSync(MEDIA_DIR, { recursive: true });
@@ -77,6 +81,8 @@ interface StoredUser {
   passwordHash: string;
   publicKey: Record<string, any>;
   createdAt?: number;
+  isBanned?: boolean;
+  blocked?: string[];
 }
 
 interface StoredMessage {
@@ -301,7 +307,7 @@ export async function createUser(nickname: string, password: string, publicKey?:
       return null;
     }
 
-    users.push({ id, nickname, passwordHash, createdAt, publicKey: publicKey || null });
+    users.push({ id, nickname, passwordHash, createdAt, publicKey: publicKey || null, isBanned: false, blocked: [] });
     await saveUsers(users);
     return { id, nickname };
   });
@@ -540,6 +546,85 @@ export async function removeReaction(messageId: string, userId: string, emoji: s
     reactions = reactions.filter(r => !(r.messageId === messageId && r.userId === userId && r.emoji === emoji));
     await saveReactions(reactions);
   });
+}
+
+// --- Moderation & blocking (release-readiness) ---
+
+export async function setUserBannedByIdent(userId: string | null, nickname: string | null, banned: boolean): Promise<boolean> {
+  return withMutex(usersMutex, async () => {
+    const users = await loadUsers();
+    const user = userId
+      ? users.find(u => u.id === userId)
+      : (nickname ? users.find(u => u.nickname === nickname) : null);
+    if (!user) return false;
+    user.isBanned = banned;
+    await saveUsers(users);
+    return true;
+  });
+}
+
+export async function getUserBanned(userId: string): Promise<boolean> {
+  const users = await loadUsers();
+  const user = users.find(u => u.id === userId);
+  return !!user?.isBanned;
+}
+
+export async function getBlockedUserIds(userId: string): Promise<string[]> {
+  const users = await loadUsers();
+  const user = users.find(u => u.id === userId);
+  return Array.isArray(user?.blocked) ? (user.blocked as string[]) : [];
+}
+
+export async function setUserBlocked(userId: string, blockedId: string, blocked: boolean): Promise<void> {
+  return withMutex(usersMutex, async () => {
+    const users = await loadUsers();
+    const user = users.find(u => u.id === userId);
+    if (!user) return;
+    const list = Array.isArray(user.blocked) ? (user.blocked as string[]) : [];
+    user.blocked = blocked
+      ? Array.from(new Set([...list, blockedId]))
+      : list.filter(x => x !== blockedId);
+    await saveUsers(users);
+  });
+}
+
+interface StoredReport {
+  id: string;
+  reporterId: string;
+  reporterNick?: string;
+  targetId: string;
+  channel: string;
+  messageId?: string;
+  reason: string;
+  timestamp: number;
+}
+
+async function loadReports(): Promise<StoredReport[]> {
+  if (!existsSync(REPORTS_FILE)) return [];
+  try {
+    const data = await readFile(REPORTS_FILE, 'utf-8');
+    const parsed = JSON.parse(data);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveReports(reports: StoredReport[]): Promise<void> {
+  await atomicWrite(REPORTS_FILE, JSON.stringify(reports, null, 2));
+}
+
+export async function addReport(report: StoredReport): Promise<void> {
+  return withMutex(reportsMutex, async () => {
+    const reports = await loadReports();
+    reports.push(report);
+    if (reports.length > 1000) reports.splice(0, reports.length - 1000);
+    await saveReports(reports);
+  });
+}
+
+export async function getReports(): Promise<StoredReport[]> {
+  return loadReports();
 }
 
 export async function getReactionsForMessage(messageId: string): Promise<StoredReaction[]> {

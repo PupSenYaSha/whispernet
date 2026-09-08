@@ -77,6 +77,10 @@ export interface ConnectionContextType {
   sessions: { id: string; lastActive: number; current: boolean }[];
   requestSessions: () => void;
   revokeSession: (sessionId: string) => void;
+  blockedUsers: { id: string; nickname: string }[];
+  refreshBlocked: () => void;
+  blockUser: (userId: string, nickname?: string) => void;
+  unblockUser: (userId: string) => void;
   showImportModal: (data: any, mode: 'setup' | 'settings') => void;
 }
 

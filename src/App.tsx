@@ -174,6 +174,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const preKeyBundlesRef = useRef<Record<string, any>>({});
   const pendingX3dhRef = useRef<Record<string, { x3dhMessage: any; ratchetPublicKey: Uint8Array }>>({});
   const [sessions, setSessions] = useState<{ id: string; lastActive: number; current: boolean }[]>([]);
+  const [blockedUsers, setBlockedUsers] = useState<{ id: string; nickname: string }[]>([]);
   const [importModal, setImportModal] = useState<{ data: any; mode: 'setup' | 'settings' } | null>(null);
 
   // Fetches the server-stored encrypted key-backup (used to sync the account key
@@ -294,6 +295,18 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
 
   const revokeSession = useCallback((sessionId: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'revoke_session', payload: { sessionId } }));
+  }, []);
+
+  const refreshBlocked = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'get_blocked', payload: {} }));
+  }, []);
+
+  const blockUser = useCallback((userId: string, nickname?: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'block_user', payload: nickname ? { nickname } : { userId } }));
+  }, []);
+
+  const unblockUser = useCallback((userId: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'unblock_user', payload: { userId } }));
   }, []);
 
   const searchUsers = useCallback((query: string) => {
@@ -548,6 +561,9 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               break;
             case 'session_revoked':
               if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'get_sessions', payload: {} }));
+              break;
+            case 'blocked_list':
+              setBlockedUsers((message.payload.users || []));
               break;
             case 'user_joined':
               dispatch({ type: 'ADD_USER', user: { id: message.payload.userId, nickname: message.payload.nickname } });
@@ -823,6 +839,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         addReaction, removeReaction, editMessage,
         t, updateSettings, getMyPublicKey, getPublicKey, decryptMedia,
         sessions, requestSessions, revokeSession,
+        blockedUsers, refreshBlocked, blockUser, unblockUser,
         showImportModal: (data: any, mode: 'setup' | 'settings') => setImportModal({ data, mode }),
       }}>
         {children}

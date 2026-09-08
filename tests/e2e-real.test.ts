@@ -109,6 +109,7 @@ describe('WhisperNet real E2E', () => {
   beforeAll(async () => {
     dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wn-e2e-'));
     process.env.DISABLE_RATE_LIMITS = '1';
+    process.env.ADMIN_KEY = 'wn-test-admin-key';
     const { setDataDir } = await import('../server/database.js');
     setDataDir(dataDir);
 
@@ -385,4 +386,91 @@ describe('WhisperNet real E2E', () => {
 
   // keep helper referenced to avoid unused warnings
   void bufToBase64; void base64ToBuf;
+
+  it('blocking: blocked user cannot DM the blocker; unblock restores delivery', async () => {
+    const a = await makeUser(PORT, 'blkA' + Date.now());
+    const b = await makeUser(PORT, 'blkB' + Date.now());
+    await sleep(1100);
+
+    a.client.send('block_user', { userId: b.userId });
+    const list1 = await a.client.next((m) => m.type === 'blocked_list');
+    expect(list1.payload.blockedIds).toContain(b.userId);
+
+    // B tries to DM A -> must be rejected
+    const text = 'you blocked me?';
+    const enc = await encryptMessage(text, { [a.userId]: a.publicKey });
+    b.client.send('dm_send', { to: a.userId, text: '', encrypted: enc });
+    const err = await b.client.next((m) => m.type === 'error' || m.type === 'dm_message');
+    expect(err.type).toBe('error');
+    expect(err.payload.code).toBe('BLOCKED');
+
+    // A unblocks B -> DM works again
+    a.client.send('unblock_user', { userId: b.userId });
+    const list2 = await a.client.next((m) => m.type === 'blocked_list');
+    expect(list2.payload.blockedIds).not.toContain(b.userId);
+    const enc2 = await encryptMessage('back online?', { [a.userId]: a.publicKey });
+    b.client.send('dm_send', { to: a.userId, text: '', encrypted: enc2 });
+    const toA = await a.client.next((m) => m.type === 'dm_message');
+    const dec = await decryptMessage(toA.payload.encrypted, a.userId, a.privateKey);
+    expect(dec).toBe('back online?');
+
+    a.client.ws.close(); b.client.ws.close();
+  }, 25000);
+
+  it('admin: ban rejects re-login and disconnects online devices', async () => {
+    const b = await makeUser(PORT, 'bnB' + Date.now());
+    await sleep(300);
+
+    // Unauthorized (wrong key) -> forbidden
+    b.client.send('admin_ban', { key: 'wrong', nickname: b.nick });
+    const forbid = await b.client.next((m) => m.type === 'error');
+    expect(forbid.payload.code).toBe('FORBIDDEN');
+
+    // Authorized ban by nickname
+    const admin = await makeUser(PORT, 'adm' + Date.now());
+    admin.client.send('admin_ban', { key: 'wn-test-admin-key', nickname: b.nick });
+    const act = await admin.client.next((m) => m.type === 'admin_action');
+    expect(act.payload.ok).toBe(true);
+
+    // B's existing connection should be force-closed (banned)
+    await new Promise<void>((res) => {
+      if (b.client.ws.readyState === WebSocket.CLOSED) return res();
+      b.client.ws.on('close', () => res());
+      setTimeout(res, 4000);
+    });
+
+    // Re-login -> auth_failure "Account banned"
+    await sleep(300);
+    const b2 = new Client(PORT);
+    await b2.open();
+    b2.send('auth_login', { nickname: b.nick, password: 'Passw0rd123' });
+    const resp = await b2.next((m) => m.type === 'auth_success' || m.type === 'auth_failure', 6000);
+    expect(resp.type).toBe('auth_failure');
+    expect(String(resp.payload.reason).toLowerCase()).toContain('banned');
+
+    b2.ws.close(); b.client.ws.close();
+  }, 25000);
+
+  it('report_user stores a report; admin_reports returns it (with auth)', async () => {
+    const reporter = await makeUser(PORT, 'rpA' + Date.now());
+    const target = await makeUser(PORT, 'rpB' + Date.now());
+    await sleep(300);
+
+    reporter.client.send('report_user', { targetId: target.userId, reason: 'spam' });
+    const recv = await reporter.client.next((m) => m.type === 'report_received');
+    expect(recv.payload.ok).toBe(true);
+
+    // unauth admin_reports -> forbidden
+    reporter.client.send('admin_reports', { key: 'wrong' });
+    const forbid = await reporter.client.next((m) => m.type === 'error');
+    expect(forbid.payload.code).toBe('FORBIDDEN');
+
+    reporter.client.send('admin_reports', { key: 'wn-test-admin-key' });
+    const res = await reporter.client.next((m) => m.type === 'admin_reports');
+    const found = (res.payload.reports as any[]).find(r => r.targetId === target.userId && r.reason === 'spam');
+    expect(found).toBeTruthy();
+    expect(found.reporterId).toBe(reporter.userId);
+
+    reporter.client.ws.close(); target.client.ws.close();
+  }, 25000);
 });
