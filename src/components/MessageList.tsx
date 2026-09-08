@@ -21,7 +21,23 @@ function MessageListImpl({ messages, fontSizeClass, t }: { messages: Message[]; 
 
   useEffect(() => {
     const el = containerRef.current;
-    if (el) requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+    if (!el) return;
+    const scrollToBottom = () => { el.scrollTop = el.scrollHeight; };
+    const raf = requestAnimationFrame(scrollToBottom);
+    const timeout = window.setTimeout(scrollToBottom, 80);
+    return () => { cancelAnimationFrame(raf); clearTimeout(timeout); };
+  }, []);
+
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(() => {
+      if (isNearBottomRef.current) {
+        requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
   }, []);
 
   useEffect(() => {

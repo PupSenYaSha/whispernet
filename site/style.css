@@ -52,7 +52,11 @@ body {
   border-radius: 50%;
   filter: blur(80px);
   opacity: 0.5;
-  animation: float 20s ease-in-out infinite;
+  transform: translateZ(0);
+  /* Pulse opacity only — animating transform on a blurred layer forces a
+     full re-blur every frame (the main cause of jank). A static blurred
+     layer + cheap opacity keyframe keeps the glow without the cost. */
+  animation: pulse 18s ease-in-out infinite;
 }
 
 .ambient-orb-1 {
@@ -82,17 +86,16 @@ body {
   animation-delay: -14s;
 }
 
-@keyframes float {
-  0%, 100% { transform: translate(0, 0) scale(1); }
-  33% { transform: translate(30px, -30px) scale(1.05); }
-  66% { transform: translate(-20px, 20px) scale(0.95); }
+@keyframes pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.65; }
 }
 
 /* Glass */
 .glass {
   background: var(--glass-bg);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--glass-border);
   box-shadow: var(--glass-shadow);
 }
@@ -335,6 +338,9 @@ body {
   position: relative;
   z-index: 1;
   padding: 100px 0;
+  /* Skip rendering offscreen sections to keep scrolling smooth */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 700px;
 }
 
 .section-alt {
