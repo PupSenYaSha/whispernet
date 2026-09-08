@@ -222,6 +222,40 @@ describe('WhisperNet real E2E', () => {
     a.client.ws.close(); b.client.ws.close();
   }, 20000);
 
+  it('multi-device: DM delivered to all of recipient devices (fan-out)', async () => {
+    const a = await makeUser(PORT, 'fanA' + Date.now());
+    const b = await makeUser(PORT, 'fanB' + Date.now());
+    await sleep(1100);
+    const b2 = new Client(PORT);
+    await b2.open();
+    b2.send('auth_login', { nickname: b.nick, password: 'Passw0rd123', publicKey: b.publicKey });
+    await b2.next((m) => m.type === 'auth_success' || m.type === 'auth_failure');
+
+    const text = 'to both devices';
+    const enc = await encryptMessage(text, { [b.userId]: b.publicKey });
+    a.client.send('dm_send', { to: b.userId, text: '', encrypted: enc });
+
+    const toB1 = await b.client.next((m) => m.type === 'dm_message' && m.payload.encrypted);
+    const toB2 = await b2.next((m) => m.type === 'dm_message' && m.payload.encrypted);
+    const d1 = await decryptMessage(toB1.payload.encrypted, b.userId, b.privateKey);
+    const d2 = await decryptMessage(toB2.payload.encrypted, b.userId, b.privateKey);
+    expect(d1).toBe(text);
+    expect(d2).toBe(text);
+    a.client.ws.close(); b.client.ws.close(); b2.ws.close();
+  }, 20000);
+
+  it('key_backup: upload then fetch returns same blob', async () => {
+    const u = await makeUser(PORT, 'kb' + Date.now());
+    const blob = 'encrypted-blob-' + Math.random().toString(36);
+    u.client.send('key_backup_upload', { blob });
+    const saved = await u.client.next((m) => m.type === 'key_backup_saved');
+    expect(saved.payload.ok).toBe(true);
+    u.client.send('key_backup_fetch');
+    const got = await u.client.next((m) => m.type === 'key_backup');
+    expect(got.payload.blob).toBe(blob);
+    u.client.ws.close();
+  }, 20000);
+
   it('plaintext DM is rejected (ENCRYPTION_REQUIRED)', async () => {
     const a = await makeUser(PORT, 'eps' + Date.now());
     const b = await makeUser(PORT, 'zeta' + Date.now());

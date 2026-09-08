@@ -60,10 +60,11 @@ export function wrapForMedia(ciphertext: ArrayBuffer): Blob {
   return new Blob([out], { type: 'image/png' });
 }
 
-export function stripMediaWrap(bytes: Uint8Array): Uint8Array {
+export function stripMediaWrap(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  const buf = bytes.buffer as ArrayBuffer;
   const i = indexOfSeq(bytes, IEND);
-  if (i < 0) return bytes;
-  return bytes.subarray(i + 8); // past length(4)+'IEND'(4)+crc(4)
+  if (i < 0) return new Uint8Array(buf.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
+  return new Uint8Array(buf.slice(bytes.byteOffset + i + 8, bytes.byteOffset + bytes.byteLength)); // past length(4)+'IEND'(4)+crc(4)
 }
 
 export async function wrapFileKeyFor(
@@ -111,6 +112,6 @@ export async function unwrapAndDecrypt(
   if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
   const raw = new Uint8Array(await res.arrayBuffer());
   const ciphertext = stripMediaWrap(raw);
-  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: new Uint8Array(base64ToBuf(ivB64)) }, aesKey, ciphertext);
+  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: base64ToBuf(ivB64) }, aesKey, ciphertext);
   return new Blob([plaintext]);
 }

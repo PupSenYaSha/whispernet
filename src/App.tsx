@@ -35,6 +35,21 @@ const WS_URL = import.meta.env.VITE_WS_URL || (() => {
   return `${proto}//${location.host}/ws`;
 })();
 
+// Stable per-browser/device id, persisted so the same device keeps the same deviceId
+// across reconnects (used for multi-device sessions + fan-out delivery).
+function getDeviceId(): string {
+  try {
+    let id = localStorage.getItem('wn_device_id');
+    if (!id) {
+      id = (crypto as any).randomUUID ? crypto.randomUUID() : 'dev-' + Math.random().toString(36).slice(2);
+      localStorage.setItem('wn_device_id', id);
+    }
+    return id;
+  } catch {
+    return 'device';
+  }
+}
+
 const initialState: ConnectionState = {
   status: 'disconnected',
   messages: [],
@@ -160,6 +175,28 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const pendingX3dhRef = useRef<Record<string, { x3dhMessage: any; ratchetPublicKey: Uint8Array }>>({});
   const [sessions, setSessions] = useState<{ id: string; lastActive: number; current: boolean }[]>([]);
   const [importModal, setImportModal] = useState<{ data: any; mode: 'setup' | 'settings' } | null>(null);
+
+  // Fetches the server-stored encrypted key-backup (used to sync the account key
+  // across devices). The backup blob is opaque to the server; it is decrypted
+  // locally with the user's password (see A+C cross-device sync).
+  const fetchKeyBackup = (): Promise<string | null> => {
+    return new Promise((resolve) => {
+      const ws = wsRef.current;
+      if (!ws || ws.readyState !== WebSocket.OPEN) { resolve(null); return; }
+      const handler = (ev: MessageEvent) => {
+        try {
+          const m = JSON.parse(ev.data);
+          if (m.type === 'key_backup') {
+            ws.removeEventListener('message', handler);
+            resolve((m.payload && m.payload.blob) || null);
+          }
+        } catch { /* ignore */ }
+      };
+      ws.addEventListener('message', handler);
+      ws.send(JSON.stringify({ type: 'key_backup_fetch', payload: {} }));
+      setTimeout(() => { try { ws.removeEventListener('message', handler); } catch { /* ignore */ } resolve(null); }, 5000);
+    });
+  };
 
   useEffect(() => { userIdRef.current = state.userId; }, [state.userId]);
   useEffect(() => { nicknameRef.current = state.nickname; }, [state.nickname]);
@@ -312,7 +349,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
             await initPreKeyManager(auth.password);
             signalInitializedRef.current = true;
             const preKeyBundle = getPreKeyBundleForServer();
-            ws.send(JSON.stringify({ type: 'auth_register', payload: { nickname: auth.nickname, password: auth.password, publicKey: keys.publicKey, preKeyBundle } }));
+            ws.send(JSON.stringify({ type: 'auth_register', payload: { nickname: auth.nickname, password: auth.password, publicKey: keys.publicKey, preKeyBundle, deviceId: getDeviceId() } }));
           } else {
             let savedKey = localStorage.getItem(`wn_pk_${nick}`);
             let savedPubKey = localStorage.getItem(`wn_pub_${nick}`);
@@ -343,7 +380,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
             await initPreKeyManager(auth.password);
             signalInitializedRef.current = true;
             const preKeyBundle = getPreKeyBundleForServer();
-            ws.send(JSON.stringify({ type: 'auth_login', payload: { nickname: auth.nickname, password: auth.password, preKeyBundle } }));
+            ws.send(JSON.stringify({ type: 'auth_login', payload: { nickname: auth.nickname, password: auth.password, preKeyBundle, deviceId: getDeviceId() } }));
           }
         }
       };
@@ -353,6 +390,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
           const message = JSON.parse(event.data);
           switch (message.type) {
             case 'auth_success':
+              if (message.payload.deviceId) localStorage.setItem('wn_device_id', message.payload.deviceId);
               dispatch({ type: 'SET_USER', userId: message.payload.userId, nickname: message.payload.nickname });
               dispatch({ type: 'SET_STATUS', status: 'connected' });
               dispatch({ type: 'SET_RECONNECT_ATTEMPTS', attempts: 0 });
@@ -365,6 +403,27 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
                 const myPubKey = localStorage.getItem(`wn_pub_${nick}`);
                 if (myId && myPubKey) { publicKeysRef.current[myId] = JSON.parse(myPubKey); publicKeyRef.current = JSON.parse(myPubKey); }
                 else if (myId && message.payload.publicKeys?.[myId]) publicKeyRef.current = message.payload.publicKeys[myId];
+              }
+              {
+                const nick = message.payload.nickname.toLowerCase();
+                const pw = authRef.current?.password;
+                const localBundle = localStorage.getItem(`wn_pk_${nick}`);
+                const serverBlob = await fetchKeyBackup();
+                if (serverBlob && pw) {
+                  try {
+                    const bundle = JSON.parse(serverBlob);
+                    const restored = await decryptPrivateKey(bundle, pw);
+                    privateKeyRef.current = restored;
+                    if (bundle.publicKey) {
+                      publicKeyRef.current = bundle.publicKey;
+                      localStorage.setItem(`wn_pub_${nick}`, JSON.stringify(bundle.publicKey));
+                    }
+                    localStorage.setItem(`wn_pk_${nick}`, serverBlob);
+                  } catch { /* backup unreadable -> fall back to local key below */ }
+                }
+                if (privateKeyRef.current && pw && !serverBlob && localBundle) {
+                  ws.send(JSON.stringify({ type: 'key_backup_upload', payload: { blob: localBundle } }));
+                }
               }
               if (!privateKeyRef.current) dispatch({ type: 'SET_KEY_SETUP_NEEDED', needed: true });
               dispatch({ type: 'SET_E2EE_READY', ready: !!privateKeyRef.current });
@@ -743,14 +802,10 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
                   const bundle = await encryptPrivateKey(keys.privateKey, authRef.current.password);
                   bundle.publicKey = keys.publicKey;
                   localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(bundle));
+                  if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'key_backup_upload', payload: { blob: JSON.stringify(bundle) } }));
                 } else {
                   localStorage.setItem(`wn_pk_${nick}`, JSON.stringify(keys.privateKey));
                 }
-                localStorage.setItem(`wn_pub_${nick}`, JSON.stringify(keys.publicKey));
-                privateKeyRef.current = keys.privateKey;
-                publicKeyRef.current = keys.publicKey;
-                if (userIdRef.current) publicKeysRef.current[userIdRef.current] = keys.publicKey;
-                if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'auth_update_key', payload: { publicKey: keys.publicKey } }));
                 dispatch({ type: 'SET_KEY_SETUP_NEEDED', needed: false });
                 dispatch({ type: 'SET_E2EE_READY', ready: true });
               }} className="w-full py-3 rounded-2xl border border-border-default text-fg-primary font-medium hover:bg-bg-tertiary transition-all">

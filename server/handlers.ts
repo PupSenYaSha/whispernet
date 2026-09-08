@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { appendFileSync } from 'fs';
@@ -21,6 +21,7 @@ function logSecurity(event: string, details: Record<string, any>) {
 }
 
 export interface ConnectedClient {
+  deviceId: string;
   ws: WebSocket;
   userId: string;
   nickname: string;
@@ -28,8 +29,51 @@ export interface ConnectedClient {
   ip: string;
 }
 
+// Keyed by deviceId: a single user account may have several connected devices.
 const clients = new Map<string, ConnectedClient>();
+// userId -> set of currently connected deviceIds (used for fan-out delivery + online status).
+const userDevices = new Map<string, Set<string>>();
 let totalConnections = 0;
+
+// All connected devices that belong to a given user.
+function devicesForUser(userId: string): ConnectedClient[] {
+  const ids = userDevices.get(userId);
+  if (!ids) return [];
+  const out: ConnectedClient[] = [];
+  for (const id of ids) {
+    const c = clients.get(id);
+    if (c) out.push(c);
+  }
+  return out;
+}
+
+function isUserOnline(userId: string): boolean {
+  const ids = userDevices.get(userId);
+  return !!ids && ids.size > 0;
+}
+
+// Register (or reconnect) a device. Replaces any prior socket for the same deviceId.
+function registerDevice(deviceId: string, client: ConnectedClient): void {
+  const prev = clients.get(deviceId);
+  if (prev && prev.ws !== client.ws) {
+    try { prev.ws.close(4001, 'Reconnected from another socket'); } catch {}
+  }
+  clients.set(deviceId, client);
+  if (!userDevices.has(client.userId)) userDevices.set(client.userId, new Set());
+  userDevices.get(client.userId)!.add(deviceId);
+}
+
+// Remove a device from the connection tables (called on disconnect / revoke).
+function unregisterDevice(deviceId: string): void {
+  const client = clients.get(deviceId);
+  if (!client) return;
+  clients.delete(deviceId);
+  const set = userDevices.get(client.userId);
+  if (set) {
+    set.delete(deviceId);
+    if (set.size === 0) userDevices.delete(client.userId);
+  }
+}
 
 export function getTotalConnections(): number {
   return totalConnections;
@@ -176,6 +220,7 @@ function broadcast(message: ServerMessage, excludeUserId?: string): void {
 
 export function handleConnection(ws: WebSocket): void {
   let currentUserId: string | null = null;
+  let currentDeviceId: string | null = null;
   const ip = getClientIp(ws);
   totalConnections++;
 
@@ -210,17 +255,17 @@ export function handleConnection(ws: WebSocket): void {
   });
 
   ws.on('close', () => {
-    handleDisconnect(currentUserId);
+    handleDisconnect(currentDeviceId, currentUserId);
     releaseConnection(ip);
   });
   ws.on('error', () => {
-    handleDisconnect(currentUserId);
+    handleDisconnect(currentDeviceId, currentUserId);
     releaseConnection(ip);
   });
 
   ws.on('pong', () => {
-    if (currentUserId) {
-      const client = clients.get(currentUserId);
+    if (currentDeviceId) {
+      const client = clients.get(currentDeviceId);
       if (client) client.lastHeartbeat = Date.now();
     }
   });
@@ -238,6 +283,12 @@ export function handleConnection(ws: WebSocket): void {
         break;
       case 'dm_send':
         if (userId) await handleDmSend(userId, ws, message.payload);
+        break;
+      case 'key_backup_upload':
+        if (userId) await handleKeyBackupUpload(userId, ws, message.payload);
+        break;
+      case 'key_backup_fetch':
+        if (userId) await handleKeyBackupFetch(userId, ws);
         break;
       case 'sealed_send':
         if (userId) await handleSealedSend(userId, ws, message.payload);
@@ -276,17 +327,17 @@ export function handleConnection(ws: WebSocket): void {
         if (userId) await handlePreKeyFetch(userId, ws, message.payload);
         break;
       case 'heartbeat':
-        if (userId) {
-          const client = clients.get(userId);
+        if (currentDeviceId) {
+          const client = clients.get(currentDeviceId);
           if (client) client.lastHeartbeat = Date.now();
           send(ws, { type: 'heartbeat_ack', payload: {}, timestamp: Date.now() });
         }
         break;
       case 'get_sessions':
-        if (userId) handleGetSessions(userId, ws);
+        if (userId) handleGetSessions(userId, ws, currentDeviceId);
         break;
       case 'revoke_session':
-        if (userId) handleRevokeSession(userId, ws, message.payload);
+        if (userId) handleRevokeSession(userId, ws, message.payload, currentDeviceId);
         break;
       default:
         send(ws, { type: 'error', payload: { code: 'UNKNOWN_MESSAGE', message: 'Unknown message type' }, timestamp: Date.now() });
@@ -342,22 +393,17 @@ export function handleConnection(ws: WebSocket): void {
     logSecurity('LOGIN_SUCCESS', { nickname: cleanNick, ip });
     failedLogins.delete(lockKey);
 
-    const existingClient = clients.get(user.id);
-    if (existingClient && existingClient.ws !== ws) {
-      existingClient.ws.close(4001, 'Logged in from another device');
-      clients.delete(user.id);
-      logSecurity('SESSION_KICKED', { nickname: cleanNick, ip, oldIp: existingClient.ip });
-    }
-
+    const deviceId = typeof payload.deviceId === 'string' && payload.deviceId.length > 0 && payload.deviceId.length <= 64
+      ? payload.deviceId : crypto.randomUUID();
     currentUserId = user.id;
-    const client: ConnectedClient = { ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip };
-    clients.set(user.id, client);
+    currentDeviceId = deviceId;
+    registerDevice(deviceId, { deviceId, ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip });
 
     if (payload.preKeyBundle && isValidPreKeyBundle(payload.preKeyBundle)) {
       await setPreKeyBundle(user.id, payload.preKeyBundle);
     }
 
-    await onAuthenticated(user.id, user.nickname, ws);
+    await onAuthenticated(user.id, user.nickname, ws, deviceId);
   }
 
   async function handleAuthRegister(ws: WebSocket, payload: { nickname: string; password: string; publicKey?: any; preKeyBundle?: any }): Promise<void> {
@@ -411,19 +457,25 @@ export function handleConnection(ws: WebSocket): void {
       await setPreKeyBundle(user.id, payload.preKeyBundle);
     }
 
+    const deviceId = typeof payload.deviceId === 'string' && payload.deviceId.length > 0 && payload.deviceId.length <= 64
+      ? payload.deviceId : crypto.randomUUID();
     currentUserId = user.id;
-    const client: ConnectedClient = { ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip };
-    clients.set(user.id, client);
+    currentDeviceId = deviceId;
+    registerDevice(deviceId, { deviceId, ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip });
 
-    await onAuthenticated(user.id, user.nickname, ws);
+    await onAuthenticated(user.id, user.nickname, ws, deviceId);
   }
 
-  async function onAuthenticated(userId: string, nickname: string, ws: WebSocket): Promise<void> {
+  async function onAuthenticated(userId: string, nickname: string, ws: WebSocket, deviceId?: string): Promise<void> {
     const publicKeys = await getAllPublicKeys();
 
-    const onlineUsers = Array.from(clients.values()).map(c => ({ id: c.userId, nickname: c.nickname }));
+    const seen = new Set<string>();
+    const onlineUsers: { id: string; nickname: string }[] = [];
+    for (const c of clients.values()) {
+      if (!seen.has(c.userId)) { seen.add(c.userId); onlineUsers.push({ id: c.userId, nickname: c.nickname }); }
+    }
 
-    send(ws, { type: 'auth_success', payload: { userId, nickname, publicKeys, preKeyBundles: {}, onlineUsers }, timestamp: Date.now() });
+    send(ws, { type: 'auth_success', payload: { userId, nickname, deviceId, publicKeys, preKeyBundles: {}, onlineUsers }, timestamp: Date.now() });
 
     const history = await getRecentMessages(100);
     send(ws, {
@@ -449,6 +501,23 @@ export function handleConnection(ws: WebSocket): void {
     broadcastSystem(`${nickname} joined the chat`, userId);
   }
 
+  // --- Cross-device key backup (A+C) ---
+  // The client encrypts its private key bundle with a password-derived key and
+  // uploads only the ciphertext. The server never sees the plaintext key.
+  async function handleKeyBackupUpload(userId: string, ws: WebSocket, payload: { blob?: string }): Promise<void> {
+    if (typeof payload?.blob !== 'string' || payload.blob.length === 0 || payload.blob.length > 200000) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Invalid backup blob' }, timestamp: Date.now() });
+      return;
+    }
+    await saveKeyBackup(userId, payload.blob);
+    send(ws, { type: 'key_backup_saved', payload: { ok: true }, timestamp: Date.now() });
+  }
+
+  async function handleKeyBackupFetch(userId: string, ws: WebSocket): Promise<void> {
+    const blob = await getKeyBackup(userId);
+    send(ws, { type: 'key_backup', payload: { blob: blob || null }, timestamp: Date.now() });
+  }
+
   async function handleChatMessage(senderId: string, ws: WebSocket, payload: { text: string; fileKey?: Record<string, string>; ttl?: number }): Promise<void> {
     if (!checkMessageRateLimit(ip) || !checkMessageRateLimit(senderId)) {
       logSecurity('RATE_LIMIT_MESSAGE', { ip, senderId });
@@ -456,7 +525,8 @@ export function handleConnection(ws: WebSocket): void {
       return;
     }
 
-    const sender = clients.get(senderId);
+    const senderDevices = devicesForUser(senderId);
+    const sender = senderDevices[0] || null;
     if (!sender) return;
 
     const text = typeof payload?.text === 'string' ? sanitizeText(payload.text) : '';
@@ -493,7 +563,8 @@ export function handleConnection(ws: WebSocket): void {
       return;
     }
 
-    const sender = clients.get(senderId);
+    const senderDevices = devicesForUser(senderId);
+    const sender = senderDevices[0] || null;
     if (!sender) return;
     if (!payload?.toKey && (!payload?.to || typeof payload.to !== 'string')) {
       send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Missing recipient' }, timestamp: Date.now() });
@@ -524,7 +595,7 @@ export function handleConnection(ws: WebSocket): void {
       return;
     }
 
-    const recipient = clients.get(recipientUser.id);
+    const recipientDevices = devicesForUser(recipientUser.id);
 
     const channelId = getDmChannelId(senderId, recipientUser.id);
     const messageId = crypto.randomUUID();
@@ -540,7 +611,7 @@ export function handleConnection(ws: WebSocket): void {
       await addReaction(messageId, userId, emoji);
       const reactions = await getReactionsForMessage(messageId);
       broadcast({ type: 'reaction_update', payload: { messageId, reactions, userId }, timestamp: Date.now() }, userId);
-      if (recipient) send(recipient.ws, { type: 'reaction_update', payload: { messageId, reactions, userId }, timestamp: Date.now() });
+      for (const dev of recipientDevices) send(dev.ws, { type: 'reaction_update', payload: { messageId, reactions, userId }, timestamp: Date.now() });
       return;
     }
 
@@ -569,8 +640,8 @@ export function handleConnection(ws: WebSocket): void {
       fileKey,
       expiresAt,
     };
-    if (recipient) {
-      send(recipient.ws, { type: 'dm_message', payload: { ...dmPayload, isOwn: false }, timestamp });
+    for (const dev of recipientDevices) {
+      send(dev.ws, { type: 'dm_message', payload: { ...dmPayload, isOwn: false }, timestamp });
     }
     send(ws, { type: 'dm_message', payload: { ...dmPayload, isOwn: true }, timestamp });
   }
@@ -632,15 +703,13 @@ function canonicalJwk(jwk: any): string {
       if (!target) return;
       if (!target.channel || target.channel === 'general') {
         broadcast(message, actorUserId);
-        const sender = clients.get(actorUserId);
-        if (sender) send(sender.ws, message);
+        for (const dev of devicesForUser(actorUserId)) send(dev.ws, message);
         return;
       }
       const parts = target.channel.split(':');
       for (const participantId of parts) {
-        const client = clients.get(participantId);
-        if (client && client.ws.readyState === WebSocket.OPEN) {
-          client.ws.send(JSON.stringify(message));
+        for (const dev of devicesForUser(participantId)) {
+          if (dev.ws.readyState === WebSocket.OPEN) dev.ws.send(JSON.stringify(message));
         }
       }
     })();
@@ -680,7 +749,7 @@ function canonicalJwk(jwk: any): string {
   async function handleDmContacts(userId: string, ws: WebSocket): Promise<void> {
     const contacts = await getDmContacts(userId);
     const publicKeys = await getPublicKeysByIds([userId, ...contacts.map(c => c.id)]);
-    const onlineIds = new Set(Array.from(clients.keys()));
+    const onlineIds = new Set(userDevices.keys());
     const contactsWithOnline = contacts.map(c => ({ ...c, online: onlineIds.has(c.id) }));
     send(ws, { type: 'dm_contacts', payload: { contacts: contactsWithOnline, publicKeys }, timestamp: Date.now() });
   }
@@ -693,7 +762,7 @@ function canonicalJwk(jwk: any): string {
     }
     const allUsers = await getAllUsers();
     const users = allUsers.filter((u: { id: string; nickname: string }) => u.id !== userId);
-    const onlineIds = new Set(Array.from(clients.keys()));
+    const onlineIds = new Set(userDevices.keys());
     const results = users
       .filter((u: { id: string; nickname: string }) => u.nickname.toLowerCase().includes(query))
       .slice(0, 20)
@@ -773,16 +842,16 @@ function canonicalJwk(jwk: any): string {
     send(ws, { type: 'prekey_bundles', payload: { bundles }, timestamp: Date.now() });
   }
 
-  function handleDisconnect(userId: string | null): void {
-    if (!userId) return;
+  function handleDisconnect(deviceId: string | null, userId: string | null): void {
+    if (!deviceId) return;
 
-    const client = clients.get(userId);
-    if (!client) return;
+    const client = clients.get(deviceId);
+    unregisterDevice(deviceId);
 
-    clients.delete(userId);
-
-    broadcast({ type: 'user_left', payload: { userId, nickname: client.nickname }, timestamp: Date.now() });
-    broadcastSystem(`${client.nickname} left the chat`);
+    if (client) {
+      broadcast({ type: 'user_left', payload: { userId: client.userId, nickname: client.nickname }, timestamp: Date.now() });
+      broadcastSystem(`${client.nickname} left the chat`);
+    }
   }
 }
 
@@ -790,38 +859,43 @@ function broadcastSystem(text: string, excludeUserId?: string): void {
   broadcast({ type: 'system_message', payload: { text }, timestamp: Date.now() }, excludeUserId);
 }
 
-function handleGetSessions(userId: string, ws: WebSocket): void {
-  const sessions: { id: string; nickname: string; lastActive: number; current: boolean }[] = [];
-  for (const [uid, client] of clients) {
-    if (uid === userId) {
-      sessions.push({ id: uid, nickname: client.nickname, lastActive: client.lastHeartbeat, current: true });
+  function handleGetSessions(userId: string, ws: WebSocket, currentDeviceId: string | null): void {
+    const sessions: { id: string; nickname: string; lastActive: number; current: boolean }[] = [];
+    for (const [deviceId, client] of clients) {
+      if (client.userId === userId) {
+        sessions.push({ id: deviceId, nickname: client.nickname, lastActive: client.lastHeartbeat, current: deviceId === currentDeviceId });
+      }
     }
+    send(ws, { type: 'sessions_list', payload: { sessions }, timestamp: Date.now() });
   }
-  send(ws, { type: 'sessions_list', payload: { sessions }, timestamp: Date.now() });
-}
 
-function handleRevokeSession(userId: string, ws: WebSocket, payload: { sessionId?: string }): void {
-  const targetId = payload?.sessionId || userId;
-  if (targetId !== userId) {
-    send(ws, { type: 'error', payload: { code: 'FORBIDDEN', message: 'Can only revoke your own sessions' }, timestamp: Date.now() });
-    return;
-  }
-  const target = clients.get(targetId);
-  if (target) {
+  function handleRevokeSession(userId: string, ws: WebSocket, payload: { sessionId?: string }, currentDeviceId: string | null): void {
+    const targetId = payload?.sessionId || currentDeviceId;
+    if (!targetId) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Missing session id' }, timestamp: Date.now() });
+      return;
+    }
+    const target = clients.get(targetId);
+    if (!target) {
+      send(ws, { type: 'error', payload: { code: 'SESSION_NOT_FOUND', message: 'Session not found' }, timestamp: Date.now() });
+      return;
+    }
+    if (target.userId !== userId) {
+      send(ws, { type: 'error', payload: { code: 'FORBIDDEN', message: 'Can only revoke your own sessions' }, timestamp: Date.now() });
+      return;
+    }
     target.ws.close(4001, 'Session revoked');
-    clients.delete(targetId);
+    unregisterDevice(targetId);
     send(ws, { type: 'session_revoked', payload: { sessionId: targetId }, timestamp: Date.now() });
-  } else {
-    send(ws, { type: 'error', payload: { code: 'SESSION_NOT_FOUND', message: 'Session not found' }, timestamp: Date.now() });
   }
-}
 
 export function startHeartbeatCheck(): void {
   setInterval(() => {
     const now = Date.now();
-    for (const [userId, client] of clients) {
+    for (const [deviceId, client] of clients) {
       if (now - client.lastHeartbeat > CLIENT_TIMEOUT) {
         client.ws.terminate();
+        unregisterDevice(deviceId);
       } else if (client.ws.readyState === WebSocket.OPEN) {
         client.ws.ping();
       }

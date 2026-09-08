@@ -11,11 +11,13 @@ let DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
 let USERS_FILE = path.join(DATA_DIR, 'users.json');
 let MESSAGES_FILE = path.join(DATA_DIR, 'messages.json');
 let PREKEYS_FILE = path.join(DATA_DIR, 'prekeys.json');
+let KEYBACKUP_FILE = path.join(DATA_DIR, 'keybackups.json');
 let MEDIA_DIR = path.join(DATA_DIR, 'media');
 
 let usersMutex = { v: false };
 let messagesMutex = { v: false };
 let preKeysMutex = { v: false };
+let keyBackupMutex = { v: false };
 
 try {
   mkdirSync(DATA_DIR, { recursive: true });
@@ -156,6 +158,52 @@ async function loadPreKeyBundles(): Promise<Record<string, StoredPreKeyBundle>> 
 
 async function savePreKeyBundles(bundles: Record<string, StoredPreKeyBundle>): Promise<void> {
   await atomicWrite(PREKEYS_FILE, JSON.stringify(Object.values(bundles), null, 2));
+}
+
+// Encrypted private-key backup (A+C cross-device). The server stores only the
+// ciphertext blob (encrypted client-side with a password-derived key) and never
+// sees the plaintext private key. Used so a new device can restore the same
+// identity and decrypt synced history.
+interface StoredKeyBackup { userId: string; blob: string; updatedAt: number; }
+
+async function loadKeyBackups(): Promise<Record<string, StoredKeyBackup>> {
+  if (!existsSync(KEYBACKUP_FILE)) return {};
+  try {
+    const data = await readFile(KEYBACKUP_FILE, 'utf-8');
+    const parsed = JSON.parse(data);
+    if (!Array.isArray(parsed)) return {};
+    const map: Record<string, StoredKeyBackup> = {};
+    for (const entry of parsed) {
+      if (entry && typeof entry.userId === 'string' && typeof entry.blob === 'string') map[entry.userId] = entry;
+    }
+    return map;
+  } catch {
+    return {};
+  }
+}
+
+async function saveKeyBackups(map: Record<string, StoredKeyBackup>): Promise<void> {
+  await atomicWrite(KEYBACKUP_FILE, JSON.stringify(Object.values(map), null, 2));
+}
+
+export async function saveKeyBackup(userId: string, blob: string): Promise<void> {
+  return withMutex(keyBackupMutex, async () => {
+    const map = await loadKeyBackups();
+    map[userId] = { userId, blob, updatedAt: Date.now() };
+    await saveKeyBackups(map);
+  });
+}
+
+export async function getKeyBackup(userId: string): Promise<string | null> {
+  const map = await loadKeyBackups();
+  return map[userId]?.blob || null;
+}
+
+export async function deleteKeyBackup(userId: string): Promise<void> {
+  return withMutex(keyBackupMutex, async () => {
+    const map = await loadKeyBackups();
+    if (map[userId]) { delete map[userId]; await saveKeyBackups(map); }
+  });
 }
 
 async function loadUsers(): Promise<StoredUser[]> {
