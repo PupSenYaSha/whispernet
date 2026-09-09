@@ -4,11 +4,8 @@
       <stop offset="0%" style="stop-color:#8b5cf6;stop-opacity:1" />
       <stop offset="100%" style="stop-color:#6d28d9;stop-opacity:1" />
     </linearGradient>
-    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
-      <feDropShadow dx="0" dy="4" stdDeviation="12" flood-color="#8b5cf6" flood-opacity="0.3"/>
-    </filter>
   </defs>
-  <rect width="512" height="512" rx="112" fill="url(#grad)" filter="url(#shadow)"/>
-  <path d="M116 312L156 152L196 252L256 128L316 252L356 152L396 312" stroke="white" stroke-width="16" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
-  <circle cx="256" cy="368" r="14" fill="white" opacity="0.7"/>
+  <rect width="512" height="512" rx="119.5" fill="url(#grad)"/>
+  <path d="M128 320L179.2 170.7L230.4 277.3L281.6 149.3L332.8 277.3L384 170.7L384 320" stroke="white" stroke-width="21.3" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+  <circle cx="256" cy="375.5" r="17.1" fill="white" opacity="0.6"/>
 </svg>

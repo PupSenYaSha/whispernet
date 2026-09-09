@@ -295,7 +295,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     if (!state.settings.notifications) return;
     if (!document.hidden) return;
     if (Notification.permission !== 'granted') return;
-    try { new Notification(title, { body, icon: '/favicon.ico', tag: 'whispernet' }); } catch {}
+    try { new Notification(title, { body, icon: '/icons/icon-192.png', tag: 'whispernet' }); } catch {}
   }, [state.settings.notifications]);
 
   const playNotifSound = useCallback(() => {

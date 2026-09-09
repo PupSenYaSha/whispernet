@@ -48,9 +48,16 @@ const ERROR_HTML = `<!DOCTYPE html>
   <div class="icon">
     <div class="ring"></div>
     <div class="ring2"></div>
-    <svg viewBox="0 0 24 24" fill="none" stroke="#8b5cf6" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M12 9v4m0 4h.01"/>
-      <path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/>
+    <svg viewBox="0 0 120 120" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <linearGradient id="lg" x1="0%" y1="0%" x2="100%" y2="100%">
+          <stop offset="0%" stop-color="#8b5cf6"/>
+          <stop offset="100%" stop-color="#6d28d9"/>
+        </linearGradient>
+      </defs>
+      <rect width="120" height="120" rx="28" fill="url(#lg)"/>
+      <path d="M30 75L42 40L54 65L66 35L78 65L90 40L90 75" stroke="white" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+      <circle cx="60" cy="88" r="4" fill="white" opacity="0.6"/>
     </svg>
   </div>
   <h1>Сервер временно недоступен</h1>
