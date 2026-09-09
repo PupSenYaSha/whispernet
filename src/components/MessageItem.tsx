@@ -263,7 +263,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
             </span>
           </div>
           {reactionEntries.length > 0 && (
-            <div className="flex items-center gap-1 flex-wrap mt-0.5 px-1">
+            <div className="flex items-center gap-1 flex-wrap mt-0.5 px-1 self-start max-w-[240px]">
               {reactionEntries.map(({ emoji, count, hasOwn }) => (
                 <span
                   key={emoji}
