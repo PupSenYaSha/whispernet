@@ -250,21 +250,6 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
                 </svg>
               </button>
             )}
-            {reactionEntries.length > 0 && (
-              <div className="flex items-center gap-1 flex-wrap">
-                {reactionEntries.map(({ emoji, count, hasOwn }) => (
-                  <span
-                    key={emoji}
-                    className={`inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-[11px] transition-colors ${
-                      hasOwn ? 'bg-accent-primary/20 text-accent-primary' : 'bg-bg-tertiary text-fg-muted'
-                    }`}
-                  >
-                    <span>{emoji}</span>
-                    <span>{count}</span>
-                  </span>
-                ))}
-              </div>
-            )}
             <span className="text-[10px] text-fg-subtle ml-auto">
               {formatTime(message.timestamp)}
               {message.editedAt && (
@@ -277,6 +262,21 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
               )}
             </span>
           </div>
+          {reactionEntries.length > 0 && (
+            <div className="flex items-center gap-1 flex-wrap mt-0.5 px-1">
+              {reactionEntries.map(({ emoji, count, hasOwn }) => (
+                <span
+                  key={emoji}
+                  className={`inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-[11px] transition-colors ${
+                    hasOwn ? 'bg-accent-primary/20 text-accent-primary' : 'bg-bg-tertiary text-fg-muted'
+                  }`}
+                >
+                  <span>{emoji}</span>
+                  <span>{count}</span>
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
