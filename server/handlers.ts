@@ -50,7 +50,23 @@ async function ensureSessionRegistry(): Promise<void> {
       }
     })();
   }
-  return sessionRegistryPromise;
+  await sessionRegistryPromise;
+  reconcileActiveSessions();
+}
+
+// Self-healing migration: any device with a live socket is guaranteed to be
+// represented in the persisted registry as an active (non-revoked) session.
+// This covers devices that logged in before the registry existed, so the
+// per-user cap always counts every active session, not just the online ones
+// that were recorded after the registry feature shipped.
+function reconcileActiveSessions(): void {
+  for (const client of clients.values()) {
+    const m = sessionRecords.get(client.userId);
+    const rec = m?.get(client.deviceId);
+    if (!rec || rec.revoked) {
+      registerSession({ userId: client.userId, deviceId: client.deviceId, nickname: client.nickname, deviceInfo: client.deviceInfo || '', firstSeen: rec?.firstSeen || client.lastHeartbeat, lastActive: client.lastHeartbeat, revoked: false });
+    }
+  }
 }
 
 function registerSession(record: StoredSession): void {
