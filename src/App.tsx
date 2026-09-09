@@ -7,7 +7,7 @@ import { encryptPassword, decryptPassword } from './device-crypto';
 import { uploadFile } from './upload';
 import { encryptFile, buildFileKeyMap, unwrapAndDecrypt, wrapForMedia } from './media-crypto';
 import { ConnectionContext, useConnection, type ConnectionState, type ConnectionAction, type ReplyTarget, type AdminReport } from './context';
-import { loadSettings, defaultSettings, translations, cn, getAvatarText, getAvatarGradient, formatTime, getDeviceName } from './utils';
+import { loadSettings, defaultSettings, translations, cn, getAvatarText, getAvatarGradient, formatTime, getDeviceLabel } from './utils';
 
 declare const __APP_VERSION__: string;
 import {
@@ -208,8 +208,13 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   }));
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const heartbeatWsRef = useRef<WebSocket | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const authRef = useRef<{ nickname: string; password: string; isRegister: boolean } | null>(null);
+  // Kept (not cleared) after auth_success so ws.onclose can auto-reconnect with
+  // the same credentials. authRef stays for UI flows (key setup / import).
+  const credentialsRef = useRef<{ nickname: string; password: string; isRegister: boolean } | null>(null);
+  const reconnectAttemptsRef = useRef(0);
   const userIdRef = useRef<string | null>(null);
   const privateKeyRef = useRef<JsonWebKey | null>(null);
   const publicKeyRef = useRef<JsonWebKey | null>(null);
@@ -418,6 +423,8 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const connect = useCallback((nickname: string, password: string, isRegister: boolean) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
     authRef.current = { nickname, password, isRegister };
+    credentialsRef.current = { nickname, password, isRegister };
+    reconnectAttemptsRef.current = 0;
     dispatch({ type: 'SET_STATUS', status: 'connecting' });
     dispatch({ type: 'SET_AUTH_ERROR', error: null });
     dispatch({ type: 'SET_RECONNECT_ATTEMPTS', attempts: 0 });
@@ -429,6 +436,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
 
       ws.onopen = async () => {
         const auth = authRef.current;
+        const deviceInfo = await getDeviceLabel();
         if (auth) {
           const nick = auth.nickname.toLowerCase();
           if (auth.isRegister) {
@@ -444,7 +452,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
             await initPreKeyManager(auth.password);
             signalInitializedRef.current = true;
             const preKeyBundle = getPreKeyBundleForServer();
-            ws.send(JSON.stringify({ type: 'auth_register', payload: { nickname: auth.nickname, password: auth.password, publicKey: keys.publicKey, preKeyBundle, deviceId: getDeviceId(), deviceInfo: getDeviceName() } }));
+            ws.send(JSON.stringify({ type: 'auth_register', payload: { nickname: auth.nickname, password: auth.password, publicKey: keys.publicKey, preKeyBundle, deviceId: getDeviceId(), deviceInfo } }));
           } else {
             let savedKey = localStorage.getItem(`wn_pk_${nick}`);
             let savedPubKey = localStorage.getItem(`wn_pub_${nick}`);
@@ -475,7 +483,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
             await initPreKeyManager(auth.password);
             signalInitializedRef.current = true;
             const preKeyBundle = getPreKeyBundleForServer();
-            ws.send(JSON.stringify({ type: 'auth_login', payload: { nickname: auth.nickname, password: auth.password, preKeyBundle, deviceId: getDeviceId(), deviceInfo: getDeviceName() } }));
+            ws.send(JSON.stringify({ type: 'auth_login', payload: { nickname: auth.nickname, password: auth.password, preKeyBundle, deviceId: getDeviceId(), deviceInfo } }));
           }
         }
       };
@@ -538,10 +546,10 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
                 const savedPubKey = localStorage.getItem(`wn_pub_${nick}`);
                 if (savedPubKey) ws.send(JSON.stringify({ type: 'auth_update_key', payload: { publicKey: JSON.parse(savedPubKey) } }));
               }
+              heartbeatWsRef.current = ws;
               heartbeatIntervalRef.current = setInterval(() => {
                 if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'heartbeat', payload: {} }));
               }, 15000);
-              authRef.current = null;
               ws.send(JSON.stringify({ type: 'dm_contacts', payload: {} }));
               break;
             case 'auth_failure':
@@ -696,18 +704,28 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
       };
 
       ws.onclose = () => {
-        if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
-        wsRef.current = null;
-        dispatch({ type: 'SET_WS', ws: null });
-        if (userIdRef.current) {
-          const attempts = state.reconnectAttempts;
+        if (heartbeatWsRef.current === ws) {
+          if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+          heartbeatIntervalRef.current = null;
+          heartbeatWsRef.current = null;
+        }
+        if (wsRef.current === ws) {
+          wsRef.current = null;
+          dispatch({ type: 'SET_WS', ws: null });
+        } else {
+          return; // stale socket superseded by a newer attempt
+        }
+        const creds = credentialsRef.current;
+        if (userIdRef.current && creds) {
+          const attempts = reconnectAttemptsRef.current;
           if (attempts < 10) {
             dispatch({ type: 'SET_STATUS', status: 'reconnecting' });
             const delay = Math.min(2000 * Math.pow(2, attempts), 30000);
+            reconnectAttemptsRef.current = attempts + 1;
             dispatch({ type: 'SET_RECONNECT_ATTEMPTS', attempts: attempts + 1 });
             reconnectTimeoutRef.current = setTimeout(() => {
-              const auth = authRef.current;
-              if (auth) connect(auth.nickname, auth.password, auth.isRegister);
+              const c = credentialsRef.current;
+              if (c && userIdRef.current) connect(c.nickname, c.password, c.isRegister);
             }, delay);
           } else {
             dispatch({ type: 'SET_STATUS', status: 'disconnected' });
@@ -723,18 +741,52 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // Resume connectivity: when the app comes back to the foreground (or the
+  // network returns), reconnect immediately if the socket went stale, and probe
+  // with a heartbeat so a silently-dead socket fails fast and gets re-established.
+  useEffect(() => {
+    const kick = () => {
+      if (document.hidden) return;
+      if (!userIdRef.current || !credentialsRef.current) return;
+      if (reconnectTimeoutRef.current) { clearTimeout(reconnectTimeoutRef.current); reconnectTimeoutRef.current = null; }
+      const ws = wsRef.current;
+      if (ws && ws.readyState === WebSocket.CONNECTING) return;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ type: 'heartbeat', payload: {} })); } catch {}
+        return;
+      }
+      const c = credentialsRef.current;
+      dispatch({ type: 'SET_STATUS', status: 'connecting' });
+      reconnectAttemptsRef.current = 0;
+      dispatch({ type: 'SET_RECONNECT_ATTEMPTS', attempts: 0 });
+      connect(c.nickname, c.password, c.isRegister);
+    };
+    const onVis = () => { if (!document.hidden) kick(); };
+    const onOnline = () => kick();
+    document.addEventListener('visibilitychange', onVis);
+    window.addEventListener('online', onOnline);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      window.removeEventListener('online', onOnline);
+    };
+  }, [connect]);
+
   const disconnect = useCallback(() => {
     if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
     if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
+    heartbeatIntervalRef.current = null;
+    heartbeatWsRef.current = null;
     authRef.current = null;
+    credentialsRef.current = null;
+    reconnectAttemptsRef.current = 0;
     userIdRef.current = null;
     if (wsRef.current) { wsRef.current.close(1000, 'User disconnected'); wsRef.current = null; dispatch({ type: 'SET_WS', ws: null }); }
     dispatch({ type: 'SET_STATUS', status: 'disconnected' });
   }, []);
 
   const reconnect = useCallback(() => {
-    const auth = authRef.current;
-    if (auth) { dispatch({ type: 'SET_RECONNECT_ATTEMPTS', attempts: 0 }); connect(auth.nickname, auth.password, auth.isRegister); }
+    const creds = credentialsRef.current;
+    if (creds) { dispatch({ type: 'SET_RECONNECT_ATTEMPTS', attempts: 0 }); reconnectAttemptsRef.current = 0; connect(creds.nickname, creds.password, creds.isRegister); }
   }, [connect]);
 
   const logout = useCallback(() => {
@@ -1050,6 +1102,25 @@ function AppInner() {
     return () => { try { backHandler?.remove?.(); } catch {} };
   }, []);
 
+  // Web / PWA swipe-back: entering a chat or settings pushes a history entry, so
+  // the system back gesture (Android edge swipe) pops it and closes the view.
+  const pushView = useCallback((kind: 'chat' | 'settings') => {
+    try { window.history.pushState({ wn: kind }, ''); } catch {}
+  }, []);
+
+  const popView = useCallback(() => {
+    try { window.history.back(); } catch {}
+  }, []);
+
+  useEffect(() => {
+    const onBackNav = () => {
+      if (mobileChatOpenRef.current) { setMobileChatOpen(false); setSearchQuery(''); return; }
+      if (mobileTabRef.current === 'settings') { setMobileTab('home'); setSearchQuery(''); }
+    };
+    window.addEventListener('popstate', onBackNav);
+    return () => window.removeEventListener('popstate', onBackNav);
+  }, []);
+
   if (state.status !== 'connected' && state.userId) {
     const isDisconnected = state.status === 'disconnected';
     return (
@@ -1120,7 +1191,7 @@ function AppInner() {
                 {searchQuery.trim().length === 0 && (
                   <>
                     <div className="px-3 pb-2">
-                      <button onClick={() => { openGeneral(); setMobileChatOpen(true); }}
+                      <button onClick={() => { openGeneral(); setMobileChatOpen(true); pushView('chat'); }}
                         className="w-full flex items-center gap-4 px-4 py-4 rounded-2xl transition-all text-left hover:bg-bg-tertiary">
                         <div className="w-14 h-14 rounded-2xl bg-accent-primary/20 flex items-center justify-center flex-shrink-0">
                           <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2">
@@ -1143,7 +1214,7 @@ function AppInner() {
                           const userOnline = state.users.some(u => u.id === contact.id);
                           return (
                             <button key={contact.id}
-                              onClick={() => { openDm(contact.id, contact.nickname); setMobileChatOpen(true); }}
+                              onClick={() => { openDm(contact.id, contact.nickname); setMobileChatOpen(true); pushView('chat'); }}
                               className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left hover:bg-bg-tertiary text-fg-primary">
                               <div className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 relative shadow-sm"
                                 style={{ background: getAvatarGradient(contact.nickname) }}>
@@ -1171,7 +1242,7 @@ function AppInner() {
                     </div>
                     {state.searchResults.map(user => (
                       <button key={user.id}
-                        onClick={() => { openDm(user.id, user.nickname); setMobileChatOpen(true); setSearchQuery(''); }}
+                        onClick={() => { openDm(user.id, user.nickname); setMobileChatOpen(true); setSearchQuery(''); pushView('chat'); }}
                         className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left hover:bg-bg-tertiary text-fg-primary">
                         <div className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 relative shadow-sm"
                           style={{ background: getAvatarGradient(user.nickname) }}>
@@ -1202,20 +1273,20 @@ function AppInner() {
 
           {mobileChatOpen && (
             <div className={cn('h-full flex flex-col', mobileTab === 'home' ? 'animate-slide-right' : 'hidden')}>
-              <ChatArea showContacts={false} isMobile onBack={() => setMobileChatOpen(false)} />
+              <ChatArea showContacts={false} isMobile onBack={() => { setMobileChatOpen(false); if (window.history.state?.wn) popView(); }} />
             </div>
           )}
 
           {mobileTab === 'settings' && (
             <div className="h-full overflow-y-auto bg-bg-secondary">
-              <SettingsPanel onClose={() => setMobileTab('home')} inline />
+              <SettingsPanel onClose={() => { setMobileTab('home'); if (window.history.state?.wn) popView(); }} inline />
             </div>
           )}
         </div>
 
         {!mobileChatOpen && (
           <nav className="flex items-center justify-around border-t border-border-default bg-bg-secondary px-2 pb-safe">
-            <button onClick={() => { setMobileTab('home'); setMobileChatOpen(false); setSearchQuery(''); }}
+            <button onClick={() => { setMobileTab('home'); setMobileChatOpen(false); setSearchQuery(''); if (window.history.state?.wn) popView(); }}
               className={cn('flex flex-col items-center gap-0.5 py-2 px-6 rounded-xl transition-all duration-200', mobileTab === 'home' ? 'text-accent-primary' : 'text-fg-muted')}>
               <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
@@ -1223,7 +1294,7 @@ function AppInner() {
               </svg>
               <span className="text-[10px] font-medium">{t('home')}</span>
             </button>
-            <button onClick={() => { setMobileTab('settings'); setMobileChatOpen(false); }}
+            <button onClick={() => { setMobileTab('settings'); setMobileChatOpen(false); pushView('settings'); }}
               className={cn('flex flex-col items-center gap-0.5 py-2 px-6 rounded-xl transition-all duration-200', mobileTab === 'settings' ? 'text-accent-primary' : 'text-fg-muted')}>
               <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <circle cx="12" cy="12" r="3" />

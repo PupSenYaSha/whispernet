@@ -15,25 +15,80 @@ export function cn(...classes: (string | boolean | undefined | null)[]): string 
   return classes.filter(Boolean).join(' ');
 }
 
-// Short, human-readable device label for the Sessions list, e.g. "Chrome · Windows 11".
+// Short, human-readable device label for the Sessions list, e.g.
+// "Chrome 126 · Windows 11" or "WhisperNet Desktop · macOS 14.5".
+// Async variant tries User-Agent Client Hints (navigator.userAgentData) for
+// exact OS/version info; falls back to the sync UA parser after 800ms.
+export async function getDeviceLabel(): Promise<string> {
+  let high: any;
+  try {
+    const uad = (navigator as any).userAgentData;
+    if (uad && typeof uad.getHighEntropyValues === 'function') {
+      high = await Promise.race([
+        uad.getHighEntropyValues(['platformVersion', 'model', 'uaFullVersion', 'platform']),
+        new Promise((resolve) => setTimeout(() => resolve(undefined), 800)),
+      ]);
+    }
+  } catch { high = undefined; }
+  return deviceLabel(navigator.userAgent, high);
+}
+
 export function getDeviceName(ua: string = navigator.userAgent): string {
+  return deviceLabel(ua, undefined);
+}
+
+function deviceLabel(ua: string, high?: any): string {
   const lower = ua.toLowerCase();
+
   let browser = 'Web';
   if (/edg\//.test(lower)) browser = 'Edge';
   else if (/opr\/|opera/.test(lower)) browser = 'Opera';
+  else if (/samsungbrowser\//.test(lower)) browser = 'Samsung Internet';
   else if (/chrome\//.test(lower) && !/chromium/.test(lower)) browser = 'Chrome';
   else if (/chromium/.test(lower)) browser = 'Chromium';
   else if (/firefox\//.test(lower)) browser = 'Firefox';
   else if (/safari\//.test(lower)) browser = 'Safari';
+  const browserVer = (lower.match(/edg\/(\d+)|opr\/(\d+)|chrome\/(\d+)|firefox\/(\d+)/) || []);
+  if (browserVer[1] || browserVer[2] || browserVer[3] || browserVer[4]) {
+    browser += ' ' + (browserVer[1] || browserVer[2] || browserVer[3] || browserVer[4]);
+  }
 
   let os = 'Desktop';
-  if (/iphone|ipad|ipod/.test(lower)) os = 'iPhone/iPad';
-  else if (/windows nt 10/.test(lower)) os = 'Windows 10/11';
-  else if (/windows nt 6\.[1-3]/.test(lower)) os = 'Windows';
-  else if (/android/.test(lower)) os = 'Android';
-  else if (/mac os x|macintosh/.test(lower)) os = 'macOS';
-  else if (/linux/.test(lower)) os = 'Linux';
+  const platform = (high && high.platform) || (navigator as any).userAgentData?.platform || '';
 
+  if (/android/.test(lower) || platform === 'Android') {
+    const ver = (lower.match(/android (\d+(?:\.\d+)?)/) || [])[1] || '';
+    const m = ua.match(/Android[\d.]*[;\s]+([^;]+?)(?:\s+Build[^;)]*)?\)/i);
+    let model = (m && m[1].trim()) || '';
+    if (!model && high && typeof high.model === 'string' && high.model) model = high.model;
+    model = model.replace(/_/g, ' ').trim();
+    os = ver ? `Android ${ver}` : 'Android';
+    if (model && !/build/i.test(model)) os += ` · ${model}`;
+  } else if (/iphone|ipad|ipod/.test(lower) || platform === 'iPhone' || platform === 'iPad' || platform === 'iPod') {
+    const vm = (lower.match(/os (\d+)(?:_(\d+))?/) || []);
+    const ver = vm[1] ? ` ${vm[1]}` + (vm[2] ? `.${vm[2]}` : '') : '';
+    let model = 'iPhone';
+    if (platform === 'iPad' || /ipad/.test(lower)) model = 'iPad';
+    else if (/ipod/.test(lower)) model = 'iPod';
+    os = `${model} iOS${ver}`;
+  } else if (/windows nt 10/.test(lower) || platform === 'Win32') {
+    const pv = high && typeof high.platformVersion === 'string' ? high.platformVersion : '';
+    const major = parseInt(pv.split('.')[0], 10);
+    if (pv && major >= 15) os = 'Windows 11';
+    else if (pv && major >= 13) os = 'Windows 10';
+    else os = 'Windows 10/11';
+  } else if (/windows nt/.test(lower) || /windows\s*win/.test(lower)) {
+    os = 'Windows';
+  } else if (/mac os x|macintosh/.test(lower) || platform === 'macOS') {
+    const m = lower.match(/mac os x (\d+)[._](\d+)/);
+    os = 'macOS' + (m ? ` ${m[1]}.${m[2]}` : '');
+  } else if (/linux/.test(lower) || platform === 'Linux') {
+    os = 'Linux';
+  }
+
+  if ((window as any).electronAPI) {
+    return os === 'Desktop' ? 'WhisperNet Desktop' : `WhisperNet Desktop · ${os}`;
+  }
   return `${browser} · ${os}`;
 }
 

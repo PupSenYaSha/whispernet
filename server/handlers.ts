@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, type StoredSession } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { appendFileSync } from 'fs';
@@ -34,6 +34,37 @@ export interface ConnectedClient {
 const clients = new Map<string, ConnectedClient>();
 // userId -> set of currently connected deviceIds (used for fan-out delivery + online status).
 const userDevices = new Map<string, Set<string>>();
+// Persisted registry of every device that has ever logged in (userId -> deviceId -> record).
+// Loaded lazily on first auth; updated on login / disconnect / revoke.
+const sessionRecords = new Map<string, Map<string, StoredSession>>();
+let sessionRegistryPromise: Promise<void> | null = null;
+
+async function ensureSessionRegistry(): Promise<void> {
+  if (!sessionRegistryPromise) {
+    sessionRegistryPromise = (async () => {
+      const all = await getAllSessions();
+      for (const rec of all) {
+        let m = sessionRecords.get(rec.userId);
+        if (!m) { m = new Map(); sessionRecords.set(rec.userId, m); }
+        m.set(rec.deviceId, rec);
+      }
+    })();
+  }
+  return sessionRegistryPromise;
+}
+
+function registerSession(record: StoredSession): void {
+  let m = sessionRecords.get(record.userId);
+  if (!m) { m = new Map(); sessionRecords.set(record.userId, m); }
+  m.set(record.deviceId, record);
+  void upsertSession(record).catch(() => {});
+}
+
+function sessionLastActive(userId: string, deviceId: string, ts: number): void {
+  const m = sessionRecords.get(userId);
+  const rec = m?.get(deviceId);
+  if (rec) rec.lastActive = ts;
+}
 let totalConnections = 0;
 
 // All connected devices that belong to a given user.
@@ -67,13 +98,17 @@ function registerDevice(deviceId: string, client: ConnectedClient): void {
   userDevices.get(client.userId)!.add(deviceId);
 }
 
-// True when a *new* device (one that isn't already connected for this user)
-// would push the user past MAX_SESSIONS_PER_USER.
-function sessionCapReached(userId: string, deviceId: string | null): boolean {
-  const devs = userDevices.get(userId);
-  if (!devs) return false;
-  if (deviceId && devs.has(deviceId)) return false; // reconnecting an existing device
-  return devs.size >= MAX_SESSIONS_PER_USER;
+// True when a *new* device (one that has never logged in before) would push the
+// user past MAX_SESSIONS_PER_USER. Counts persisted, non-revoked sessions, so the
+// cap keeps applying across restarts and to previously-seen (offline) devices.
+async function sessionCapReached(userId: string, deviceId: string | null): Promise<boolean> {
+  await ensureSessionRegistry();
+  const reg = sessionRecords.get(userId);
+  if (!reg) return false;
+  if (deviceId && reg.has(deviceId)) return false; // reconnecting a known device
+  let active = 0;
+  for (const rec of reg.values()) if (!rec.revoked) active++;
+  return active >= MAX_SESSIONS_PER_USER;
 }
 
 // Remove a device from the connection tables (called on disconnect / revoke).
@@ -440,12 +475,14 @@ export function handleConnection(ws: WebSocket): void {
     const deviceId = typeof payload.deviceId === 'string' && payload.deviceId.length > 0 && payload.deviceId.length <= 64
       ? payload.deviceId : crypto.randomUUID();
 
-    if (sessionCapReached(user.id, deviceId)) {
+    if (await sessionCapReached(user.id, deviceId)) {
       logSecurity('SESSION_LIMIT', { nickname: cleanNick, ip, deviceId });
       send(ws, { type: 'auth_failure', payload: { reason: `Session limit reached (${MAX_SESSIONS_PER_USER} max). Log out on another device or revoke one in Settings.` }, timestamp: Date.now() });
       return;
     }
 
+    const now = Date.now();
+    registerSession({ userId: user.id, deviceId, nickname: user.nickname, deviceInfo: typeof payload?.deviceInfo === 'string' ? payload.deviceInfo.slice(0, 60) : '', firstSeen: now, lastActive: now, revoked: false });
     currentUserId = user.id;
     currentDeviceId = deviceId;
     registerDevice(deviceId, { deviceId, ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip, deviceInfo: typeof payload?.deviceInfo === 'string' ? payload.deviceInfo.slice(0, 60) : '' });
@@ -510,6 +547,7 @@ export function handleConnection(ws: WebSocket): void {
 
     const deviceId = typeof payload.deviceId === 'string' && payload.deviceId.length > 0 && payload.deviceId.length <= 64
       ? payload.deviceId : crypto.randomUUID();
+    registerSession({ userId: user.id, deviceId, nickname: user.nickname, deviceInfo: typeof payload?.deviceInfo === 'string' ? payload.deviceInfo.slice(0, 60) : '', firstSeen: Date.now(), lastActive: Date.now(), revoked: false });
     currentUserId = user.id;
     currentDeviceId = deviceId;
     registerDevice(deviceId, { deviceId, ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip, deviceInfo: typeof payload?.deviceInfo === 'string' ? payload.deviceInfo.slice(0, 60) : '' });
@@ -936,6 +974,8 @@ function canonicalJwk(jwk: any): string {
     unregisterDevice(deviceId);
 
     if (client) {
+      sessionLastActive(client.userId, deviceId, Date.now());
+      void touchSession(client.userId, deviceId).catch(() => {});
       broadcast({ type: 'user_left', payload: { userId: client.userId, nickname: client.nickname }, timestamp: Date.now() });
       broadcastSystem(`${client.nickname} left the chat`);
     }
@@ -946,17 +986,28 @@ function broadcastSystem(text: string, excludeUserId?: string): void {
   broadcast({ type: 'system_message', payload: { text }, timestamp: Date.now() }, excludeUserId);
 }
 
-  function handleGetSessions(userId: string, ws: WebSocket, currentDeviceId: string | null): void {
-    const sessions: { id: string; nickname: string; name: string; lastActive: number; current: boolean }[] = [];
-    for (const [deviceId, client] of clients) {
-      if (client.userId === userId) {
-        sessions.push({ id: deviceId, nickname: client.nickname, name: client.deviceInfo || '', lastActive: client.lastHeartbeat, current: deviceId === currentDeviceId });
+  async function handleGetSessions(userId: string, ws: WebSocket, currentDeviceId: string | null): Promise<void> {
+    await ensureSessionRegistry();
+    const reg = sessionRecords.get(userId);
+    const sessions: { id: string; nickname: string; name: string; lastActive: number; current: boolean; online: boolean }[] = [];
+    if (reg) {
+      const sorted = [...reg.values()].filter(s => !s.revoked).sort((a, b) => b.lastActive - a.lastActive);
+      for (const rec of sorted) {
+        const live = clients.get(rec.deviceId);
+        sessions.push({
+          id: rec.deviceId,
+          nickname: rec.nickname,
+          name: live?.deviceInfo || rec.deviceInfo || '',
+          lastActive: live?.lastHeartbeat || rec.lastActive,
+          current: rec.deviceId === currentDeviceId,
+          online: !!live,
+        });
       }
     }
     send(ws, { type: 'sessions_list', payload: { sessions }, timestamp: Date.now() });
   }
 
-  function handleRevokeSession(userId: string, ws: WebSocket, payload: { sessionId?: string }, currentDeviceId: string | null): void {
+  async function handleRevokeSession(userId: string, ws: WebSocket, payload: { sessionId?: string }, currentDeviceId: string | null): Promise<void> {
     const targetId = payload?.sessionId || currentDeviceId;
     if (!targetId) {
       send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Missing session id' }, timestamp: Date.now() });
@@ -971,6 +1022,9 @@ function broadcastSystem(text: string, excludeUserId?: string): void {
       send(ws, { type: 'error', payload: { code: 'FORBIDDEN', message: 'Can only revoke your own sessions' }, timestamp: Date.now() });
       return;
     }
+    const m = sessionRecords.get(target.userId);
+    if (m) { const rec = m.get(targetId); if (rec) rec.revoked = true; }
+    void markSessionRevoked(target.userId, targetId).catch(() => {});
     target.ws.close(4001, 'Session revoked');
     unregisterDevice(targetId);
     send(ws, { type: 'session_revoked', payload: { sessionId: targetId }, timestamp: Date.now() });

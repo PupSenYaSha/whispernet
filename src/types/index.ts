@@ -34,6 +34,7 @@ export interface Session {
   name: string;
   lastActive: number;
   current: boolean;
+  online?: boolean;
 }
 
 export interface BannedUser {

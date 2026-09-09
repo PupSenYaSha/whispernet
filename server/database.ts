@@ -13,6 +13,7 @@ let MESSAGES_FILE = path.join(DATA_DIR, 'messages.json');
 let PREKEYS_FILE = path.join(DATA_DIR, 'prekeys.json');
 let KEYBACKUP_FILE = path.join(DATA_DIR, 'keybackups.json');
 let REPORTS_FILE = path.join(DATA_DIR, 'reports.json');
+let SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 let ADMINS_FILE = path.join(DATA_DIR, 'admins.json');
 let MEDIA_DIR = path.join(DATA_DIR, 'media');
 
@@ -21,6 +22,7 @@ let messagesMutex = { v: false };
 let preKeysMutex = { v: false };
 let keyBackupMutex = { v: false };
 let reportsMutex = { v: false };
+let sessionsMutex = { v: false };
 let adminsMutex = { v: false };
 
 try {
@@ -68,6 +70,7 @@ export function setDataDir(dir: string): void {
   PREKEYS_FILE = path.join(DATA_DIR, 'prekeys.json');
   KEYBACKUP_FILE = path.join(DATA_DIR, 'keybackups.json');
   REPORTS_FILE = path.join(DATA_DIR, 'reports.json');
+  SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
   ADMINS_FILE = path.join(DATA_DIR, 'admins.json');
   MEDIA_DIR = path.join(DATA_DIR, 'media');
   mkdirSync(DATA_DIR, { recursive: true });
@@ -653,6 +656,70 @@ export async function removeReportsForTarget(targetId: string): Promise<number> 
     const removed = reports.length - remaining.length;
     if (removed > 0) await saveReports(remaining);
     return removed;
+  });
+}
+
+// --- Persisted session registry ---
+// Records every device that has logged in to an account (not just the currently
+// connected ones). Survives server restarts so the Sessions screen can list
+// offline devices and the per-user cap keeps counting revoked-free sessions.
+
+export interface StoredSession {
+  userId: string;
+  deviceId: string;
+  nickname: string;
+  deviceInfo: string;
+  firstSeen: number;
+  lastActive: number;
+  revoked: boolean;
+}
+
+async function loadSessions(): Promise<StoredSession[]> {
+  if (!existsSync(SESSIONS_FILE)) return [];
+  try {
+    const data = await readFile(SESSIONS_FILE, 'utf-8');
+    const parsed = JSON.parse(data);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+async function saveSessions(sessions: StoredSession[]): Promise<void> {
+  await atomicWrite(SESSIONS_FILE, JSON.stringify(sessions, null, 2));
+}
+
+export async function getAllSessions(): Promise<StoredSession[]> {
+  return loadSessions();
+}
+
+export async function upsertSession(record: StoredSession): Promise<void> {
+  return withMutex(sessionsMutex, async () => {
+    const all = await loadSessions();
+    const idx = all.findIndex(s => s.userId === record.userId && s.deviceId === record.deviceId);
+    if (idx >= 0) all[idx] = record;
+    else all.push(record);
+    await saveSessions(all);
+  });
+}
+
+export async function markSessionRevoked(userId: string, deviceId: string): Promise<void> {
+  return withMutex(sessionsMutex, async () => {
+    const all = await loadSessions();
+    const idx = all.findIndex(s => s.userId === userId && s.deviceId === deviceId);
+    if (idx < 0) return;
+    all[idx] = { ...all[idx], revoked: true, lastActive: Date.now() };
+    await saveSessions(all);
+  });
+}
+
+export async function touchSession(userId: string, deviceId: string): Promise<void> {
+  return withMutex(sessionsMutex, async () => {
+    const all = await loadSessions();
+    const idx = all.findIndex(s => s.userId === userId && s.deviceId === deviceId);
+    if (idx < 0) return;
+    all[idx] = { ...all[idx], lastActive: Date.now() };
+    await saveSessions(all);
   });
 }
 

@@ -319,13 +319,13 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
               <div key={s.id} className="flex items-center justify-between gap-2 px-3 py-2.5 rounded-xl bg-bg-tertiary border border-border-default">
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 min-w-0">
-                    <span className="w-2 h-2 rounded-full bg-status-success flex-shrink-0" />
+                    <span className={cn('w-2 h-2 rounded-full flex-shrink-0', s.online === false ? 'bg-fg-muted/50' : 'bg-status-success')} />
                     <span className="text-[13px] text-fg-primary truncate">{s.name || `…${s.id.slice(-6)}`}</span>
                     {s.current && (
                       <span className="flex-shrink-0 px-2 py-0.5 rounded-full bg-accent-primary/15 text-accent-primary text-[10px] font-bold">{t('current_session')}</span>
                     )}
                   </div>
-                  <span className="text-[11px] text-fg-muted block mt-0.5">{new Date(s.lastActive).toLocaleString()}</span>
+                  <span className="text-[11px] text-fg-muted block mt-0.5">{new Date(s.lastActive).toLocaleString()}{s.online === false ? ` · ${t('offline')}` : ''}</span>
                 </div>
                 {!s.current && (
                   <button onClick={() => revoke(s.id)}
