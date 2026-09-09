@@ -1208,7 +1208,7 @@ function AppInner() {
                     {mobileContacts.length > 0 && (
                       <div className="px-3 pt-1 pb-2">
                         <div className="px-1 py-2">
-                          <span className="text-[11px] font-semibold text-fg-muted uppercase tracking-wider">{t('contacts')}</span>
+                          <span className="text-[11px] font-semibold text-fg-muted uppercase tracking-wider">{t('chats')}</span>
                         </div>
                         {mobileContacts.map(contact => {
                           const userOnline = state.users.some(u => u.id === contact.id);

@@ -89,7 +89,7 @@ function MessageListImpl({ messages, fontSizeClass, t }: { messages: Message[]; 
   }
 
   return (
-    <div ref={containerRef} className="flex-1 overflow-y-auto px-2 py-3 space-y-2" role="log" aria-live="polite">
+    <div ref={containerRef} className="flex-1 overflow-y-auto overflow-x-hidden px-2 py-3 space-y-2" role="log" aria-live="polite">
       {groupedMessages.map((group, i) => {
         const prevGroup = groupedMessages[i - 1];
         const newDay = !prevGroup || new Date(prevGroup[0].timestamp).toDateString() !== new Date(group[0].timestamp).toDateString();

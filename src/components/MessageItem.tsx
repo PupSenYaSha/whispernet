@@ -86,7 +86,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
 
   return (
     <>
-      <div className={`flex gap-2.5 px-4 animate-message ${isOwn ? 'flex-row-reverse' : 'flex-row'}`}>
+      <div className={`flex gap-2.5 px-4 animate-message max-w-full ${isOwn ? 'flex-row-reverse' : 'flex-row'}`}>
       {!isOwn && showAvatar && (
         <div className="flex-shrink-0 w-9 h-9 rounded-full flex items-center justify-center mt-1 shadow-sm"
           style={{ background: getAvatarGradient(message.senderNickname) }}>

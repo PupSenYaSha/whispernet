@@ -99,7 +99,7 @@ export function ContactsPanel({ onSelect }: { onSelect: () => void }) {
         {query.length === 0 && (
           <>
             <div className="px-4 py-2">
-              <span className="text-[11px] font-semibold text-fg-muted uppercase tracking-wider">{t('contacts')}</span>
+              <span className="text-[11px] font-semibold text-fg-muted uppercase tracking-wider">{t('chats')}</span>
             </div>
             {state.contacts.length > 0 ? (
               <div className="p-2 space-y-0.5">
@@ -134,7 +134,7 @@ export function ContactsPanel({ onSelect }: { onSelect: () => void }) {
               </div>
             ) : (
               <div className="px-4 py-8 text-center">
-                <p className="text-[13px] text-fg-muted">{t('no_contacts')}</p>
+                <p className="text-[13px] text-fg-muted">{t('no_chats')}</p>
               </div>
             )}
           </>
