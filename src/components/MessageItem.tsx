@@ -176,7 +176,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
           {showReactions && (
             <div
               ref={reactionPickerRef}
-              className="absolute bottom-full right-0 mb-2 p-2 bg-bg-secondary rounded-xl border border-border-default shadow-lg flex gap-1 z-10"
+              className={`absolute bottom-full mb-2 p-2 bg-bg-secondary rounded-xl border border-border-default shadow-lg flex gap-1 z-10 ${isOwn ? 'right-0' : 'left-0'}`}
               role="dialog"
             >
               {['👍', '👎', '❤️', '😂', '😮', '😢', '🎉', '🔥'].map(emoji => (
