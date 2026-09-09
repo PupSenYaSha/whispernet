@@ -592,7 +592,6 @@ export function handleConnection(ws: WebSocket): void {
     });
 
     broadcast({ type: 'user_joined', payload: { userId, nickname }, timestamp: Date.now() }, userId);
-    broadcastSystem(`${nickname} joined the chat`, userId);
   }
 
   // --- Cross-device key backup (A+C) ---
@@ -977,13 +976,8 @@ function canonicalJwk(jwk: any): string {
       sessionLastActive(client.userId, deviceId, Date.now());
       void touchSession(client.userId, deviceId).catch(() => {});
       broadcast({ type: 'user_left', payload: { userId: client.userId, nickname: client.nickname }, timestamp: Date.now() });
-      broadcastSystem(`${client.nickname} left the chat`);
     }
   }
-}
-
-function broadcastSystem(text: string, excludeUserId?: string): void {
-  broadcast({ type: 'system_message', payload: { text }, timestamp: Date.now() }, excludeUserId);
 }
 
   async function handleGetSessions(userId: string, ws: WebSocket, currentDeviceId: string | null): Promise<void> {
