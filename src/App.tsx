@@ -790,10 +790,14 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   }, [connect]);
 
   const logout = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'revoke_session', payload: {} }));
+    }
     disconnect();
     dispatch({ type: 'RESET' });
     localStorage.removeItem('wn_auth');
     localStorage.removeItem('wn_settings');
+    localStorage.removeItem('wn_device_id');
     window.electronAPI?.setTitle('WhisperNet');
     document.title = 'WhisperNet';
   }, [disconnect]);
