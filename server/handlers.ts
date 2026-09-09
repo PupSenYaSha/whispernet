@@ -121,7 +121,13 @@ async function sessionCapReached(userId: string, deviceId: string | null): Promi
   await ensureSessionRegistry();
   const reg = sessionRecords.get(userId);
   if (!reg) return false;
-  if (deviceId && reg.has(deviceId)) return false; // reconnecting a known device
+  if (deviceId) {
+    const rec = reg.get(deviceId);
+    if (rec) {
+      if (rec.revoked) return true; // a revoked session may not reconnect
+      return false; // reconnecting a known active device
+    }
+  }
   let active = 0;
   for (const rec of reg.values()) if (!rec.revoked) active++;
   return active >= MAX_SESSIONS_PER_USER;

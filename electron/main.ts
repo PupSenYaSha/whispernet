@@ -128,6 +128,40 @@ function removeDirRecursive(dir: string) {
   rmdirSync(dir);
 }
 
+async function extractUpdateZip(zipPath: string, destDir: string): Promise<void> {
+  const { default: yauzl } = await import('yauzl');
+  mkdirSync(destDir, { recursive: true });
+  await new Promise<void>((resolve, reject) => {
+    yauzl.open(zipPath, { lazyEntries: true, decodeStrings: true }, (err, zipfile) => {
+      if (err || !zipfile) return reject(err || new Error('Failed to open update package'));
+      zipfile.on('close', () => resolve());
+      zipfile.on('error', reject);
+      zipfile.readEntry();
+      zipfile.on('entry', (entry) => {
+        const name = entry.fileName;
+        const unsafe = name.includes('\\') || name.startsWith('/') || /^[a-zA-Z]:/.test(name) ||
+          name.split('/').some((s: string) => s === '..' || s === '.' || s.includes(':')) ||
+          ((entry.externalFileAttributes >>> 16) & 0xa000) !== 0;
+        if (unsafe) {
+          zipfile.close();
+          return reject(new Error('Unsafe entry in update package: ' + name));
+        }
+        if (name.endsWith('/')) return zipfile.readEntry();
+        zipfile.openReadStream(entry, (err2, rs) => {
+          if (err2 || !rs) { zipfile.close(); return reject(err2 || new Error('Failed to read entry: ' + name)); }
+          const dest = join(destDir, name);
+          mkdirSync(join(dest, '..'), { recursive: true });
+          const ws = createWriteStream(dest);
+          ws.on('error', (e) => { zipfile.close(); reject(e); });
+          ws.on('close', () => zipfile.readEntry());
+          rs.on('error', (e) => { zipfile.close(); reject(e); });
+          rs.pipe(ws);
+        });
+      });
+    });
+  });
+}
+
 function applyUpdateAndRestart(updateDir: string) {
   const appDir = join(process.execPath, '..');
   const batPath = join(app.getPath('temp'), 'whispernet_update.bat');
@@ -181,10 +215,8 @@ async function checkAndUpdate(win: BrowserWindow) {
 
     win.webContents.send('update-progress', { percent: 100, status: 'extracting' });
 
-    const { default: AdmZip } = await import('adm-zip');
     const extractDir = join(updateDir, 'new');
-    const zip = new AdmZip(zipPath);
-    zip.extractAllTo(extractDir, true);
+    await extractUpdateZip(zipPath, extractDir);
     logUpdater('Extracted');
 
     win.webContents.send('update-ready', { version: latest, extractDir });

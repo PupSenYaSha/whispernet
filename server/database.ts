@@ -113,7 +113,7 @@ function isValidUser(u: any): u is StoredUser {
     && typeof u.id === 'string' && u.id.length > 0
     && typeof u.nickname === 'string' && u.nickname.length > 0
     && typeof u.passwordHash === 'string' && u.passwordHash.length > 0
-    && typeof u.publicKey === 'object' && u.publicKey !== null;
+    && (u.publicKey == null || typeof u.publicKey === 'object');
 }
 
 function isValidMessage(m: any): m is StoredMessage {

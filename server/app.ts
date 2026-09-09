@@ -269,6 +269,22 @@ export function createApp(clientDir?: string) {
   });
 
   app.register(async (fastify) => {
+    // Run before the websocket upgrade so mismatched origins are rejected with a
+    // plain HTTP 403 instead of being upgraded. Only websocket upgrades are checked.
+    fastify.addHook('preValidation', async (request, reply) => {
+      if (String(request.headers.upgrade || '').toLowerCase() !== 'websocket') return;
+      const origin = request.headers.origin;
+      const host = request.headers.host;
+      if (!host) return reply.code(400).send({ error: 'Missing Host header' });
+      if (origin) {
+        try {
+          if (new URL(origin).host !== host) return reply.code(403).send({ error: 'Origin mismatch' });
+        } catch {
+          return reply.code(400).send({ error: 'Invalid Origin' });
+        }
+      }
+    });
+
     fastify.get('/ws', { websocket: true }, (ws, req) => {
       const origin = req.headers.origin;
       const host = req.headers.host;
@@ -324,6 +340,14 @@ export async function startServer(clientDir?: string, dataDir?: string) {
   startHeartbeatCheck();
 
   const app = createApp(clientDir);
+
+  // Harden against connection-level errors (client resets / aborted handshakes)
+  // that would otherwise surface as unhandled socket 'error' events and crash
+  // the whole process.
+  app.server.on('connection', (socket) => { socket.on('error', () => {}); });
+  app.server.on('clientError', (err, socket) => {
+    try { socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'); } catch {}
+  });
 
   const httpsOpts = loadHttpsOptions();
   const listenOpts: any = { port: PORT, host: HOST };
