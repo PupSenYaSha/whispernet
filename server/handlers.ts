@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, type StoredSession } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, type StoredSession, getChannelMediaKey } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { appendFileSync } from 'fs';
@@ -586,7 +586,7 @@ export function handleConnection(ws: WebSocket): void {
       if (!seen.has(c.userId)) { seen.add(c.userId); onlineUsers.push({ id: c.userId, nickname: c.nickname }); }
     }
 
-    send(ws, { type: 'auth_success', payload: { userId, nickname, deviceId, publicKeys, preKeyBundles: {}, onlineUsers, role: await isAdminNickname(nickname) ? 'admin' : 'user' }, timestamp: Date.now() });
+    send(ws, { type: 'auth_success', payload: { userId, nickname, deviceId, publicKeys, preKeyBundles: {}, onlineUsers, role: await isAdminNickname(nickname) ? 'admin' : 'user', channelMediaKey: await getChannelMediaKey() }, timestamp: Date.now() });
 
     const history = await getRecentMessages(100);
     const messages = await Promise.all(history.map(async m => ({
@@ -677,6 +677,10 @@ export function handleConnection(ws: WebSocket): void {
 
     broadcast({ type: 'chat_message', payload: { ...messagePayload, channel: 'general' }, timestamp }, senderId);
     send(ws, { type: 'chat_message', payload: { ...messagePayload, isOwn: true, channel: 'general' }, timestamp });
+    for (const dev of senderDevices) {
+      if (dev.ws === ws || dev.ws.readyState !== WebSocket.OPEN) continue;
+      send(dev.ws, { type: 'chat_message', payload: { ...messagePayload, isOwn: true, channel: 'general' }, timestamp });
+    }
   }
 
     async function handleDmSend(senderId: string, ws: WebSocket, payload: { to?: string; toKey?: any; text: string; encrypted?: any; signalEncrypted?: any; fileKey?: Record<string, string>; sealed?: string; ttl?: number; reaction?: { messageId: string; userId: string; emoji: string }; quoted?: { id?: string; text?: string; sender?: string } }): Promise<void> {
@@ -785,6 +789,10 @@ export function handleConnection(ws: WebSocket): void {
       send(dev.ws, { type: 'dm_message', payload: { ...dmPayload, isOwn: false }, timestamp });
     }
     send(ws, { type: 'dm_message', payload: { ...dmPayload, isOwn: true }, timestamp });
+    for (const dev of senderDevices) {
+      if (dev.ws === ws || dev.ws.readyState !== WebSocket.OPEN) continue;
+      send(dev.ws, { type: 'dm_message', payload: { ...dmPayload, isOwn: true }, timestamp });
+    }
   }
 
 const ALLOWED_TTL_MS: Record<number, number> = {

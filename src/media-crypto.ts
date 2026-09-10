@@ -76,13 +76,29 @@ export async function wrapFileKeyFor(
   return bufToBase64(wrapped);
 }
 
+// General-chat channel media: the raw key is wrapped with the shared channel
+// key (AES-GCM) so that ANY registered member - including members who join
+// after the media was posted - can decrypt it. Reuses the media IV as the wrap
+// IV; AES-GCM is safe with distinct keys under a single IV.
+export async function wrapFileKeyForChannel(
+  rawKey: ArrayBuffer,
+  channelMediaKeyB64: string,
+  ivB64: string
+): Promise<string> {
+  const iv = base64ToBuf(ivB64);
+  const key = await crypto.subtle.importKey('raw', base64ToBuf(channelMediaKeyB64), ALGO_AES, false, ['encrypt', 'decrypt']);
+  const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, key, rawKey);
+  return bufToBase64(ct);
+}
+
 export async function buildFileKeyMap(
   rawKey: ArrayBuffer,
   recipientIds: string[],
   getPublicKey: (id: string) => JsonWebKey | null,
   ownId: string,
   ownPublicKey: JsonWebKey | null,
-  ivB64: string
+  ivB64: string,
+  channelMediaKeyB64?: string | null
 ): Promise<Record<string, string>> {
   const map: Record<string, string> = {};
   const ids = new Set(recipientIds);
@@ -92,6 +108,11 @@ export async function buildFileKeyMap(
     if (!jwk) continue;
     try {
       map[id] = `${ivB64}:${await wrapFileKeyFor(rawKey, jwk)}`;
+    } catch {}
+  }
+  if (channelMediaKeyB64) {
+    try {
+      map['channel'] = `${ivB64}:${await wrapFileKeyForChannel(rawKey, channelMediaKeyB64, ivB64)}`;
     } catch {}
   }
   return map;
@@ -106,6 +127,34 @@ export async function unwrapAndDecrypt(
   if (!ivB64 || !wrappedB64) throw new Error('Malformed file key');
   const priv = await crypto.subtle.importKey('jwk', privateKeyJwk, { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['decrypt']);
   const rawKey = await crypto.subtle.decrypt({ name: 'RSA-OAEP' }, priv, base64ToBuf(wrappedB64));
+  const aesKey = await crypto.subtle.importKey('raw', rawKey, ALGO_AES, false, ['decrypt']);
+
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+  const raw = new Uint8Array(await res.arrayBuffer());
+  const ciphertext = stripMediaWrap(raw);
+  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: base64ToBuf(ivB64) }, aesKey, ciphertext);
+  return new Blob([plaintext]);
+}
+
+export async function unwrapAndDecryptChannelBlob(
+  entry: string,
+  channelMediaKeyB64: string
+): Promise<ArrayBuffer> {
+  const [ivB64, wrappedB64] = entry.split(':');
+  if (!ivB64 || !wrappedB64) throw new Error('Malformed file key');
+  const wrapKey = await crypto.subtle.importKey('raw', base64ToBuf(channelMediaKeyB64), ALGO_AES, false, ['decrypt']);
+  return crypto.subtle.decrypt({ name: 'AES-GCM', iv: base64ToBuf(ivB64) }, wrapKey, base64ToBuf(wrappedB64));
+}
+
+export async function unwrapAndDecryptChannel(
+  entry: string,
+  url: string,
+  channelMediaKeyB64: string
+): Promise<Blob> {
+  const [ivB64] = entry.split(':');
+  if (!ivB64) throw new Error('Malformed file key');
+  const rawKey = await unwrapAndDecryptChannelBlob(entry, channelMediaKeyB64);
   const aesKey = await crypto.subtle.importKey('raw', rawKey, ALGO_AES, false, ['decrypt']);
 
   const res = await fetch(url);

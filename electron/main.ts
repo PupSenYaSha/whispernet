@@ -377,6 +377,10 @@ ipcMain.handle('set-title', (_event, title: string) => {
   mainWindow?.setTitle(title);
 });
 
+ipcMain.handle('set-screenshot-protection', (_event, enabled: boolean) => {
+  if (mainWindow) mainWindow.setContentProtection(!!enabled);
+});
+
 ipcMain.handle('apply-update', () => {
   if (!pendingUpdateDir) {
     logUpdater('No pending update');

@@ -3,6 +3,7 @@ import { contextBridge, ipcRenderer } from 'electron';
 contextBridge.exposeInMainWorld('electronAPI', {
   getServerPort: () => ipcRenderer.invoke('get-server-port'),
   setTitle: (title: string) => ipcRenderer.invoke('set-title', title),
+  setScreenshotProtection: (enabled: boolean) => ipcRenderer.invoke('set-screenshot-protection', enabled),
   onServerReady: (callback: (event: any, data: { port: number }) => void) => {
     ipcRenderer.on('server-ready', callback);
     return () => ipcRenderer.off('server-ready', callback);
@@ -31,6 +32,7 @@ declare global {
     electronAPI?: {
       getServerPort: () => Promise<number>;
       setTitle: (title: string) => Promise<void>;
+      setScreenshotProtection: (enabled: boolean) => Promise<void>;
       onServerReady: (callback: (event: any, data: { port: number }) => void) => () => void;
       onUpdateAvailable: (callback: (event: any, data: { version: string }) => void) => () => void;
       onUpdateProgress: (callback: (event: any, data: { percent: number; status?: string }) => void) => () => void;

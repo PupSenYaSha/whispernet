@@ -15,6 +15,7 @@ let KEYBACKUP_FILE = path.join(DATA_DIR, 'keybackups.json');
 let REPORTS_FILE = path.join(DATA_DIR, 'reports.json');
 let SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
 let ADMINS_FILE = path.join(DATA_DIR, 'admins.json');
+let CHANNEL_FILE = path.join(DATA_DIR, 'channel.json');
 let MEDIA_DIR = path.join(DATA_DIR, 'media');
 
 let usersMutex = { v: false };
@@ -24,6 +25,8 @@ let keyBackupMutex = { v: false };
 let reportsMutex = { v: false };
 let sessionsMutex = { v: false };
 let adminsMutex = { v: false };
+let channelMutex = { v: false };
+let channelMediaKey: string | null = null;
 
 try {
   mkdirSync(DATA_DIR, { recursive: true });
@@ -72,9 +75,35 @@ export function setDataDir(dir: string): void {
   REPORTS_FILE = path.join(DATA_DIR, 'reports.json');
   SESSIONS_FILE = path.join(DATA_DIR, 'sessions.json');
   ADMINS_FILE = path.join(DATA_DIR, 'admins.json');
+  CHANNEL_FILE = path.join(DATA_DIR, 'channel.json');
   MEDIA_DIR = path.join(DATA_DIR, 'media');
   mkdirSync(DATA_DIR, { recursive: true });
   mkdirSync(MEDIA_DIR, { recursive: true });
+}
+
+// General-chat media key: a persisted server-side channel key that every
+// registered user receives at login, so media posted to the general channel
+// can be decrypted by ANY member (including members who join later). The key
+// is never exposed before authentication and is never sent to third parties.
+export async function getChannelMediaKey(): Promise<string> {
+  const existing = channelMediaKey;
+  if (existing) return existing;
+  return withMutex(channelMutex, async (): Promise<string> => {
+    const cached = channelMediaKey;
+    if (cached) return cached;
+    try {
+      const raw = await readFile(CHANNEL_FILE, 'utf8');
+      const parsed = JSON.parse(raw) as { key?: unknown };
+      if (typeof parsed.key === 'string' && parsed.key.length >= 16) {
+        channelMediaKey = parsed.key;
+        return parsed.key;
+      }
+    } catch {}
+    const key = crypto.randomBytes(32).toString('base64');
+    await atomicWrite(CHANNEL_FILE, JSON.stringify({ key }));
+    channelMediaKey = key;
+    return key;
+  });
 }
 
 export function getMediaDir(): string {

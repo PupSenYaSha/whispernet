@@ -5,7 +5,7 @@ import { generateKeyPair, encryptMessage, decryptMessage } from './crypto';
 import { encryptPrivateKey, decryptPrivateKey, isEncryptedBundle, isKeyBackup } from './crypto-keys';
 import { encryptPassword, decryptPassword } from './device-crypto';
 import { uploadFile } from './upload';
-import { encryptFile, buildFileKeyMap, unwrapAndDecrypt, wrapForMedia } from './media-crypto';
+import { encryptFile, buildFileKeyMap, unwrapAndDecrypt, unwrapAndDecryptChannel, wrapForMedia } from './media-crypto';
 import { ConnectionContext, useConnection, type ConnectionState, type ConnectionAction, type ReplyTarget, type AdminReport } from './context';
 import { loadSettings, defaultSettings, translations, cn, getAvatarText, getAvatarGradient, formatTime, getDeviceLabel } from './utils';
 
@@ -500,6 +500,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               dispatch({ type: 'SET_RECONNECT_ATTEMPTS', attempts: 0 });
               dispatch({ type: 'SET_AUTH_ERROR', error: null });
               publicKeysRef.current = message.payload.publicKeys || {};
+              channelMediaKeyRef.current = typeof message.payload.channelMediaKey === 'string' ? message.payload.channelMediaKey : null;
               if (message.payload.preKeyBundles) preKeyBundlesRef.current = message.payload.preKeyBundles;
               {
                 const myId = message.payload.userId;
@@ -820,19 +821,31 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   }, [state.settings.disappearingTTL]);
 
   const decryptedMediaCacheRef = useRef<Map<string, string>>(new Map());
+  const channelMediaKeyRef = useRef<string | null>(null);
 
   const decryptMedia = useCallback(async (message: { id: string; text: string; fileKey?: Record<string, string> }): Promise<string | null> => {
     const cached = decryptedMediaCacheRef.current.get(message.id);
     if (cached) return cached;
-    if (!privateKeyRef.current || !userIdRef.current || !message.fileKey) return null;
-    const entry = message.fileKey[userIdRef.current];
-    if (!entry) return null;
+    if (!message.fileKey) return null;
     const mediaMatch = message.text.match(/^\[(image|video)\]([\s\S]*?)\[\/\1\]/);
     if (!mediaMatch) return null;
+    let url = mediaMatch[2];
+    url = `/api/media?url=${encodeURIComponent(url)}`;
+    let blob: Blob | null = null;
+    if (privateKeyRef.current) {
+      const entry = message.fileKey[userIdRef.current || ''];
+      if (entry) {
+        try { blob = await unwrapAndDecrypt(entry, url, privateKeyRef.current); } catch {}
+      }
+    }
+    if (!blob) {
+      const entry = message.fileKey['channel'];
+      if (entry && channelMediaKeyRef.current) {
+        try { blob = await unwrapAndDecryptChannel(entry, url, channelMediaKeyRef.current); } catch {}
+      }
+    }
+    if (!blob) return null;
     try {
-      let url = mediaMatch[2];
-      url = `/api/media?url=${encodeURIComponent(url)}`;
-      const blob = await unwrapAndDecrypt(entry, url, privateKeyRef.current);
       const objectUrl = URL.createObjectURL(blob);
       decryptedMediaCacheRef.current.set(message.id, objectUrl);
       return objectUrl;
@@ -880,7 +893,8 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
 
   const prepareEncryptedMedia = useCallback(async (
     file: File,
-    recipientIds: string[]
+    recipientIds: string[],
+    channelMediaKeyB64?: string | null
   ): Promise<{ text: string; fileKey?: Record<string, string> }> => {
     const enc = await encryptFile(file);
     const url = await uploadFile(wrapForMedia(await enc.blob.arrayBuffer()), 'media.png');
@@ -891,7 +905,8 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
       (id) => publicKeysRef.current[id],
       userIdRef.current || '',
       publicKeyRef.current,
-      enc.ivB64
+      enc.ivB64,
+      channelMediaKeyB64
     );
     return { text: `[${tag}]${url}[/${tag}]`, fileKey: Object.keys(fileKey).length > 0 ? fileKey : undefined };
   }, []);
@@ -899,7 +914,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const sendImage = useCallback(async (file: File) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     try {
-      const { text, fileKey } = await prepareEncryptedMedia(file, Object.keys(publicKeysRef.current));
+      const { text, fileKey } = await prepareEncryptedMedia(file, Object.keys(publicKeysRef.current), channelMediaKeyRef.current);
       wsRef.current.send(JSON.stringify({ type: 'chat_message', payload: { text, fileKey, ttl: ttlSeconds() } }));
     } catch (e) { console.error('Image send failed'); }
   }, [prepareEncryptedMedia, ttlSeconds]);
@@ -1083,9 +1098,24 @@ function AppInner() {
   useEffect(() => {
     const on = !!localStorage.getItem('wn_screenshot_prot');
     document.body.classList.toggle('screenshot-protect', on);
+    const syncBlur = () => document.body.classList.toggle('screenshot-hidden', on && typeof document.hidden === 'boolean' && document.hidden);
+    const onBlur = () => { if (on) document.body.classList.add('screenshot-blurred'); };
+    const onFocus = () => document.body.classList.remove('screenshot-blurred');
     const handler = (e: Event) => { if (on) e.preventDefault(); };
     if (on) { document.addEventListener('contextmenu', handler); document.addEventListener('selectstart', handler); }
-    return () => { document.removeEventListener('contextmenu', handler); document.removeEventListener('selectstart', handler); };
+    document.addEventListener('visibilitychange', syncBlur);
+    window.addEventListener('blur', onBlur);
+    window.addEventListener('focus', onFocus);
+    window.electronAPI?.setScreenshotProtection?.(on);
+    syncBlur();
+    return () => {
+      document.removeEventListener('contextmenu', handler);
+      document.removeEventListener('selectstart', handler);
+      document.removeEventListener('visibilitychange', syncBlur);
+      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('focus', onFocus);
+      window.electronAPI?.setScreenshotProtection?.(false);
+    };
   }, [mobileTab]);
 
   const mobileChatOpenRef = useRef(mobileChatOpen);

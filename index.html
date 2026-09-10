@@ -21,6 +21,16 @@
     <style>
       .screenshot-protect { -webkit-user-select: none; user-select: none; }
       .screenshot-protect img { -webkit-user-drag: none; pointer-events: none; }
+      body.screenshot-protect.screenshot-hidden #root,
+      body.screenshot-protect.screenshot-blurred #root {
+        filter: blur(18px);
+        -webkit-filter: blur(18px);
+        opacity: 0.35;
+        pointer-events: none;
+      }
+      @media print {
+        body.screenshot-protect { display: none !important; }
+      }
     </style>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
