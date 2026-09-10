@@ -156,17 +156,17 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
                 if (!safeUrl) {
                   return <p className="whitespace-pre-wrap break-words text-status-error text-[13px]">Invalid URL</p>;
                 }
+                const proxyUrl = `/api/media?url=${encodeURIComponent(safeUrl)}`;
                 if (tag === 'video') {
-                  const proxyUrl = `/api/media?url=${encodeURIComponent(safeUrl)}`;
                   return (
                     <video src={proxyUrl} controls
                       className="rounded-xl max-w-[340px] max-h-[340px] cursor-pointer" />
                   );
                 }
                 return (
-                  <img src={safeUrl} alt=""
+                  <img src={proxyUrl} alt=""
                     className="rounded-xl max-w-[300px] max-h-[300px] object-cover cursor-pointer"
-                    onClick={() => { setLightbox({ url: safeUrl, isVideo: false }); }} />
+                    onClick={() => { setLightbox({ url: proxyUrl, isVideo: false }); }} />
                 );
               }
               return <p className="whitespace-pre-wrap break-words">{message.text}</p>;
