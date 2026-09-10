@@ -1,8 +1,8 @@
 import { startServer } from './app.js';
-import { startAutoCleanup } from './database.js';
+import { startGeneralChatMondayCleanup } from './database.js';
 
 startServer().then(() => {
-  startAutoCleanup();
+  startGeneralChatMondayCleanup();
 }).catch((e) => {
   console.error('Failed to start server:', e);
   process.exit(1);

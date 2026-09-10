@@ -23,7 +23,6 @@ const PREKEY_BUNDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MESSAGE_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const PREKEY_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const MESSAGE_TTL_MAX_MS = 30 * 24 * 60 * 60 * 1000;
-const ONE_WEEK = 7 * 24 * 60 * 60 * 1000;
 
 const json = (v: any): string | null => (v == null ? null : JSON.stringify(v));
 
@@ -436,7 +435,6 @@ export async function saveMessage(
   d.prepare(`INSERT INTO messages (id, sender_id, sender_nickname, text, timestamp, channel, encrypted, file_key, sealed, quoted_message_id, quoted_message_text, quoted_message_sender, edited_at, expires_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(id, senderId, senderNickname, text, timestamp, channel, json(encrypted), json(fileKey), sealed ?? null, quotedMessageId ?? null, quotedMessageText ?? null, quotedMessageSender ?? null, editedAt ?? null, expiresAt ?? null);
-  d.prepare('DELETE FROM messages WHERE id NOT IN (SELECT id FROM messages ORDER BY timestamp DESC LIMIT 5000)').run();
 }
 
 export async function updateMessageText(messageId: string, senderId: string, newText: string): Promise<boolean> {
@@ -506,8 +504,10 @@ export async function searchMessages(query: string, channel?: string, limit: num
   return filtered.slice(-limit).map((row) => rowToMessage(row));
 }
 
-export async function deleteMessage(messageId: string, userId: string): Promise<boolean> {
-  const res = getDb().prepare('DELETE FROM messages WHERE id = ? AND sender_id = ?').run(messageId, userId);
+export async function deleteMessage(messageId: string, userId: string, allowAny: boolean = false): Promise<boolean> {
+  const res = allowAny
+    ? getDb().prepare('DELETE FROM messages WHERE id = ?').run(messageId)
+    : getDb().prepare('DELETE FROM messages WHERE id = ? AND sender_id = ?').run(messageId, userId);
   return (res as any).changes > 0;
 }
 
@@ -516,10 +516,28 @@ export async function deleteGeneralMessages(): Promise<number> {
   return (res as any).changes;
 }
 
-export async function deleteOldGeneralMessages(): Promise<number> {
-  const cutoff = Date.now() - ONE_WEEK;
-  const res = getDb().prepare("DELETE FROM messages WHERE channel = 'general' AND timestamp < ?").run(cutoff);
-  return (res as any).changes;
+let lastMondayCleanupMskDay = '';
+
+export function startGeneralChatMondayCleanup(): void {
+  setInterval(() => {
+    try {
+      const msk = new Date(Date.now() + 3 * 3600 * 1000);
+      const isMondayMidnight = msk.getUTCDay() === 1 && msk.getUTCHours() === 0 && msk.getUTCMinutes() < 10;
+      if (isMondayMidnight) {
+        const dayKey = msk.toISOString().slice(0, 10);
+        if (dayKey !== lastMondayCleanupMskDay) {
+          lastMondayCleanupMskDay = dayKey;
+          void deleteGeneralMessages().then((n) => {
+            if (n > 0) console.log(`Monday cleanup (00:00 MSK): deleted ${n} general chat messages`);
+          });
+        }
+      } else {
+        lastMondayCleanupMskDay = '';
+      }
+    } catch (e) {
+      console.error('Monday cleanup error:', e);
+    }
+  }, 60 * 1000);
 }
 
 export async function cleanupExpiredMessages(): Promise<number> {
@@ -536,17 +554,6 @@ export async function cleanupExpiredPreKeys(): Promise<number> {
 export async function startCleanupJobs(): Promise<void> {
   setInterval(() => cleanupExpiredPreKeys().then(n => n && console.log(`Cleaned ${n} expired prekeys`)), PREKEY_CLEANUP_INTERVAL_MS);
   setInterval(() => cleanupExpiredMessages().then(n => n && console.log(`Cleaned ${n} expired messages`)), MESSAGE_CLEANUP_INTERVAL_MS);
-}
-
-export function startAutoCleanup(): void {
-  setInterval(async () => {
-    try {
-      const deleted = await deleteOldGeneralMessages();
-      if (deleted > 0) console.log(`Auto-cleaned ${deleted} old general messages`);
-    } catch (e) {
-      console.error('Auto-cleanup failed:', e);
-    }
-  }, ONE_WEEK);
 }
 
 export function initializeDatabase(): void {
