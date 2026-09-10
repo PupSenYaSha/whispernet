@@ -914,10 +914,11 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const sendImage = useCallback(async (file: File) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
     try {
-      const { text, fileKey } = await prepareEncryptedMedia(file, Object.keys(publicKeysRef.current), channelMediaKeyRef.current);
-      wsRef.current.send(JSON.stringify({ type: 'chat_message', payload: { text, fileKey, ttl: ttlSeconds() } }));
+      const tag = file.type.startsWith('video/') ? 'video' : 'image';
+      const url = await uploadFile(file, file.name || 'media.png');
+      wsRef.current.send(JSON.stringify({ type: 'chat_message', payload: { text: `[${tag}]${url}[/${tag}]`, ttl: ttlSeconds() } }));
     } catch (e) { console.error('Image send failed'); }
-  }, [prepareEncryptedMedia, ttlSeconds]);
+  }, [ttlSeconds]);
 
   const sendDmImage = useCallback(async (to: string, file: File) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
