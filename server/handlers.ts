@@ -1029,21 +1029,26 @@ function canonicalJwk(jwk: any): string {
       send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Missing session id' }, timestamp: Date.now() });
       return;
     }
-    const target = clients.get(targetId);
-    if (!target) {
+    await ensureSessionRegistry();
+    const reg = sessionRecords.get(userId);
+    const rec = reg?.get(targetId);
+    if (!rec) {
       send(ws, { type: 'error', payload: { code: 'SESSION_NOT_FOUND', message: 'Session not found' }, timestamp: Date.now() });
       return;
     }
-    if (target.userId !== userId) {
-      send(ws, { type: 'error', payload: { code: 'FORBIDDEN', message: 'Can only revoke your own sessions' }, timestamp: Date.now() });
-      return;
+    // Revoke the persisted record first, so it disappears from the session list and
+    // no longer counts towards the cap even when the target device is offline.
+    rec.revoked = true;
+    void markSessionRevoked(userId, targetId).catch(() => {});
+    // If the target happens to be connected right now, drop its socket too.
+    const live = clients.get(targetId);
+    if (live && live.userId === userId) {
+      try { live.ws.close(4001, 'Session revoked'); } catch {}
+      unregisterDevice(targetId);
     }
-    const m = sessionRecords.get(target.userId);
-    if (m) { const rec = m.get(targetId); if (rec) rec.revoked = true; }
-    void markSessionRevoked(target.userId, targetId).catch(() => {});
-    target.ws.close(4001, 'Session revoked');
-    unregisterDevice(targetId);
     send(ws, { type: 'session_revoked', payload: { sessionId: targetId }, timestamp: Date.now() });
+    // Refresh the requester's list so the revoked entry disappears immediately.
+    if (targetId !== currentDeviceId) await handleGetSessions(userId, ws, currentDeviceId);
   }
 
   // --- Blocking (user-level privacy) ---
