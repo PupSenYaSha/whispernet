@@ -939,9 +939,7 @@ function canonicalJwk(jwk: any): string {
       send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'messageId required' }, timestamp: Date.now() });
       return;
     }
-    const user = await getUserById(userId);
-    const isAdmin = !!(user && await isAdminNickname(user.nickname));
-    const deleted = await deleteMessage(payload.messageId, userId, isAdmin);
+    const deleted = await deleteMessage(payload.messageId, userId);
     if (deleted) {
       send(ws, { type: 'message_deleted', payload: { messageId: payload.messageId }, timestamp: Date.now() });
       broadcast({ type: 'message_deleted', payload: { messageId: payload.messageId }, timestamp: Date.now() }, userId);

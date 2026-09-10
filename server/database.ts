@@ -504,10 +504,8 @@ export async function searchMessages(query: string, channel?: string, limit: num
   return filtered.slice(-limit).map((row) => rowToMessage(row));
 }
 
-export async function deleteMessage(messageId: string, userId: string, allowAny: boolean = false): Promise<boolean> {
-  const res = allowAny
-    ? getDb().prepare('DELETE FROM messages WHERE id = ?').run(messageId)
-    : getDb().prepare('DELETE FROM messages WHERE id = ? AND sender_id = ?').run(messageId, userId);
+export async function deleteMessage(messageId: string, userId: string): Promise<boolean> {
+  const res = getDb().prepare('DELETE FROM messages WHERE id = ? AND sender_id = ?').run(messageId, userId);
   return (res as any).changes > 0;
 }
 
