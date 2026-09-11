@@ -88,6 +88,7 @@ export function createApp(clientDir?: string) {
         reply.header('Access-Control-Allow-Headers', 'Content-Type');
       }
     }
+    reply.header('Vary', 'Origin');
   });
 
   app.register(fastifyWebsocket);
@@ -138,6 +139,13 @@ export function createApp(clientDir?: string) {
       headers: { 'User-Agent': 'WhisperNet' },
       timeout: 15000,
     }, (proxyRes) => {
+      let proxyResCt = proxyRes.headers['content-type'] || 'application/octet-stream';
+      if (!/^(image\/|video\/|audio\/|application\/octet-stream)/i.test(proxyResCt)) {
+        proxyRes.destroy();
+        try { raw.writeHead(415); raw.end('Unsupported media type'); } catch {}
+        return;
+      }
+
       const contentLength = parseInt(proxyRes.headers['content-length'] || '0', 10);
       if (contentLength > 5 * 1024 * 1024) {
         proxyRes.destroy();
@@ -149,7 +157,7 @@ export function createApp(clientDir?: string) {
       const MAX_RESPONSE = 5 * 1024 * 1024;
 
       raw.writeHead(proxyRes.statusCode || 502, {
-        'Content-Type': proxyRes.headers['content-type'] || 'application/octet-stream',
+        'Content-Type': proxyResCt,
         'Cache-Control': 'public, max-age=86400',
       });
 

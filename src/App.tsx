@@ -872,7 +872,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         const encrypted = await encryptWithSignal(sessionId, trimmed);
         const payload: any = { toKey: recipientKey, text: '', signalEncrypted: encrypted, ttl: ttlSeconds() };
         if (sealed) payload.sealed = true;
-        if (quoted) payload.quoted = { id: quoted.id, text: quoted.text, sender: quoted.senderNickname };
+        if (quoted) payload.quoted = { id: quoted.id, sender: quoted.senderNickname };
         if (pendingX3dhRef.current[to]) {
           payload.x3dhMessage = pendingX3dhRef.current[to].x3dhMessage;
           payload.ratchetPublicKey = Array.from(pendingX3dhRef.current[to].ratchetPublicKey);
@@ -883,7 +883,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         const encrypted = await encryptMessage(trimmed, buildEncryptKeys({ [to]: recipientKey }));
         const payload: any = { toKey: recipientKey, text: '', encrypted, ttl: ttlSeconds() };
         if (sealed) payload.sealed = true;
-        if (quoted) payload.quoted = { id: quoted.id, text: quoted.text, sender: quoted.senderNickname };
+        if (quoted) payload.quoted = { id: quoted.id, sender: quoted.senderNickname };
         wsRef.current.send(JSON.stringify({ type: 'dm_send', payload }));
       }
     } catch (e) { console.error('Encryption failed'); }

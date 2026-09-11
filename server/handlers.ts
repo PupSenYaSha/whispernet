@@ -469,7 +469,7 @@ export function handleConnection(ws: WebSocket): void {
     }
 
     const user = await getUserByNickname(cleanNick);
-    if (!user || typeof password !== 'string' || !(await bcrypt.compare(password, user.passwordHash))) {
+    if (!user || typeof password !== 'string' || !user.passwordHash || !(await bcrypt.compare(password, user.passwordHash))) {
       const newCount = lockEntry ? lockEntry.count + 1 : 1;
       const lockedUntil = newCount >= MAX_FAILED_LOGINS ? Date.now() + ACCOUNT_LOCKOUT_DURATION : 0;
 
@@ -748,11 +748,15 @@ export function handleConnection(ws: WebSocket): void {
       : null;
 
     if (payload?.reaction && typeof payload.reaction === 'object') {
-      const { messageId, userId, emoji } = payload.reaction;
-      await addReaction(messageId, userId, emoji);
+      const { messageId, emoji } = payload.reaction;
+      if (typeof messageId !== 'string' || !messageId || !isValidEmoji(emoji)) {
+        send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Invalid reaction' }, timestamp: Date.now() });
+        return;
+      }
+      await addReaction(messageId, senderId, emoji);
       const reactions = await getReactionsForMessage(messageId);
-      broadcast({ type: 'reaction_update', payload: { messageId, reactions, userId }, timestamp: Date.now() }, userId);
-      for (const dev of recipientDevices) send(dev.ws, { type: 'reaction_update', payload: { messageId, reactions, userId }, timestamp: Date.now() });
+      broadcast({ type: 'reaction_update', payload: { messageId, reactions, userId: senderId }, timestamp: Date.now() }, senderId);
+      for (const dev of recipientDevices) send(dev.ws, { type: 'reaction_update', payload: { messageId, reactions, userId: senderId }, timestamp: Date.now() });
       return;
     }
 
@@ -956,6 +960,11 @@ function canonicalJwk(jwk: any): string {
     const text = sanitizeText(payload.text);
     if (!text || text.length > 4096) {
       send(ws, { type: 'error', payload: { code: 'MESSAGE_TOO_LONG', message: 'Message too long (max 4096 chars)' }, timestamp: Date.now() });
+      return;
+    }
+    const target = await getMessageById(payload.messageId);
+    if (!target || target.channel !== 'general' || target.encrypted) {
+      send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
       return;
     }
     const updated = await updateMessageText(payload.messageId, userId, text);

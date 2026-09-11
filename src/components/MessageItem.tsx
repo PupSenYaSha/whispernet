@@ -19,6 +19,18 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
   const [lightbox, setLightbox] = useState<{ url: string; isVideo: boolean } | null>(null);
   const reactionPickerRef = useRef<HTMLDivElement>(null);
 
+  const resolvedQuoteText = useMemo(() => {
+    if (message.quotedMessageText) return message.quotedMessageText;
+    if (!message.quotedMessageId) return null;
+    const found = state.messages.find((m) => m.id === message.quotedMessageId)
+      || Object.values(state.dmMessages).flat().find((m) => m.id === message.quotedMessageId);
+    const text = found?.text;
+    if (!text) return '[encrypted]';
+    const mm = text.match(/^\[(image|video)\][\s\S]*?\[\/\1\]/);
+    if (mm) return mm[1] === 'video' ? '🎥 Video' : '📷 Photo';
+    return text;
+  }, [message.quotedMessageText, message.quotedMessageId, state.messages, state.dmMessages]);
+
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
       if (reactionPickerRef.current && !reactionPickerRef.current.contains(e.target as Node)) {
@@ -112,12 +124,12 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
               ? 'bg-bubble-mine text-bubble-mine-text rounded-2xl rounded-br-sm'
               : 'bg-bubble-other text-bubble-other-text border border-border-default rounded-2xl rounded-bl-sm'
           )}>
-            {message.quotedMessageText && (
+            {(message.quotedMessageText || (message.quotedMessageId && resolvedQuoteText)) && (
               <div className="mb-2 p-2 rounded-xl bg-black/70 border border-white/15 flex items-start gap-2">
                 <span className="text-[14px] text-accent-primary leading-tight flex-shrink-0">↩</span>
                 <div className="min-w-0">
                   <div className="text-[11px] font-bold text-accent-primary truncate">@{message.quotedMessageSender || '?'}</div>
-                  <div className="text-[13px] text-white truncate">{message.quotedMessageText}</div>
+                  <div className="text-[13px] text-white truncate">{resolvedQuoteText}</div>
                 </div>
               </div>
             )}
@@ -220,7 +232,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
               title="Reactions" aria-label="Reactions">
               😊
             </button>
-            {isOwn && !isMedia && (
+            {isOwn && !isMedia && !message.channel && (
               <button
                 onClick={() => setEditing(message)}
                 className="p-1.5 rounded-full text-fg-subtle hover:text-fg-primary hover:bg-bg-tertiary transition-colors"

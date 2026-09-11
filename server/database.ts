@@ -510,32 +510,10 @@ export async function deleteMessage(messageId: string, userId: string): Promise<
 }
 
 export async function deleteGeneralMessages(): Promise<number> {
-  const res = getDb().prepare("DELETE FROM messages WHERE channel IN ('general')").run();
+  const d = getDb();
+  d.prepare("DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE channel IN ('general'))").run();
+  const res = d.prepare("DELETE FROM messages WHERE channel IN ('general')").run();
   return (res as any).changes;
-}
-
-let lastMondayCleanupMskDay = '';
-
-export function startGeneralChatMondayCleanup(): void {
-  setInterval(() => {
-    try {
-      const msk = new Date(Date.now() + 3 * 3600 * 1000);
-      const isMondayMidnight = msk.getUTCDay() === 1 && msk.getUTCHours() === 0 && msk.getUTCMinutes() < 10;
-      if (isMondayMidnight) {
-        const dayKey = msk.toISOString().slice(0, 10);
-        if (dayKey !== lastMondayCleanupMskDay) {
-          lastMondayCleanupMskDay = dayKey;
-          void deleteGeneralMessages().then((n) => {
-            if (n > 0) console.log(`Monday cleanup (00:00 MSK): deleted ${n} general chat messages`);
-          });
-        }
-      } else {
-        lastMondayCleanupMskDay = '';
-      }
-    } catch (e) {
-      console.error('Monday cleanup error:', e);
-    }
-  }, 60 * 1000);
 }
 
 export async function cleanupExpiredMessages(): Promise<number> {
@@ -555,6 +533,7 @@ export async function startCleanupJobs(): Promise<void> {
 }
 
 export function initializeDatabase(): void {
+  try { mkdirSync(MEDIA_DIR, { recursive: true }); } catch {}
   const p = path.join(DATA_DIR, DB_FILE);
   const dbExisted = existsSync(p);
   ensureSchema();
