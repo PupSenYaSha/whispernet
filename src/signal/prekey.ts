@@ -4,16 +4,18 @@ import {
   generateSignedPreKeyRecord,
   generateOneTimePreKeys,
 } from './keys';
+import {
+  PBKDF2_ITER,
+  SIGNED_PREKEY_ROTATION_MS,
+  MIN_ONE_TIME_PREKEYS,
+  MAX_ONE_TIME_PREKEYS,
+  PREKEY_BUNDLE_VERSION,
+  KEY_PREFIX,
+} from './constants';
 
-const IK_KEY = 'wn_signal_ik';
-const SPK_KEY = 'wn_signal_spk';
-const OPK_KEY = 'wn_signal_opk';
-const PBKDF2_ITER = 600_000;
-
-const SIGNED_PREKEY_ROTATION_DAYS = 14;
-const MIN_ONE_TIME_PREKEYS = 50;
-const MAX_ONE_TIME_PREKEYS = 100;
-const PREKEY_BUNDLE_VERSION = 2;
+const IK_KEY = KEY_PREFIX.identityKey;
+const SPK_KEY = KEY_PREFIX.signedPreKey;
+const OPK_KEY = KEY_PREFIX.oneTimePreKeys;
 
 function bufToBase64(buf: ArrayBuffer): string {
   return btoa(String.fromCharCode(...new Uint8Array(buf)));
@@ -68,6 +70,7 @@ export class PreKeyManager {
   private identityKeyPair: ReturnType<typeof generateIdentityKeyPair> | null = null;
   private signedPreKey: SignedPreKeyRecord | null = null;
   private oneTimePreKeys: PreKeyRecord[] = [];
+  private publishedOpkKeyId: number | null = null;
   private encryptionKey: CryptoKey | null = null;
   private saveTimeout: ReturnType<typeof setTimeout> | null = null;
   private rotationTimer: ReturnType<typeof setInterval> | null = null;
@@ -95,9 +98,7 @@ export class PreKeyManager {
   }
 
   private async maybeRotatePreKeys(): Promise<void> {
-    const spkMaxAge = SIGNED_PREKEY_ROTATION_DAYS * 24 * 60 * 60 * 1000;
-
-    if (this.signedPreKey && isPreKeyExpired(this.signedPreKey.createdAt, spkMaxAge)) {
+    if (this.signedPreKey && isPreKeyExpired(this.signedPreKey.createdAt, SIGNED_PREKEY_ROTATION_MS)) {
       await this.rotateSignedPreKey();
     }
 
@@ -197,6 +198,28 @@ export class PreKeyManager {
         const decrypted = await decryptValue(this.encryptionKey, opkData);
         if (decrypted) {
           const parsed = JSON.parse(decrypted);
+          if (Array.isArray(parsed)) {
+            this.oneTimePreKeys = parsed.map((k: any) => ({
+              keyId: k.keyId,
+              keyPair: {
+                privateKey: new Uint8Array(k.privateKey),
+                publicKey: new Uint8Array(k.publicKey),
+              },
+            }));
+          } else {
+            this.oneTimePreKeys = Array.isArray(parsed.keys) ? parsed.keys.map((k: any) => ({
+              keyId: k.keyId,
+              keyPair: {
+                privateKey: new Uint8Array(k.privateKey),
+                publicKey: new Uint8Array(k.publicKey),
+              },
+            })) : [];
+            this.publishedOpkKeyId = typeof parsed.publishedKeyId === 'number' ? parsed.publishedKeyId : null;
+          }
+        }
+      } else if (opkData) {
+        const parsed = JSON.parse(opkData);
+        if (Array.isArray(parsed)) {
           this.oneTimePreKeys = parsed.map((k: any) => ({
             keyId: k.keyId,
             keyPair: {
@@ -204,18 +227,19 @@ export class PreKeyManager {
               publicKey: new Uint8Array(k.publicKey),
             },
           }));
+        } else {
+          this.oneTimePreKeys = Array.isArray(parsed.keys) ? parsed.keys.map((k: any) => ({
+            keyId: k.keyId,
+            keyPair: {
+              privateKey: new Uint8Array(k.privateKey),
+              publicKey: new Uint8Array(k.publicKey),
+            },
+          })) : [];
+          this.publishedOpkKeyId = typeof parsed.publishedKeyId === 'number' ? parsed.publishedKeyId : null;
         }
-      } else if (opkData) {
-        const parsed = JSON.parse(opkData);
-        this.oneTimePreKeys = parsed.map((k: any) => ({
-          keyId: k.keyId,
-          keyPair: {
-            privateKey: new Uint8Array(k.privateKey),
-            publicKey: new Uint8Array(k.publicKey),
-          },
-        }));
       }
-    } catch {
+    } catch (e) {
+      console.error('[signal] failed to load prekey material:', e);
     }
   }
 
@@ -242,13 +266,14 @@ export class PreKeyManager {
         createdAt: this.signedPreKey.createdAt,
       }) : null;
 
-      const opkData = JSON.stringify(
-        this.oneTimePreKeys.map((k) => ({
+      const opkData = JSON.stringify({
+        publishedKeyId: this.publishedOpkKeyId,
+        keys: this.oneTimePreKeys.map((k) => ({
           keyId: k.keyId,
           privateKey: Array.from(k.keyPair.privateKey),
           publicKey: Array.from(k.keyPair.publicKey),
-        }))
-      );
+        })),
+      });
 
       if (this.encryptionKey) {
         if (ikData) localStorage.setItem(IK_KEY, await encryptValue(this.encryptionKey, ikData));
@@ -259,7 +284,8 @@ export class PreKeyManager {
         if (spkData) localStorage.setItem(SPK_KEY, spkData);
         localStorage.setItem(OPK_KEY, opkData);
       }
-    } catch {
+    } catch (e) {
+      console.error('[signal] failed to persist prekey material:', e);
     }
   }
 
@@ -294,9 +320,35 @@ export class PreKeyManager {
     return this.oneTimePreKeys.length;
   }
 
-  consumeOneTimePreKey(): PreKeyRecord | undefined {
-    const opk = this.oneTimePreKeys.shift();
-    if (opk) this.save();
+  consumeOneTimePreKey(keyId?: number): PreKeyRecord | undefined {
+    let index: number;
+    if (keyId != null) {
+      index = this.oneTimePreKeys.findIndex((k) => k.keyId === keyId);
+      if (index < 0) return undefined;
+    } else {
+      index = 0;
+    }
+    const [opk] = this.oneTimePreKeys.splice(index, 1);
+    if (!opk) return undefined;
+    if (this.publishedOpkKeyId === opk.keyId) this.publishedOpkKeyId = null;
+    this.save();
+    return opk;
+  }
+
+  // One-time pre-keys referenced by the published bundle are consumed exactly
+  // once (by the remote peer's session handshake). Multiple publishes for the
+  // same account MUST reference the same key so the responder can reconstruct
+  // dh4; each fresh session consumes one key and the next publish rotates.
+  private selectPublishedOpk(): PreKeyRecord | null {
+    if (this.publishedOpkKeyId != null) {
+      const existing = this.oneTimePreKeys.find((k) => k.keyId === this.publishedOpkKeyId);
+      if (existing) return existing;
+    }
+    const opk = this.oneTimePreKeys[0] ?? null;
+    if (opk) {
+      this.publishedOpkKeyId = opk.keyId;
+      this.save();
+    }
     return opk;
   }
 
@@ -318,9 +370,8 @@ export class PreKeyManager {
       },
     };
 
-    if (this.oneTimePreKeys.length > 0) {
-      const opk = this.oneTimePreKeys.shift()!;
-      this.save();
+    const opk = this.selectPublishedOpk();
+    if (opk) {
       bundle.oneTimePreKey = {
         keyId: opk.keyId,
         publicKey: opk.keyPair.publicKey,
@@ -353,9 +404,8 @@ export class PreKeyManager {
       },
     };
 
-    if (this.oneTimePreKeys.length > 0) {
-      const opk = this.oneTimePreKeys.shift()!;
-      this.save();
+    const opk = this.selectPublishedOpk();
+    if (opk) {
       result.oneTimePreKey = {
         keyId: opk.keyId,
         publicKey: arrayToBase64(opk.keyPair.publicKey),

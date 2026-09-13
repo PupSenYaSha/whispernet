@@ -5,6 +5,13 @@ import fs from 'fs';
 import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { DatabaseSync } from 'node:sqlite';
+import {
+  PREKEY_BUNDLE_TTL_MS,
+  MESSAGE_CLEANUP_INTERVAL_MS,
+  PREKEY_CLEANUP_INTERVAL_MS,
+  REPORT_CAP,
+  FTS_TABLE,
+} from './constants.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
@@ -14,15 +21,11 @@ let MEDIA_DIR = path.join(DATA_DIR, 'media');
 let db: DatabaseSync | null = null;
 let DB_PATH: string | null = null;
 let migrationsDone = false;
+let ftsAvailable = true;
 
 try {
   mkdirSync(DATA_DIR, { recursive: true });
 } catch {}
-
-const PREKEY_BUNDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const MESSAGE_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const PREKEY_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const MESSAGE_TTL_MAX_MS = 30 * 24 * 60 * 60 * 1000;
 
 const json = (v: any): string | null => (v == null ? null : JSON.stringify(v));
 
@@ -121,6 +124,83 @@ function ensureSchema(): void {
       value TEXT NOT NULL
     );
   `);
+
+  // Full-text search index over message text. Standalone FTS5 table (no
+  // content= sync) so any SQLite build can ignore it; every write is mirrored
+  // by syncFts*. When FTS5 is unavailable at runtime we fall back to instr().
+  try {
+    d.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS ${FTS_TABLE} USING fts5(text, content='');`);
+    ftsAvailable = true;
+  } catch {
+    console.warn('[db] FTS5 unavailable, using instr() fallback for search');
+    ftsAvailable = false;
+  }
+}
+
+function backfillFts(): void {
+  if (!ftsAvailable) return;
+  if (metaGet('fts_backfilled')) return;
+  try {
+    const rows = getDb().prepare('SELECT rowid, text FROM messages WHERE text IS NOT NULL AND text != ?').all('') as { rowid: number; text: string }[];
+    const ins = getDb().prepare(`INSERT INTO ${FTS_TABLE} (rowid, text) VALUES (?, ?)`);
+    for (const r of rows) {
+      try { ins.run(r.rowid, r.text); } catch {}
+    }
+    metaSet('fts_backfilled', '1');
+  } catch (e) {
+    console.warn('[db] FTS backfill skipped:', (e as Error).message);
+    ftsAvailable = false;
+  }
+}
+
+function syncFtsInsert(rowid: number, text: string): void {
+  if (!ftsAvailable || !text) return;
+  try {
+    getDb().prepare(`INSERT INTO ${FTS_TABLE} (rowid, text) VALUES (?, ?)`).run(rowid, text);
+  } catch (e) {
+    console.warn('[db] FTS insert failed, disabling FTS:', (e as Error).message);
+    ftsAvailable = false;
+  }
+}
+
+function syncFtsDelete(messageId: string): void {
+  if (!ftsAvailable) return;
+  try {
+    getDb().prepare(`DELETE FROM ${FTS_TABLE} WHERE rowid = (SELECT rowid FROM messages WHERE id = ?)`).run(messageId);
+  } catch (e) {
+    console.warn('[db] FTS delete failed, disabling FTS:', (e as Error).message);
+    ftsAvailable = false;
+  }
+}
+
+function syncFtsUpdate(messageId: string, text: string): void {
+  if (!ftsAvailable) return;
+  try {
+    getDb().prepare(`UPDATE ${FTS_TABLE} SET text = ? WHERE rowid = (SELECT rowid FROM messages WHERE id = ?)`).run(text, messageId);
+  } catch (e) {
+    console.warn('[db] FTS update failed, disabling FTS:', (e as Error).message);
+    ftsAvailable = false;
+  }
+}
+
+function syncFtsDeleteByChannel(channel: string): void {
+  if (!ftsAvailable) return;
+  try {
+    getDb().prepare(`DELETE FROM ${FTS_TABLE} WHERE rowid IN (SELECT rowid FROM messages WHERE channel = ?)`).run(channel);
+  } catch (e) {
+    console.warn('[db] FTS channel delete failed, disabling FTS:', (e as Error).message);
+    ftsAvailable = false;
+  }
+}
+
+function syncFtsDeleteExpired(cutoff: number): void {
+  if (!ftsAvailable) return;
+  try {
+    getDb().prepare(`DELETE FROM ${FTS_TABLE} WHERE rowid IN (SELECT rowid FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?)`).run(cutoff);
+  } catch (e) {
+    console.warn('[db] FTS expired delete failed, disabling FTS:', (e as Error).message);
+    ftsAvailable = false;
+  }
 }
 
 // --- Legacy JSON -> SQLite migration ---
@@ -432,14 +512,16 @@ export async function saveMessage(
   quotedMessageSender?: string
 ): Promise<void> {
   const d = getDb();
-  d.prepare(`INSERT INTO messages (id, sender_id, sender_nickname, text, timestamp, channel, encrypted, file_key, sealed, quoted_message_id, quoted_message_text, quoted_message_sender, edited_at, expires_at)
+  const res = d.prepare(`INSERT INTO messages (id, sender_id, sender_nickname, text, timestamp, channel, encrypted, file_key, sealed, quoted_message_id, quoted_message_text, quoted_message_sender, edited_at, expires_at)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
     .run(id, senderId, senderNickname, text, timestamp, channel, json(encrypted), json(fileKey), sealed ?? null, quotedMessageId ?? null, quotedMessageText ?? null, quotedMessageSender ?? null, editedAt ?? null, expiresAt ?? null);
+  syncFtsInsert(Number((res as any).lastInsertRowid), text);
 }
 
 export async function updateMessageText(messageId: string, senderId: string, newText: string): Promise<boolean> {
   const res = getDb().prepare('UPDATE messages SET text = ?, edited_at = ? WHERE id = ? AND sender_id = ?')
     .run(newText, Date.now(), messageId, senderId);
+  syncFtsUpdate(messageId, newText);
   return (res as any).changes > 0;
 }
 
@@ -460,7 +542,12 @@ export async function getDmHistory(userId1: string, userId2: string, limit: numb
 }
 
 export async function getDmContacts(userId: string): Promise<{ id: string; nickname: string; lastMessage: number }[]> {
-  const rows = getDb().prepare(`SELECT channel, MAX(timestamp) AS ts FROM messages WHERE channel != 'general' GROUP BY channel`).all() as any[];
+  const d = getDb();
+  // Only consider DM channels this user actually participates in; the (channel,
+  // timestamp) index keeps this scan narrow.
+  const rows = d.prepare(
+    "SELECT channel, MAX(timestamp) AS ts FROM messages WHERE channel != 'general' AND (channel LIKE ? OR channel LIKE ?) GROUP BY channel"
+  ).all(userId + ':%', '%:' + userId) as { channel: string; ts: number }[];
   const contactMap = new Map<string, number>();
   for (const r of rows) {
     const parts = (r.channel as string).split(':');
@@ -470,8 +557,13 @@ export async function getDmContacts(userId: string): Promise<{ id: string; nickn
     const existing = contactMap.get(otherId) || 0;
     if (r.ts > existing) contactMap.set(otherId, r.ts);
   }
-  const users = getDb().prepare('SELECT id, nickname FROM users').all() as { id: string; nickname: string }[];
-  const userMap = new Map(users.map(u => [u.id, u.nickname]));
+  const otherIds = [...contactMap.keys()];
+  const userMap = new Map<string, string>();
+  if (otherIds.length > 0) {
+    const placeholders = otherIds.map(() => '?').join(',');
+    const users = d.prepare(`SELECT id, nickname FROM users WHERE id IN (${placeholders})`).all(...otherIds) as { id: string; nickname: string }[];
+    for (const u of users) userMap.set(u.id, u.nickname);
+  }
   const result: { id: string; nickname: string; lastMessage: number }[] = [];
   for (const [otherId, lastMessage] of contactMap) {
     const nickname = userMap.get(otherId);
@@ -480,10 +572,35 @@ export async function getDmContacts(userId: string): Promise<{ id: string; nickn
   return result.sort((a, b) => b.lastMessage - a.lastMessage);
 }
 
+export async function getUsersByIds(ids: string[]): Promise<{ id: string; nickname: string }[]> {
+  if (ids.length === 0) return [];
+  const placeholders = ids.map(() => '?').join(',');
+  return getDb().prepare(`SELECT id, nickname FROM users WHERE id IN (${placeholders})`).all(...ids) as { id: string; nickname: string }[];
+}
+
 export async function searchMessages(query: string, channel?: string, limit: number = 50, userId?: string): Promise<any[]> {
   const d = getDb();
   const q = query.toLowerCase();
-  const rows = d.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE text != '' AND instr(lower(text), ?) > 0`).all(q) as any[];
+  let rows: any[] = [];
+
+  const keywords = q.trim().split(/\s+/).filter(Boolean).slice(0, 8);
+  if (ftsAvailable && keywords.length > 0) {
+    try {
+      const match = '"' + keywords.map((w) => w.replace(/"/g, '""')).join('" AND "') + '"';
+      const ids = d.prepare(`SELECT ${FTS_TABLE}.rowid AS rid FROM ${FTS_TABLE} WHERE ${FTS_TABLE} MATCH ? LIMIT 1000`).all(match) as { rid: number }[];
+      if (ids.length > 0) {
+        const placeholders = ids.map(() => '?').join(',');
+        rows = d.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE messages.rowid IN (${placeholders})`)
+          .all(...ids.map((i) => i.rid)) as any[];
+      }
+    } catch {
+      rows = [];
+    }
+  }
+  if (rows.length === 0) {
+    rows = d.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE text != '' AND instr(lower(text), ?) > 0`).all(q) as any[];
+  }
+
   const filtered = rows.filter((m) => {
     if (userId) {
       if (m.channel === 'general' || !m.channel) {
@@ -506,18 +623,22 @@ export async function searchMessages(query: string, channel?: string, limit: num
 
 export async function deleteMessage(messageId: string, userId: string): Promise<boolean> {
   const res = getDb().prepare('DELETE FROM messages WHERE id = ? AND sender_id = ?').run(messageId, userId);
+  if ((res as any).changes > 0) syncFtsDelete(messageId);
   return (res as any).changes > 0;
 }
 
 export async function deleteGeneralMessages(): Promise<number> {
   const d = getDb();
+  syncFtsDeleteByChannel('general');
   d.prepare("DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE channel IN ('general'))").run();
   const res = d.prepare("DELETE FROM messages WHERE channel IN ('general')").run();
   return (res as any).changes;
 }
 
 export async function cleanupExpiredMessages(): Promise<number> {
-  const res = getDb().prepare('DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?').run(Date.now());
+  const cutoff = Date.now();
+  const res = getDb().prepare('DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?').run(cutoff);
+  syncFtsDeleteExpired(cutoff);
   return (res as any).changes;
 }
 
@@ -541,6 +662,7 @@ export function initializeDatabase(): void {
     if (!dbExisted && anyLegacyDataExists()) migrateLegacy();
     migrationsDone = true;
   }
+  backfillFts();
   const d = getDb();
   const adminCount = d.prepare('SELECT COUNT(*) AS c FROM admins').get() as any;
   if (!adminCount || adminCount.c === 0) {
@@ -565,6 +687,21 @@ export async function removeReaction(messageId: string, userId: string, emoji: s
 
 export async function getReactionsForMessage(messageId: string): Promise<{ messageId: string; userId: string; emoji: string; timestamp: number }[]> {
   return getDb().prepare('SELECT message_id as messageId, user_id as userId, emoji, timestamp FROM reactions WHERE message_id = ? ORDER BY timestamp ASC').all(messageId) as any[];
+}
+
+// Batch reactions lookup: avoids N+1 queries when hydrating histories/search.
+export async function getReactionsForMessages(messageIds: string[]): Promise<Map<string, { messageId: string; userId: string; emoji: string; timestamp: number }[]>> {
+  const result = new Map<string, { messageId: string; userId: string; emoji: string; timestamp: number }[]>();
+  const ids = [...new Set(messageIds.filter((m) => typeof m === 'string' && m.length > 0))];
+  if (ids.length === 0) return result;
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = getDb().prepare(`SELECT message_id as messageId, user_id as userId, emoji, timestamp FROM reactions WHERE message_id IN (${placeholders}) ORDER BY timestamp ASC`).all(...ids) as any[];
+  for (const r of rows) {
+    const list = result.get(r.messageId);
+    if (list) list.push(r);
+    else result.set(r.messageId, [r]);
+  }
+  return result;
 }
 
 // --- Moderation & blocking ---
@@ -600,8 +737,6 @@ export async function setUserBlocked(userId: string, blockedId: string, blocked:
 }
 
 // --- Reports ---
-
-let REPORT_CAP = 1000;
 
 export async function addReport(report: { id: string; reporterId: string; reporterNick?: string; targetId: string; targetNick?: string; channel: string; messageId?: string; messageText?: string; reason: string; timestamp: number }): Promise<void> {
   const d = getDb();

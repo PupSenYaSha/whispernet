@@ -4,7 +4,11 @@ export async function uploadFile(
   onProgress?: (percent: number) => void
 ): Promise<string> {
   const form = new FormData();
-  form.append('file', blob, filename);
+  // Server only accepts image/* and video/*. Encrypted DMs arrive as raw bytes
+  // whose blob type may be empty or octet-stream, so present those as image/png
+  // (the client wraps E2E ciphertext in an image envelope before uploading).
+  const type = blob.type && blob.type !== 'application/octet-stream' ? blob.type : 'image/png';
+  form.append('file', type === blob.type ? blob : new Blob([blob], { type }), filename);
 
   if (onProgress) onProgress(10);
 

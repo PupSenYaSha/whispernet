@@ -3,10 +3,9 @@ import { hkdf } from '@noble/hashes/hkdf.js';
 import { hmac } from '@noble/hashes/hmac.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import type { KeyPair, SessionState } from './types';
+import { MAX_SKIP, MAX_SKIPPED_MESSAGE_KEYS, MAX_SESSIONS } from './constants';
 
 const INFO_ROOT = new TextEncoder().encode('WhisperNetRoot');
-const MAX_SKIP = 2000;
-const MAX_SESSIONS = 200;
 
 export function createRatchetState(): SessionState {
   return {
@@ -92,7 +91,9 @@ export function advanceReceivingChain(
   if (!state.receivingChainKey) return null;
 
   if (messageNumber < state.receivingMessageNumber) {
-    return state.skippedMessageKeys.get(messageNumber) || null;
+    const key = state.skippedMessageKeys.get(messageNumber);
+    if (key) state.skippedMessageKeys.delete(messageNumber);
+    return key || null;
   }
 
   const skipCount = messageNumber - state.receivingMessageNumber;
@@ -101,6 +102,10 @@ export function advanceReceivingChain(
   while (state.receivingMessageNumber < messageNumber) {
     const { nextChainKey, messageKey } = chainKDF(state.receivingChainKey);
     state.skippedMessageKeys.set(state.receivingMessageNumber, messageKey);
+    if (state.skippedMessageKeys.size > MAX_SKIPPED_MESSAGE_KEYS) {
+      const oldestKey = state.skippedMessageKeys.keys().next().value;
+      if (oldestKey != null) state.skippedMessageKeys.delete(oldestKey);
+    }
     state.receivingChainKey = nextChainKey;
     state.receivingMessageNumber++;
   }
@@ -121,6 +126,7 @@ export function ratchetStep(
   state.previousSendingChainLength = state.sendingMessageNumber;
   state.sendingMessageNumber = 0;
   state.receivingMessageNumber = 0;
+  state.skippedMessageKeys.clear();
 
   const { rootKey, chainKey } = dhRatchet(
     state.rootKey,

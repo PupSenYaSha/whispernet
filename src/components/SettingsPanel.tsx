@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import type { AccentColor } from '../types';
 import { useConnection } from '../context';
 import { cn, getAvatarText } from '../utils';
-import { generateSafetyNumber } from '../crypto';
+import { generateX3dhSafetyNumber } from '../crypto';
 import QRCode from 'qrcode';
 
 declare const __APP_VERSION__: string;
@@ -143,7 +143,7 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
   };
 
   const SafetyNumberButton = () => {
-    const { state, getMyPublicKey, getPublicKey, t } = useConnection();
+    const { state, getMyIdentityKeyB64, getPeerIdentityKeyB64, identityWarning, t } = useConnection();
     const [showSafety, setShowSafety] = useState(false);
     const [safetyNum, setSafetyNum] = useState('');
     const [qrCode, setQrCode] = useState<string>('');
@@ -151,14 +151,18 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
 
     const showNumber = async () => {
       try {
-        const pubKey = getMyPublicKey();
-        if (!pubKey) {
-          setSafetyNum('KEY NOT FOUND -- re-login required');
+        // 1.3: the safety number is derived from the X3DH identity keys (own +
+        // peer), not the RSA transport key. It is only comparable once a DM has
+        // exchanged pre-key bundles.
+        const myId = getMyIdentityKeyB64();
+        if (!myId) {
+          setSafetyNum('IDENTITY NOT FOUND -- re-login required');
+          setQrCode('');
           setShowSafety(true);
           return;
         }
-        const otherKey = state.activeChannel !== 'general' ? getPublicKey(state.activeChannel) : null;
-        const num = await generateSafetyNumber(pubKey, otherKey || undefined);
+        const peerId = state.activeChannel !== 'general' ? getPeerIdentityKeyB64(state.activeChannel) : null;
+        const num = await generateX3dhSafetyNumber(myId, peerId);
         setSafetyNum(num);
         const qr = await QRCode.toDataURL(num);
         setQrCode(qr);
@@ -209,6 +213,11 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
                 <div className="p-4 rounded-xl bg-bg-tertiary font-mono text-[13px] text-fg-primary break-all text-center leading-relaxed">
                   {safetyNum}
                 </div>
+                {identityWarning && identityWarning.userId === state.activeChannel && (
+                  <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-[12px] text-red-400 text-center leading-relaxed">
+                    Identity key changed for this contact. Verify the new safety number with them out-of-band before trusting messages.
+                  </div>
+                )}
                 <button onClick={handleCopy}
                   className="w-full py-3 rounded-xl border border-border-default text-fg-primary text-[15px] hover:bg-bg-tertiary transition-colors font-medium">
                   {copyOk ? 'OK Copied' : t('copy')}

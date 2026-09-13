@@ -9,17 +9,21 @@ import {
   dhRatchet,
   MAX_SESSIONS,
 } from './ratchet';
+import {
+  PBKDF2_ITER,
+  SESSION_STATE_VERSION,
+  SESSION_MAX_AGE_MS,
+  REKEY_INTERVAL_MS,
+  MAX_INACTIVITY_MS,
+  CLEANUP_INTERVAL_MS,
+  PROTOCOL_VERSION,
+  KEY_PREFIX,
+} from './constants';
 import { hkdf } from '@noble/hashes/hkdf.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 
-const SESSIONS_KEY = 'wn_signal_sessions';
+const SESSIONS_KEY = KEY_PREFIX.sessions;
 const INFO_ROOT = new TextEncoder().encode('WhisperNetRoot');
-const PBKDF2_ITER = 600_000;
-const SESSION_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000;
-const REKEY_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000;
-const MAX_INACTIVITY_MS = 60 * 24 * 60 * 60 * 1000;
-const CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
-const PROTOCOL_VERSION = 2;
 
 function bufToBase64(buf: ArrayBuffer): string {
   return btoa(String.fromCharCode(...new Uint8Array(buf)));
@@ -41,12 +45,12 @@ export class SessionManager {
 
   async init(password: string): Promise<void> {
     const salt = new Uint8Array(16);
-    const saltB64 = localStorage.getItem('wn_signal_sessions_salt');
+    const saltB64 = localStorage.getItem(KEY_PREFIX.sessionsSalt);
     if (saltB64) {
       salt.set(new Uint8Array(base64ToBuf(saltB64)));
     } else {
       crypto.getRandomValues(salt);
-      localStorage.setItem('wn_signal_sessions_salt', bufToBase64(salt.buffer));
+      localStorage.setItem(KEY_PREFIX.sessionsSalt, bufToBase64(salt.buffer));
     }
     const passKey = await crypto.subtle.importKey(
       'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']
@@ -114,8 +118,8 @@ export class SessionManager {
       } else {
         localStorage.setItem(SESSIONS_KEY, json);
       }
-    } catch {
-      // silent
+    } catch (e) {
+      console.error('[signal] failed to persist sessions:', e);
     }
   }
 
@@ -158,7 +162,7 @@ export class SessionManager {
     state.createdAt = now;
     state.lastActivity = now;
 
-    const session: Session = { sessionId, state, version: 3, protocolVersion: PROTOCOL_VERSION };
+    const session: Session = { sessionId, state, version: SESSION_STATE_VERSION, protocolVersion: PROTOCOL_VERSION };
     this.evictOldestSession();
     this.sessions.set(sessionId, session);
     this.save();
@@ -199,7 +203,7 @@ export class SessionManager {
     state.createdAt = now;
     state.lastActivity = now;
 
-    const session: Session = { sessionId, state, version: 3, protocolVersion: PROTOCOL_VERSION };
+    const session: Session = { sessionId, state, version: SESSION_STATE_VERSION, protocolVersion: PROTOCOL_VERSION };
     this.evictOldestSession();
     this.sessions.set(sessionId, session);
     this.save();

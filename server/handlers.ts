@@ -1,11 +1,25 @@
 import { WebSocket } from 'ws';
-import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, type StoredSession, getChannelMediaKey } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, type StoredSession, getChannelMediaKey } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { appendFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { nextMondayMidnightMSK } from './time.js';
+import {
+  RATE_LIMIT_WINDOW,
+  MAX_AUTH_ATTEMPTS,
+  MIN_MESSAGE_INTERVAL,
+  MAX_SESSIONS_PER_USER,
+  MAX_CONNECTIONS_PER_IP,
+  MAX_FAILED_LOGINS,
+  ACCOUNT_LOCKOUT_DURATION,
+  FAILED_LOGIN_RETENTION_MS,
+  MAX_WS_PAYLOAD_SIZE,
+  HEARTBEAT_INTERVAL,
+  CLIENT_TIMEOUT,
+  DM_TTL_ALLOWED_MS,
+} from './constants.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const LOG_DIR = path.join(__dirname, '../data');
@@ -149,22 +163,26 @@ export function getTotalConnections(): number {
   return totalConnections;
 }
 
-const HEARTBEAT_INTERVAL = 15000;
-const CLIENT_TIMEOUT = 90000;
-
-const RATE_LIMIT_WINDOW = 60000;
-const MAX_AUTH_ATTEMPTS = 5;
-const MIN_MESSAGE_INTERVAL = 500;
-const MAX_SESSIONS_PER_USER = 3;
-const MAX_CONNECTIONS_PER_IP = 10;
-const MAX_FAILED_LOGINS = 5;
-const ACCOUNT_LOCKOUT_DURATION = 300000;
-const MAX_WS_PAYLOAD_SIZE = 65536;
+// A fixed dummy hash used to keep bcrypt.compare() work constant-time even
+// when the login name does not exist, so account existence cannot be probed
+// through response timing.
+const DUMMY_PASSWORD_HASH = '$2a$12$C6UzMDM.H8dQYhC1Bcye0e7o3mN0q0VWcZBp4eXmJzVQyGpL3uTIC';
 
 const authAttempts = new Map<string, { count: number; resetAt: number }>();
 const lastMessageTime = new Map<string, number>();
 const connectionCounts = new Map<string, number>();
-const failedLogins = new Map<string, { count: number; lockedUntil: number }>();
+const failedLogins = new Map<string, { count: number; lockedUntil: number; lastActive: number }>();
+
+function recordFailedLogin(lockKey: string, count: number, lockedUntil: number): void {
+  failedLogins.set(lockKey, { count, lockedUntil, lastActive: Date.now() });
+  // Bound the in-memory map so it cannot grow without limit from random probes.
+  if (failedLogins.size > 5000) {
+    const cutoff = Date.now() - FAILED_LOGIN_RETENTION_MS;
+    for (const [key, entry] of failedLogins) {
+      if (entry.lastActive < cutoff) failedLogins.delete(key);
+    }
+  }
+}
 
 interface ServerMessage {
   type: string;
@@ -460,6 +478,12 @@ export function handleConnection(ws: WebSocket): void {
     }
 
     const lockKey = cleanNick.toLowerCase();
+    // 3.10: drop stale failed-login records so a one-off typo months ago never
+    // escalates a legitimate user straight into a lockout.
+    const purgeCutoff = Date.now() - FAILED_LOGIN_RETENTION_MS;
+    for (const [key, entry] of failedLogins) {
+      if (entry.lastActive < purgeCutoff) failedLogins.delete(key);
+    }
     const lockEntry = failedLogins.get(lockKey);
     if (lockEntry && lockEntry.lockedUntil > Date.now()) {
       const remaining = Math.ceil((lockEntry.lockedUntil - Date.now()) / 60000);
@@ -469,17 +493,21 @@ export function handleConnection(ws: WebSocket): void {
     }
 
     const user = await getUserByNickname(cleanNick);
-    if (!user || typeof password !== 'string' || !user.passwordHash || !(await bcrypt.compare(password, user.passwordHash))) {
+    if (!user || typeof password !== 'string' || !user.passwordHash) {
+      // 1.5: run a dummy comparison so unknown nicknames take the same time as
+      // a wrong password, preventing account-enumeration via response timing.
+      await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
       const newCount = lockEntry ? lockEntry.count + 1 : 1;
       const lockedUntil = newCount >= MAX_FAILED_LOGINS ? Date.now() + ACCOUNT_LOCKOUT_DURATION : 0;
-
-      if (lockEntry) {
-        lockEntry.count = newCount;
-        lockEntry.lockedUntil = lockedUntil;
-      } else {
-        failedLogins.set(lockKey, { count: newCount, lockedUntil });
-      }
-
+      recordFailedLogin(lockKey, newCount, lockedUntil);
+      logSecurity('LOGIN_FAILED', { nickname: cleanNick, ip, attempts: newCount, locked: lockedUntil > 0 });
+      send(ws, { type: 'auth_failure', payload: { reason: 'Invalid nickname or password' }, timestamp: Date.now() });
+      return;
+    }
+    if (!(await bcrypt.compare(String(password), user.passwordHash))) {
+      const newCount = lockEntry ? lockEntry.count + 1 : 1;
+      const lockedUntil = newCount >= MAX_FAILED_LOGINS ? Date.now() + ACCOUNT_LOCKOUT_DURATION : 0;
+      recordFailedLogin(lockKey, newCount, lockedUntil);
       logSecurity('LOGIN_FAILED', { nickname: cleanNick, ip, attempts: newCount, locked: lockedUntil > 0 });
       send(ws, { type: 'auth_failure', payload: { reason: 'Invalid nickname or password' }, timestamp: Date.now() });
       return;
@@ -589,7 +617,8 @@ export function handleConnection(ws: WebSocket): void {
     send(ws, { type: 'auth_success', payload: { userId, nickname, deviceId, publicKeys, preKeyBundles: {}, onlineUsers, role: await isAdminNickname(nickname) ? 'admin' : 'user', channelMediaKey: await getChannelMediaKey() }, timestamp: Date.now() });
 
     const history = await getRecentMessages(100);
-    const messages = await Promise.all(history.map(async m => ({
+    const reactionsById = await getReactionsForMessages(history.map((m) => m.id));
+    const messages = history.map((m) => ({
       id: m.id,
       senderId: m.senderId,
       senderNickname: m.senderNickname,
@@ -602,8 +631,8 @@ export function handleConnection(ws: WebSocket): void {
       quotedMessageId: m.quotedMessageId ?? null,
       quotedMessageText: m.quotedMessageText ?? null,
       quotedMessageSender: m.quotedMessageSender ?? null,
-      reactions: await getReactionsForMessage(m.id),
-    })));
+      reactions: reactionsById.get(m.id) || [],
+    }));
     send(ws, {
       type: 'chat_history',
       payload: {
@@ -799,15 +828,9 @@ export function handleConnection(ws: WebSocket): void {
     }
   }
 
-const ALLOWED_TTL_MS: Record<number, number> = {
-  86400: 24 * 60 * 60 * 1000,
-  604800: 7 * 24 * 60 * 60 * 1000,
-  2592000: 30 * 24 * 60 * 60 * 1000,
-};
-
 function resolveExpiry(ttl: unknown, timestamp: number): number | undefined {
-  if (typeof ttl !== 'number' || !ALLOWED_TTL_MS[ttl]) return undefined;
-  return timestamp + ALLOWED_TTL_MS[ttl];
+  if (typeof ttl !== 'number' || !DM_TTL_ALLOWED_MS[ttl]) return undefined;
+  return timestamp + DM_TTL_ALLOWED_MS[ttl];
 }
 
 function isValidEmoji(emoji: unknown): emoji is string {
@@ -829,6 +852,9 @@ function canonicalJwk(jwk: any): string {
   async function handleAddReaction(userId: string, ws: WebSocket, payload: { messageId: string; emoji: string }): Promise<void> {
     if (!payload?.messageId || typeof payload.messageId !== 'string') return;
     if (!isValidEmoji(payload.emoji)) return;
+    // 1.6: only members of the message's channel may react to it.
+    const target = await getMessageById(payload.messageId);
+    if (!target || !canAccessMessage(userId, target)) return;
     await addReaction(payload.messageId, userId, payload.emoji);
     const reactions = await getReactionsForMessage(payload.messageId);
     broadcastToMessageAudience(payload.messageId, userId, {
@@ -841,6 +867,8 @@ function canonicalJwk(jwk: any): string {
   async function handleRemoveReaction(userId: string, ws: WebSocket, payload: { messageId: string; emoji: string }): Promise<void> {
     if (!payload?.messageId || typeof payload.messageId !== 'string') return;
     if (!isValidEmoji(payload.emoji)) return;
+    const target = await getMessageById(payload.messageId);
+    if (!target || !canAccessMessage(userId, target)) return;
     await removeReaction(payload.messageId, userId, payload.emoji);
     const reactions = await getReactionsForMessage(payload.messageId);
     broadcastToMessageAudience(payload.messageId, userId, {
@@ -848,6 +876,15 @@ function canonicalJwk(jwk: any): string {
       payload: { messageId: payload.messageId, emoji: payload.emoji, userId, action: 'remove', reactions },
       timestamp: Date.now(),
     });
+  }
+
+  function canAccessMessage(userId: string, msg: { channel?: string | null }): boolean {
+    if (!msg.channel || msg.channel === 'general') return true;
+    if (msg.channel.includes(':')) {
+      const parts = msg.channel.split(':');
+      return parts.length === 2 && (parts[0] === userId || parts[1] === userId);
+    }
+    return msg.channel === userId;
   }
 
   function broadcastToMessageAudience(messageId: string, actorUserId: string, message: ServerMessage): void {
@@ -882,25 +919,31 @@ function canonicalJwk(jwk: any): string {
         channel,
         with: payload.with,
         publicKeys,
-        messages: await Promise.all(messages.map(async m => ({
-          id: m.id,
-          senderId: m.senderId,
-          senderNickname: m.senderNickname,
-          text: m.text || '',
-          encrypted: m.encrypted || null,
-          sealed: m.sealed || null,
-          timestamp: m.timestamp,
-          isOwn: m.senderId === userId,
-          fileKey: m.fileKey || null,
-          expiresAt: m.expiresAt || null,
-          quotedMessageId: m.quotedMessageId ?? null,
-          quotedMessageText: m.quotedMessageText ?? null,
-          quotedMessageSender: m.quotedMessageSender ?? null,
-          reactions: await getReactionsForMessage(m.id),
-        }))),
+        messages: await handleDmHistoryMessages(userId, messages),
       },
       timestamp: Date.now(),
     });
+  }
+
+  // Batches reaction lookups across a DM history instead of one query per row.
+  async function handleDmHistoryMessages(userId: string, messages: any[]): Promise<any[]> {
+    const reactionsById = await getReactionsForMessages(messages.map((m) => m.id));
+    return messages.map(m => ({
+      id: m.id,
+      senderId: m.senderId,
+      senderNickname: m.senderNickname,
+      text: m.text || '',
+      encrypted: m.encrypted || null,
+      sealed: m.sealed || null,
+      timestamp: m.timestamp,
+      isOwn: m.senderId === userId,
+      fileKey: m.fileKey || null,
+      expiresAt: m.expiresAt || null,
+      quotedMessageId: m.quotedMessageId ?? null,
+      quotedMessageText: m.quotedMessageText ?? null,
+      quotedMessageSender: m.quotedMessageSender ?? null,
+      reactions: reactionsById.get(m.id) || [],
+    }));
   }
 
   async function handleDmContacts(userId: string, ws: WebSocket): Promise<void> {
@@ -934,7 +977,8 @@ function canonicalJwk(jwk: any): string {
       return;
     }
     const results = await searchMessages(query, payload.channel, 50, userId);
-    const resultsWithReactions = await Promise.all(results.map(async (m: any) => ({ ...m, reactions: await getReactionsForMessage(m.id) })));
+    const reactionsById = await getReactionsForMessages(results.map((m: any) => m.id));
+    const resultsWithReactions = results.map((m: any) => ({ ...m, reactions: reactionsById.get(m.id) || [] }));
     send(ws, { type: 'message_search_results', payload: { results: resultsWithReactions }, timestamp: Date.now() });
   }
 

@@ -17,7 +17,8 @@
     "build:electron": "node node_modules/tsx/dist/cli.mjs node_modules/typescript/bin/tsc -p electron/tsconfig.json",
     "cap:sync": "npx cap sync",
     "cap:android": "npx cap sync android",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p server/tsconfig.json --noEmit && tsc -p electron/tsconfig.json --noEmit"
   },
   "dependencies": {
     "@fastify/multipart": "^10.1.0",

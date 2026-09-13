@@ -99,6 +99,10 @@ export interface ConnectionContextType {
   updateSettings: (settings: Partial<AppSettings>) => void;
   getMyPublicKey: () => JsonWebKey | null;
   getPublicKey: (userId: string) => JsonWebKey | null;
+  getMyIdentityKeyB64: () => string | null;
+  getPeerIdentityKeyB64: (userId: string) => string | null;
+  identityWarning: { userId: string; nickname?: string } | null;
+  dismissIdentityWarning: () => void;
   decryptMedia: (message: { id: string; text: string; fileKey?: Record<string, string> }) => Promise<string | null>;
   sessions: Session[];
   requestSessions: () => void;

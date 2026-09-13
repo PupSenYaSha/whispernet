@@ -1,7 +1,8 @@
 import { app, BrowserWindow, ipcMain, nativeTheme, Menu } from 'electron';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
-import { writeFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, rmdirSync, createWriteStream } from 'fs';
+import { writeFileSync, existsSync, mkdirSync, readdirSync, statSync, unlinkSync, rmdirSync, createWriteStream, createReadStream } from 'fs';
+import { createHash } from 'crypto';
 import https from 'https';
 import http from 'http';
 import { spawn } from 'child_process';
@@ -125,6 +126,64 @@ function downloadFile(url: string, dest: string, onProgress?: (percent: number) 
   });
 }
 
+// 1.8c: streamed SHA-256 so the downloaded update package can be verified
+// against a published digest before anything is extracted or executed.
+function sha256File(filePath: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const hash = createHash('sha256');
+    const stream = createReadStream(filePath);
+    stream.on('data', (c: Buffer | string) => hash.update(c));
+    stream.on('end', () => resolve(hash.digest('hex')));
+    stream.on('error', reject);
+  });
+}
+
+function fetchText(url: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const protocol = url.startsWith('https') ? https : http;
+    const req = protocol.get(url, { headers: { 'User-Agent': 'WhisperNet' } }, (res) => {
+      if (res.statusCode === 301 || res.statusCode === 302) {
+        return fetchText(res.headers.location!).then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) return reject(new Error(`HTTP ${res.statusCode}`));
+      let data = '';
+      res.on('data', (c: any) => data += c);
+      res.on('end', () => resolve(data));
+    });
+    req.on('error', reject);
+    req.setTimeout(10000, () => { req.destroy(); reject(new Error('timeout')); });
+  });
+}
+
+async function verifyUpdateIntegrity(release: any, zipPath: string): Promise<void> {
+  // Take the digest from the release asset metadata when the repo publishes it.
+  if (typeof release.sha256 === 'string' && release.sha256.length === 64) {
+    const actual = await sha256File(zipPath);
+    if (actual !== release.sha256) {
+      throw new Error('Update integrity check failed (SHA-256 mismatch)');
+    }
+    logUpdater(`SHA-256 verified from release metadata: ${actual.slice(0, 12)}…`);
+    return;
+  }
+  const digestAsset = release.assets?.find((a: any) => a.name?.endsWith('.sha256'));
+  if (!digestAsset) {
+    logUpdater('Warning: no .sha256 digest asset published; skipping verification');
+    return;
+  }
+  const digestText = await fetchText(digestAsset.browser_download_url);
+  const match = /([a-f0-9]{64})/i.exec(digestText);
+  const expected = match ? match[1].toLowerCase() : '';
+  if (!expected) {
+    logUpdater('Warning: digest asset unparseable; skipping verification');
+    return;
+  }
+  const actual = await sha256File(zipPath);
+  if (expected !== actual) {
+    throw new Error('Update integrity check failed (SHA-256 mismatch)');
+  }
+  logUpdater(`SHA-256 verified: ${actual.slice(0, 12)}…`);
+}
+
 function removeDirRecursive(dir: string) {
   if (!existsSync(dir)) return;
   for (const entry of readdirSync(dir)) {
@@ -219,6 +278,7 @@ async function checkAndUpdate(win: BrowserWindow) {
       win.webContents.send('update-progress', { percent });
     });
     logUpdater('Downloaded');
+    await verifyUpdateIntegrity(release, zipPath);
 
     win.webContents.send('update-progress', { percent: 100, status: 'extracting' });
 

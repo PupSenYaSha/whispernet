@@ -9,25 +9,36 @@ import fs from 'fs';
 import { existsSync } from 'fs';
 import { handleConnection, startHeartbeatCheck, getTotalConnections } from './handlers.js';
 import { initializeDatabase, getMediaDir } from './database.js';
+import {
+  UPLOAD_RATE_LIMIT,
+  UPLOAD_RATE_WINDOW,
+  MAX_UPLOAD_SIZE,
+  MAX_TOTAL_CONNECTIONS,
+  MEDIA_RATE_LIMIT,
+  MEDIA_RATE_WINDOW,
+  MAX_MEDIA_STREAM,
+} from './constants.js';
 import https from 'https';
 import http from 'http';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const uploadRateMap = new Map<string, { count: number; resetAt: number }>();
-const UPLOAD_RATE_LIMIT = 10;
-const UPLOAD_RATE_WINDOW = 60_000;
-const MAX_UPLOAD_SIZE = 10 * 1024 * 1024;
-const MAX_TOTAL_CONNECTIONS = 500;
-const ALLOWED_MIME = [
-  'image/jpeg', 'image/png', 'image/gif', 'image/webp',
-  'video/mp4', 'video/webm', 'video/quicktime',
-];
+// Strict subtype check: prevents smuggling malformed whitespace into the MIME
+// type that gets embedded in a reconstructed multipart body or saved file.
+const MIME_RE = /^(image|video)\/[a-z0-9.+-]+$/i;
 
+const uploadRateMap = new Map<string, { count: number; resetAt: number }>();
+const mediaRateMap = new Map<string, { count: number; resetAt: number }>();
+
+// 1.8a: media downloads consume bandwidth like uploads do, so they get their
+// own per-IP budget to stop a single host hammering the media cache.
 setInterval(() => {
   const now = Date.now();
   for (const [ip, entry] of uploadRateMap) {
     if (now > entry.resetAt) uploadRateMap.delete(ip);
+  }
+  for (const [ip, entry] of mediaRateMap) {
+    if (now > entry.resetAt) mediaRateMap.delete(ip);
   }
 }, 60_000);
 
@@ -39,6 +50,18 @@ function checkUploadRate(ip: string): boolean {
     return true;
   }
   if (entry.count >= UPLOAD_RATE_LIMIT) return false;
+  entry.count++;
+  return true;
+}
+
+function checkMediaRate(ip: string): boolean {
+  const now = Date.now();
+  const entry = mediaRateMap.get(ip);
+  if (!entry || now > entry.resetAt) {
+    mediaRateMap.set(ip, { count: 1, resetAt: now + MEDIA_RATE_WINDOW });
+    return true;
+  }
+  if (entry.count >= MEDIA_RATE_LIMIT) return false;
   entry.count++;
   return true;
 }
@@ -99,11 +122,24 @@ export function createApp(clientDir?: string) {
     root: resolvedClientDir,
     prefix: '/',
     wildcard: true,
+    // 3.7: Vite emits content-hashed asset filenames, so those can be cached
+    // forever, while HTML must always revalidate (it changes on every deploy).
+    setHeaders(res, filePath) {
+      if (/\.(js|mjs|css|woff2?|png|jpg|jpeg|gif|webp|svg|ico)$/i.test(filePath)) {
+        res.header('Cache-Control', 'public, max-age=31536000, immutable');
+      } else {
+        res.header('Cache-Control', 'no-cache');
+      }
+    },
   });
 
   app.get('/health', async () => ({ status: 'ok' }));
 
   app.get('/api/media', async (req, reply) => {
+    const ip = req.ip || 'unknown';
+    if (!checkMediaRate(ip)) {
+      return reply.code(429).send({ error: 'Rate limit' });
+    }
     const url = (req.query as any).url;
     if (!url || typeof url !== 'string') return reply.code(400).send({ error: 'Missing url' });
 
@@ -147,14 +183,14 @@ export function createApp(clientDir?: string) {
       }
 
       const contentLength = parseInt(proxyRes.headers['content-length'] || '0', 10);
-      if (contentLength > 5 * 1024 * 1024) {
+      if (contentLength > MAX_MEDIA_STREAM) {
         proxyRes.destroy();
         try { raw.writeHead(413); raw.end('Too large'); } catch {}
         return;
       }
 
       let totalBytes = 0;
-      const MAX_RESPONSE = 5 * 1024 * 1024;
+      const MAX_RESPONSE = MAX_MEDIA_STREAM;
 
       raw.writeHead(proxyRes.statusCode || 502, {
         'Content-Type': proxyResCt,
@@ -188,7 +224,7 @@ export function createApp(clientDir?: string) {
     if ((process.env.MEDIA_STORAGE || 'remote') === 'local') {
       const data = await req.file();
       if (!data) return reply.code(400).send({ error: 'No file' });
-      if (!(data.mimetype.startsWith('image/') || data.mimetype.startsWith('video/') || data.mimetype === 'application/octet-stream')) {
+      if (!MIME_RE.test(data.mimetype)) {
         return reply.code(400).send({ error: 'Invalid file type' });
       }
       const buf = await data.toBuffer();
@@ -201,11 +237,7 @@ export function createApp(clientDir?: string) {
     const data = await req.file();
     if (!data) return reply.code(400).send({ error: 'No file' });
 
-    if (!(
-      data.mimetype.startsWith('image/') ||
-      data.mimetype.startsWith('video/') ||
-      data.mimetype === 'application/octet-stream'
-    )) {
+    if (!MIME_RE.test(data.mimetype)) {
       return reply.code(400).send({ error: 'Invalid file type' });
     }
 
@@ -329,7 +361,9 @@ export function createApp(clientDir?: string) {
       reply.code(404).send({ error: 'Not found' });
       return;
     }
-    reply.sendFile('index.html');
+    reply
+      .header('Cache-Control', 'no-cache')
+      .sendFile('index.html');
   });
 
   return app;

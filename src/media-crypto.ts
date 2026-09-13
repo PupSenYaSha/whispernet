@@ -108,12 +108,16 @@ export async function buildFileKeyMap(
     if (!jwk) continue;
     try {
       map[id] = `${ivB64}:${await wrapFileKeyFor(rawKey, jwk)}`;
-    } catch {}
+    } catch (e) {
+      console.error(`wrapFileKeyFor failed for ${id}:`, e);
+    }
   }
   if (channelMediaKeyB64) {
     try {
       map['channel'] = `${ivB64}:${await wrapFileKeyForChannel(rawKey, channelMediaKeyB64, ivB64)}`;
-    } catch {}
+    } catch (e) {
+      console.error('wrapFileKeyForChannel failed:', e);
+    }
   }
   return map;
 }
