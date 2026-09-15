@@ -17,7 +17,7 @@ for (const [folder, size] of Object.entries(sizes)) {
   const dir = path.join(resDir, folder);
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 
-  // Regular icon (canonical gradient logo)
+  
   const canvas = createCanvas(size, size);
   const ctx = canvas.getContext('2d');
   drawLogo(ctx, size);
@@ -25,7 +25,7 @@ for (const [folder, size] of Object.entries(sizes)) {
   fs.writeFileSync(path.join(dir, 'ic_launcher.png'), buf);
   fs.writeFileSync(path.join(dir, 'ic_launcher_round.png'), buf);
 
-  // Foreground: white W on transparent background (for adaptive icon)
+  
   const fgCanvas = createCanvas(size, size);
   const fgCtx = fgCanvas.getContext('2d');
   const w = size * 0.04167;
@@ -52,7 +52,7 @@ for (const [folder, size] of Object.entries(sizes)) {
   console.log(`Generated ${folder}: ${size}x${size}`);
 }
 
-// PWA icons (used by manifest / favicon / apple-touch-icon)
+
 const pwaDir = path.join(__dirname, '../public/icons');
 if (!fs.existsSync(pwaDir)) fs.mkdirSync(pwaDir, { recursive: true });
 for (const size of [192, 512]) {

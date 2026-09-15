@@ -78,7 +78,7 @@ export async function generateX3dhSafetyNumber(selfIdentityB64: string, peerIden
   let data: Uint8Array;
   if (peerIdentityB64) {
     const peer = base64ToU8(peerIdentityB64);
-    // Deterministic ordering: both sides must arrive at the same concatenation.
+    
     data = byteCompare(self, peer) <= 0 ? concatBytes(self, peer) : concatBytes(peer, self);
   } else {
     data = self;

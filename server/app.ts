@@ -23,15 +23,15 @@ import http from 'http';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Strict subtype check: prevents smuggling malformed whitespace into the MIME
-// type that gets embedded in a reconstructed multipart body or saved file.
+
+
 const MIME_RE = /^(image|video)\/[a-z0-9.+-]+$/i;
 
 const uploadRateMap = new Map<string, { count: number; resetAt: number }>();
 const mediaRateMap = new Map<string, { count: number; resetAt: number }>();
 
-// 1.8a: media downloads consume bandwidth like uploads do, so they get their
-// own per-IP budget to stop a single host hammering the media cache.
+
+
 setInterval(() => {
   const now = Date.now();
   for (const [ip, entry] of uploadRateMap) {
@@ -74,8 +74,8 @@ function getMediaBase(): URL {
   return new URL(process.env.MEDIA_BASE_URL || 'https://img.n1ko.dev');
 }
 
-// Load TLS material when provided via env so the server can terminate HTTPS/WSS directly.
-// Production deployments should always set these (or sit behind a TLS-terminating reverse proxy).
+
+
 function loadHttpsOptions(): { key: Buffer; cert: Buffer } | null {
   const keyPath = process.env.TLS_KEY || process.env.HTTPS_KEY;
   const certPath = process.env.TLS_CERT || process.env.HTTPS_CERT;
@@ -122,8 +122,8 @@ export function createApp(clientDir?: string) {
     root: resolvedClientDir,
     prefix: '/',
     wildcard: true,
-    // 3.7: Vite emits content-hashed asset filenames, so those can be cached
-    // forever, while HTML must always revalidate (it changes on every deploy).
+    
+    
     setHeaders(res, filePath) {
       if (/\.(js|mjs|css|woff2?|png|jpg|jpeg|gif|webp|svg|ico)$/i.test(filePath)) {
         res.header('Cache-Control', 'public, max-age=31536000, immutable');
@@ -283,7 +283,7 @@ export function createApp(clientDir?: string) {
                   resolve();
                   return;
                 }
-              } catch { /* ignore parse errors */ }
+              } catch {  }
             }
           }
           reply.code(500).send({ error: 'Upload failed' });
@@ -309,8 +309,8 @@ export function createApp(clientDir?: string) {
   });
 
   app.register(async (fastify) => {
-    // Run before the websocket upgrade so mismatched origins are rejected with a
-    // plain HTTP 403 instead of being upgraded. Only websocket upgrades are checked.
+    
+    
     fastify.addHook('preValidation', async (request, reply) => {
       if (String(request.headers.upgrade || '').toLowerCase() !== 'websocket') return;
       const origin = request.headers.origin;
@@ -383,9 +383,9 @@ export async function startServer(clientDir?: string, dataDir?: string) {
 
   const app = createApp(clientDir);
 
-  // Harden against connection-level errors (client resets / aborted handshakes)
-  // that would otherwise surface as unhandled socket 'error' events and crash
-  // the whole process.
+  
+  
+  
   app.server.on('connection', (socket) => { socket.on('error', () => {}); });
   app.server.on('clientError', (err, socket) => {
     try { socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'); } catch {}

@@ -41,8 +41,8 @@ const WS_URL = import.meta.env.VITE_WS_URL || (() => {
   return `${proto}//${location.host}/ws`;
 })();
 
-// Stable per-browser/device id, persisted so the same device keeps the same deviceId
-// across reconnects (used for multi-device sessions + fan-out delivery).
+
+
 function getDeviceId(): string {
   try {
     let id = localStorage.getItem('wn_device_id');
@@ -217,8 +217,8 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const heartbeatWsRef = useRef<WebSocket | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const authRef = useRef<{ nickname: string; password: string; isRegister: boolean } | null>(null);
-  // Kept (not cleared) after auth_success so ws.onclose can auto-reconnect with
-  // the same credentials. authRef stays for UI flows (key setup / import).
+  
+  
   const credentialsRef = useRef<{ nickname: string; password: string; isRegister: boolean } | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const userIdRef = useRef<string | null>(null);
@@ -233,8 +233,8 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const signalInitializedRef = useRef(false);
   const preKeyBundlesRef = useRef<Record<string, any>>({});
   const pendingX3dhRef = useRef<Record<string, { x3dhMessage: any; ratchetPublicKey: Uint8Array }>>({});
-  // userId -> base64 X3DH identity key, mirrored into localStorage so identity
-  // changes across logins are detectable (see 1.3).
+  
+  
   const identityFingerprintsRef = useRef<Record<string, string>>({});
   const [identityWarning, setIdentityWarning] = useState<{ userId: string; nickname?: string } | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
@@ -246,9 +246,9 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const [bannedUsers, setBannedUsers] = useState<BannedUser[]>([]);
   const [adminError, setAdminError] = useState<string | null>(null);
 
-  // Fetches the server-stored encrypted key-backup (used to sync the account key
-  // across devices). The backup blob is opaque to the server; it is decrypted
-  // locally with the user's password (see A+C cross-device sync).
+  
+  
+  
   const fetchKeyBackup = (): Promise<string | null> => {
     return new Promise((resolve) => {
       const ws = wsRef.current;
@@ -260,11 +260,11 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
             ws.removeEventListener('message', handler);
             resolve((m.payload && m.payload.blob) || null);
           }
-        } catch { /* ignore */ }
+        } catch {  }
       };
       ws.addEventListener('message', handler);
       ws.send(JSON.stringify({ type: 'key_backup_fetch', payload: {} }));
-      setTimeout(() => { try { ws.removeEventListener('message', handler); } catch { /* ignore */ } resolve(null); }, 5000);
+      setTimeout(() => { try { ws.removeEventListener('message', handler); } catch {  } resolve(null); }, 5000);
     });
   };
 
@@ -337,17 +337,17 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     updateTitle();
   }, [updateTitle]);
 
-  // Establish (or re-establish) a local Double-Ratchet session with a peer via
-  // a fresh X3DH handshake from the peer's cached pre-key bundle. The resulting
-  // x3dhMessage is attached to the next outgoing message (pendingX3dhRef).
+  
+  
+  
   const establishSessionWith = useCallback((otherId: string) => {
     const myId = userIdRef.current;
     if (!myId || !signalInitializedRef.current || hasSession(myId, otherId)) return;
     const bundle = preKeyBundlesRef.current[otherId];
     if (!bundle) return;
     try {
-      // Stored/transported bundles carry base64 fields; decode to the local
-      // PreKeyBundle shape the Double-Ratchet code expects.
+      
+      
       const decoded = decodeServerBundle(bundle);
       if (!decoded) {
         console.error('Cannot decode pre-key bundle for', otherId);
@@ -360,9 +360,9 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     } catch (e) { console.error('Failed to create Signal session:', e); }
   }, []);
 
-  // Record the peer's X3DH identity key from a fresh pre-key bundle and raise a
-  // warning if it differs from the key that was known before (1.3). The first
-  // encounter simply stores the key for future comparisons.
+  
+  
+  
   const trackPeerIdentity = useCallback((peerId: string, identityKeyB64: string | null | undefined) => {
     if (!peerId || !identityKeyB64) return;
     const known = identityFingerprintsRef.current[peerId];
@@ -387,10 +387,10 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     }
   }, [trackPeerIdentity]);
 
-  // Heal a broken session: drop the local Double-Ratchet state and the cached
-  // peer bundle, then re-fetch it. Once the fresh bundle arrives we re-initiate
-  // X3DH (see the prekey_bundles handler), so the next outgoing message carries
-  // a brand-new handshake that the peer can accept.
+  
+  
+  
+  
   const healSignalSession = useCallback((otherId: string) => {
     const myId = userIdRef.current;
     if (!myId) return;
@@ -598,7 +598,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
                       localStorage.setItem(`wn_pub_${nick}`, JSON.stringify(bundle.publicKey));
                     }
                     localStorage.setItem(`wn_pk_${nick}`, serverBlob);
-                  } catch { /* backup unreadable -> fall back to local key below */ }
+                  } catch {  }
                 }
                 if (privateKeyRef.current && pw && !serverBlob && localBundle) {
                   ws.send(JSON.stringify({ type: 'key_backup_upload', payload: { blob: localBundle } }));
@@ -802,7 +802,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
           wsRef.current = null;
           dispatch({ type: 'SET_WS', ws: null });
         } else {
-          return; // stale socket superseded by a newer attempt
+          return; 
         }
         const creds = credentialsRef.current;
         if (userIdRef.current && creds) {
@@ -830,9 +830,9 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // Resume connectivity: when the app comes back to the foreground (or the
-  // network returns), reconnect immediately if the socket went stale, and probe
-  // with a heartbeat so a silently-dead socket fails fast and gets re-established.
+  
+  
+  
   useEffect(() => {
     const kick = () => {
       if (document.hidden) return;
@@ -883,8 +883,8 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
       wsRef.current.send(JSON.stringify({ type: 'revoke_session', payload: {} }));
     }
     disconnect();
-    // Reset per-account Signal state so a later login (possibly as another
-    // account) re-initializes identity keys, sessions and pre-key caches.
+    
+    
     signalInitializedRef.current = false;
     preKeyBundlesRef.current = {};
     pendingX3dhRef.current = {};
@@ -904,8 +904,8 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     return keys;
   }, []);
 
-  // Merge peer public keys received from the server. The local identity key is
-  // always re-applied so a stale server copy can never overwrite our own key.
+  
+  
   const mergePublicKeys = useCallback((incoming?: Record<string, JsonWebKey>) => {
     if (!incoming) return;
     publicKeysRef.current = { ...publicKeysRef.current, ...incoming };
@@ -915,7 +915,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const getMyPublicKey = useCallback((): JsonWebKey | null => publicKeyRef.current, []);
   const getPublicKey = useCallback((userId: string): JsonWebKey | null => publicKeysRef.current[userId] || null, []);
 
-  // X3DH identity keys backing the safety number (1.3).
+  
   const getMyIdentityKeyB64 = useCallback((): string | null => getMyIdentityKeyBase64(), []);
   const getPeerIdentityKeyB64 = useCallback((userId: string): string | null => {
     return getPeerIdentityKeyBase64(preKeyBundlesRef.current[userId] || null);
@@ -976,7 +976,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     wsRef.current.send(JSON.stringify({ type: 'chat_message', payload }));
   }, [ttlSeconds]);
 
-  // Attach a pending X3DH handshake to the outgoing payload exactly once.
+  
   const stampPendingX3dh = (payload: any, to: string) => {
     if (pendingX3dhRef.current[to]) {
       payload.x3dhMessage = pendingX3dhRef.current[to].x3dhMessage;
@@ -985,10 +985,10 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     }
   };
 
-  // Shared DM send pipeline: builds the server payload once and encrypts the
-  // content (Double-Ratchet or RSA legacy) before sending. Used by sendDm and
-  // sendDmImage so both paths exercise the same rules (no plaintext DMs, X3DH
-  // handshake stamping, sealed-sender metadata hiding).
+  
+  
+  
+  
   const sendDmPackage = useCallback(async (
     to: string,
     options: { text: string; fileKey?: Record<string, string>; sealed?: boolean; quoted?: ReplyTarget }
@@ -1253,8 +1253,8 @@ function AppInner() {
     return () => { try { backHandler?.remove?.(); } catch {} };
   }, []);
 
-  // Web / PWA swipe-back: entering a chat or settings pushes a history entry, so
-  // the system back gesture (Android edge swipe) pops it and closes the view.
+  
+  
   const pushView = useCallback((kind: 'chat' | 'settings') => {
     try { window.history.pushState({ wn: kind }, ''); } catch {}
   }, []);

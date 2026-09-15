@@ -1,5 +1,5 @@
-// Shared renderer for the canonical WhisperNet logo (public/logo.svg geometry):
-// purple gradient rounded square + white W + dot. Used by the icon generators.
+
+
 
 function roundedRectPath(ctx, s, radius) {
   ctx.beginPath();
@@ -15,9 +15,9 @@ function roundedRectPath(ctx, s, radius) {
   ctx.closePath();
 }
 
-// Draws the exact logo.svg geometry, scaled from the 120x120 viewBox:
-//   rect rx=28 (28/120), gradient #8b5cf6 -> #6d28d9,
-//   W stroke 5 (5/120) white round, dot r4 (4/120) at (60,88) @ 60% white.
+
+
+
 function drawLogo(ctx, size) {
   const s = size;
   const rx = s * (28 / 120);
@@ -28,7 +28,7 @@ function drawLogo(ctx, size) {
   ctx.fillStyle = grad;
   ctx.fill();
 
-  const w = s * 0.04167; // 5/120
+  const w = s * 0.04167; 
   ctx.strokeStyle = '#ffffff';
   ctx.lineWidth = w;
   ctx.lineCap = 'round';

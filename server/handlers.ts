@@ -44,12 +44,12 @@ export interface ConnectedClient {
   deviceInfo: string;
 }
 
-// Keyed by deviceId: a single user account may have several connected devices.
+
 const clients = new Map<string, ConnectedClient>();
-// userId -> set of currently connected deviceIds (used for fan-out delivery + online status).
+
 const userDevices = new Map<string, Set<string>>();
-// Persisted registry of every device that has ever logged in (userId -> deviceId -> record).
-// Loaded lazily on first auth; updated on login / disconnect / revoke.
+
+
 const sessionRecords = new Map<string, Map<string, StoredSession>>();
 let sessionRegistryPromise: Promise<void> | null = null;
 
@@ -68,11 +68,11 @@ async function ensureSessionRegistry(): Promise<void> {
   reconcileActiveSessions();
 }
 
-// Self-healing migration: any device with a live socket is guaranteed to be
-// represented in the persisted registry as an active (non-revoked) session.
-// This covers devices that logged in before the registry existed, so the
-// per-user cap always counts every active session, not just the online ones
-// that were recorded after the registry feature shipped.
+
+
+
+
+
 function reconcileActiveSessions(): void {
   for (const client of clients.values()) {
     const m = sessionRecords.get(client.userId);
@@ -97,7 +97,7 @@ function sessionLastActive(userId: string, deviceId: string, ts: number): void {
 }
 let totalConnections = 0;
 
-// All connected devices that belong to a given user.
+
 function devicesForUser(userId: string): ConnectedClient[] {
   const ids = userDevices.get(userId);
   if (!ids) return [];
@@ -114,10 +114,10 @@ function isUserOnline(userId: string): boolean {
   return !!ids && ids.size > 0;
 }
 
-// Register (or reconnect) a device. Replaces any prior socket for the same deviceId.
-// The session cap is enforced at auth time (see sessionCapReached): a *new* device
-// beyond MAX_SESSIONS_PER_USER is rejected before it is registered. Existing
-// sessions are NEVER evicted to make room for a new one.
+
+
+
+
 function registerDevice(deviceId: string, client: ConnectedClient): void {
   const prev = clients.get(deviceId);
   if (prev && prev.ws !== client.ws) {
@@ -128,9 +128,9 @@ function registerDevice(deviceId: string, client: ConnectedClient): void {
   userDevices.get(client.userId)!.add(deviceId);
 }
 
-// True when a *new* device (one that has never logged in before) would push the
-// user past MAX_SESSIONS_PER_USER. Counts persisted, non-revoked sessions, so the
-// cap keeps applying across restarts and to previously-seen (offline) devices.
+
+
+
 async function sessionCapReached(userId: string, deviceId: string | null): Promise<boolean> {
   await ensureSessionRegistry();
   const reg = sessionRecords.get(userId);
@@ -138,8 +138,8 @@ async function sessionCapReached(userId: string, deviceId: string | null): Promi
   if (deviceId) {
     const rec = reg.get(deviceId);
     if (rec) {
-      if (rec.revoked) return true; // a revoked session may not reconnect
-      return false; // reconnecting a known active device
+      if (rec.revoked) return true; 
+      return false; 
     }
   }
   let active = 0;
@@ -147,7 +147,7 @@ async function sessionCapReached(userId: string, deviceId: string | null): Promi
   return active >= MAX_SESSIONS_PER_USER;
 }
 
-// Remove a device from the connection tables (called on disconnect / revoke).
+
 function unregisterDevice(deviceId: string): void {
   const client = clients.get(deviceId);
   if (!client) return;
@@ -163,9 +163,9 @@ export function getTotalConnections(): number {
   return totalConnections;
 }
 
-// A fixed dummy hash used to keep bcrypt.compare() work constant-time even
-// when the login name does not exist, so account existence cannot be probed
-// through response timing.
+
+
+
 const DUMMY_PASSWORD_HASH = '$2a$12$C6UzMDM.H8dQYhC1Bcye0e7o3mN0q0VWcZBp4eXmJzVQyGpL3uTIC';
 
 const authAttempts = new Map<string, { count: number; resetAt: number }>();
@@ -175,7 +175,7 @@ const failedLogins = new Map<string, { count: number; lockedUntil: number; lastA
 
 function recordFailedLogin(lockKey: string, count: number, lockedUntil: number): void {
   failedLogins.set(lockKey, { count, lockedUntil, lastActive: Date.now() });
-  // Bound the in-memory map so it cannot grow without limit from random probes.
+  
   if (failedLogins.size > 5000) {
     const cutoff = Date.now() - FAILED_LOGIN_RETENTION_MS;
     for (const [key, entry] of failedLogins) {
@@ -478,8 +478,8 @@ export function handleConnection(ws: WebSocket): void {
     }
 
     const lockKey = cleanNick.toLowerCase();
-    // 3.10: drop stale failed-login records so a one-off typo months ago never
-    // escalates a legitimate user straight into a lockout.
+    
+    
     const purgeCutoff = Date.now() - FAILED_LOGIN_RETENTION_MS;
     for (const [key, entry] of failedLogins) {
       if (entry.lastActive < purgeCutoff) failedLogins.delete(key);
@@ -494,8 +494,8 @@ export function handleConnection(ws: WebSocket): void {
 
     const user = await getUserByNickname(cleanNick);
     if (!user || typeof password !== 'string' || !user.passwordHash) {
-      // 1.5: run a dummy comparison so unknown nicknames take the same time as
-      // a wrong password, preventing account-enumeration via response timing.
+      
+      
       await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
       const newCount = lockEntry ? lockEntry.count + 1 : 1;
       const lockedUntil = newCount >= MAX_FAILED_LOGINS ? Date.now() + ACCOUNT_LOCKOUT_DURATION : 0;
@@ -645,9 +645,9 @@ export function handleConnection(ws: WebSocket): void {
     broadcast({ type: 'user_joined', payload: { userId, nickname }, timestamp: Date.now() }, userId);
   }
 
-  // --- Cross-device key backup (A+C) ---
-  // The client encrypts its private key bundle with a password-derived key and
-  // uploads only the ciphertext. The server never sees the plaintext key.
+  
+  
+  
   async function handleKeyBackupUpload(userId: string, ws: WebSocket, payload: { blob?: string }): Promise<void> {
     if (typeof payload?.blob !== 'string' || payload.blob.length === 0 || payload.blob.length > 200000) {
       send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Invalid backup blob' }, timestamp: Date.now() });
@@ -726,9 +726,9 @@ export function handleConnection(ws: WebSocket): void {
       return;
     }
 
-    // Resolve the recipient. When `toKey` (the recipient's public key) is present we route
-    // by public key instead of by username/userId, so a network observer of the WS stream
-    // cannot see who a direct message is addressed to (sealed-sender style metadata hiding).
+    
+    
+    
     let recipientUser: any = null;
     if (payload?.toKey && typeof payload.toKey === 'object' && payload.toKey.kty) {
       const keysMap = await getAllPublicKeys();
@@ -750,7 +750,7 @@ export function handleConnection(ws: WebSocket): void {
       return;
     }
 
-    // Blocking: a direct message is only delivered when neither party has blocked the other.
+    
     const recvBlocked = await getBlockedUserIds(recipientUser.id);
     const senderBlocked = await getBlockedUserIds(senderId);
     if (recvBlocked.includes(senderId)) {
@@ -838,7 +838,7 @@ function isValidEmoji(emoji: unknown): emoji is string {
     && /[\p{Emoji_Presentation}\p{Extended_Pictographic}\u200d\uFE0F]/u.test(emoji);
 }
 
-// Stable string form of a JWK (key order independent) for public-key based routing lookups.
+
 function canonicalJwk(jwk: any): string {
   const sorted: Record<string, any> = {};
   for (const k of Object.keys(jwk || {}).sort()) sorted[k] = jwk[k];
@@ -852,7 +852,7 @@ function canonicalJwk(jwk: any): string {
   async function handleAddReaction(userId: string, ws: WebSocket, payload: { messageId: string; emoji: string }): Promise<void> {
     if (!payload?.messageId || typeof payload.messageId !== 'string') return;
     if (!isValidEmoji(payload.emoji)) return;
-    // 1.6: only members of the message's channel may react to it.
+    
     const target = await getMessageById(payload.messageId);
     if (!target || !canAccessMessage(userId, target)) return;
     await addReaction(payload.messageId, userId, payload.emoji);
@@ -925,7 +925,7 @@ function canonicalJwk(jwk: any): string {
     });
   }
 
-  // Batches reaction lookups across a DM history instead of one query per row.
+  
   async function handleDmHistoryMessages(userId: string, messages: any[]): Promise<any[]> {
     const reactionsById = await getReactionsForMessages(messages.map((m) => m.id));
     return messages.map(m => ({
@@ -1097,22 +1097,22 @@ function canonicalJwk(jwk: any): string {
       send(ws, { type: 'error', payload: { code: 'SESSION_NOT_FOUND', message: 'Session not found' }, timestamp: Date.now() });
       return;
     }
-    // Revoke the persisted record first, so it disappears from the session list and
-    // no longer counts towards the cap even when the target device is offline.
+    
+    
     rec.revoked = true;
     void markSessionRevoked(userId, targetId).catch(() => {});
-    // If the target happens to be connected right now, drop its socket too.
+    
     const live = clients.get(targetId);
     if (live && live.userId === userId) {
       try { live.ws.close(4001, 'Session revoked'); } catch {}
       unregisterDevice(targetId);
     }
     send(ws, { type: 'session_revoked', payload: { sessionId: targetId }, timestamp: Date.now() });
-    // Refresh the requester's list so the revoked entry disappears immediately.
+    
     if (targetId !== currentDeviceId) await handleGetSessions(userId, ws, currentDeviceId);
   }
 
-  // --- Blocking (user-level privacy) ---
+  
 
   async function sendBlockedList(userId: string, ws: WebSocket): Promise<void> {
     const blockedIds = await getBlockedUserIds(userId);
@@ -1162,13 +1162,13 @@ function canonicalJwk(jwk: any): string {
     await sendBlockedList(userId, ws);
   }
 
-  // --- Reporting + admin moderation ---
+  
 
   const ADMIN_KEY = process.env.ADMIN_KEY || '';
 
-  // Moderation identity: either the operator's shared ADMIN_KEY (sent as a
-  // payload key) or an authenticated account whose nickname is listed in
-  // data/admins.json. Returns the acting admin's identifier, or null.
+  
+  
+  
   async function adminIdentity(userId: string | null, ws: WebSocket, payload: { key?: string }): Promise<string | null> {
     if (ADMIN_KEY && typeof payload?.key === 'string' && payload.key === ADMIN_KEY) return 'admin';
     if (!userId) return null;
@@ -1230,14 +1230,14 @@ function canonicalJwk(jwk: any): string {
       return;
     }
     logSecurity('ADMIN_BAN', { admin, target: payload?.userId || payload?.nickname });
-    // Force-disconnect any online devices of the banned user.
+    
     if (targetId) {
       for (const c of devicesForUser(targetId)) {
         c.ws.close(4003, 'Account banned');
       }
       for (const id of [...(userDevices.get(targetId) || [])]) unregisterDevice(id);
     }
-    // A ban that actually took effect also clears all open reports against the user.
+    
     const reportsRemoved = targetId ? await removeReportsForTarget(targetId) : 0;
     send(ws, { type: 'admin_action', payload: { ok: true, action: 'ban', targetId, reportsRemoved }, timestamp: Date.now() });
   }

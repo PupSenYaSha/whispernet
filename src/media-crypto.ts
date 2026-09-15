@@ -35,10 +35,10 @@ export async function encryptFile(file: Blob): Promise<EncryptedFile> {
   };
 }
 
-// Some media hosts (e.g. img.n1ko.dev) only accept genuine image/video/audio
-// files and validate file contents. To store end-to-end-encrypted blobs there
-// we disguise the ciphertext as a valid 1x1 PNG. The host stores bytes verbatim
-// (including the trailing ciphertext), so we strip the prefix on download.
+
+
+
+
 const MEDIA_WRAP_PNG_B64 = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC';
 const PNG_PREFIX = new Uint8Array(base64ToBuf(MEDIA_WRAP_PNG_B64));
 const IEND = [0x49, 0x45, 0x4e, 0x44];
@@ -64,7 +64,7 @@ export function stripMediaWrap(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
   const buf = bytes.buffer as ArrayBuffer;
   const i = indexOfSeq(bytes, IEND);
   if (i < 0) return new Uint8Array(buf.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
-  return new Uint8Array(buf.slice(bytes.byteOffset + i + 8, bytes.byteOffset + bytes.byteLength)); // past length(4)+'IEND'(4)+crc(4)
+  return new Uint8Array(buf.slice(bytes.byteOffset + i + 8, bytes.byteOffset + bytes.byteLength)); 
 }
 
 export async function wrapFileKeyFor(
@@ -76,10 +76,10 @@ export async function wrapFileKeyFor(
   return bufToBase64(wrapped);
 }
 
-// General-chat channel media: the raw key is wrapped with the shared channel
-// key (AES-GCM) so that ANY registered member - including members who join
-// after the media was posted - can decrypt it. Reuses the media IV as the wrap
-// IV; AES-GCM is safe with distinct keys under a single IV.
+
+
+
+
 export async function wrapFileKeyForChannel(
   rawKey: ArrayBuffer,
   channelMediaKeyB64: string,

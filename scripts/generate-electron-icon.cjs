@@ -14,7 +14,7 @@ function createICO() {
     images.push(canvas.toBuffer('image/png'));
   }
 
-  // ICO format
+  
   const dirCount = images.length;
   const dirSize = 16;
   const headerSize = 6;
@@ -42,12 +42,12 @@ function createICO() {
   }
 
   const ico = Buffer.alloc(offset);
-  // ICO header
-  ico.writeUInt16LE(0, 0); // reserved
-  ico.writeUInt16LE(1, 2); // type (1 = ICO)
+  
+  ico.writeUInt16LE(0, 0); 
+  ico.writeUInt16LE(1, 2); 
   ico.writeUInt16LE(dirCount, 4);
 
-  // Directory entries
+  
   let dirOffset = 6;
   for (const entry of entries) {
     ico.writeUInt8(entry.width, dirOffset);
@@ -61,7 +61,7 @@ function createICO() {
     dirOffset += 16;
   }
 
-  // Image data
+  
   let dataOffset = 6 + dirTotalSize;
   for (const buf of imageBuffers) {
     buf.copy(ico, dataOffset);
@@ -75,7 +75,7 @@ const ico = createICO();
 fs.writeFileSync(path.join(__dirname, '../build/icon.ico'), ico);
 console.log('Generated build/icon.ico');
 
-// Also generate a 512x512 PNG for Mac / window icons
+
 const canvas = createCanvas(512, 512);
 const ctx = canvas.getContext('2d');
 drawLogo(ctx, 512);

@@ -24,14 +24,14 @@ export function getMyIdentityKeyPair(): KeyPair | null {
   return { privateKey: ik.privateKey, publicKey: ik.publicKey };
 }
 
-// The X3DH identity key (public half) as a base64 string; used for safety
-// number derivation and identity-change detection.
+
+
 export function getMyIdentityKeyBase64(): string | null {
   const ik = preKeyManager.getIdentityKeyPair();
   return ik ? arrayToBase64(ik.publicKey) : null;
 }
 
-// Self-contained byte-array base64 codec so callers do not need to duplicate it.
+
 export function bytesToBase64(bytes: Uint8Array): string {
   return arrayToBase64(bytes);
 }
@@ -40,9 +40,9 @@ export function base64ToBytes(b64: string): Uint8Array {
   return base64ToArray(b64);
 }
 
-// Server-stored bundles are JSON objects whose identity/pre-key fields are
-// base64 strings (see getPublicKeyForServer). Convert them into the in-memory
-// PreKeyBundle shape (Uint8Array) before feeding the X3DH/Double-Ratchet code.
+
+
+
 export function decodeServerBundle(raw: any): PreKeyBundle | null {
   if (!raw || typeof raw !== 'object') return null;
   const ik = toBytes(raw.identityKey);
@@ -74,7 +74,7 @@ export function decodeServerBundle(raw: any): PreKeyBundle | null {
   return bundle;
 }
 
-// The peer's identity key from a server-stored bundle, normalized to base64.
+
 export function getPeerIdentityKeyBase64(bundle: any): string | null {
   if (!bundle) return null;
   if (typeof bundle.identityKey === 'string') return bundle.identityKey;
@@ -82,8 +82,8 @@ export function getPeerIdentityKeyBase64(bundle: any): string | null {
   return bytes ? arrayToBase64(bytes) : null;
 }
 
-// X3DH handshake messages travel over JSON; byte arrays must become plain
-// arrays on the wire and back to Uint8Array on the receiving side.
+
+
 export function serializeX3dhMessage(msg: any): any {
   if (!msg) return msg;
   return {
@@ -135,7 +135,7 @@ function toBytes(value: any): Uint8Array | null {
   if (typeof value === 'string') return base64ToArray(value);
   if (value instanceof Uint8Array) return value;
   if (Array.isArray(value)) return Uint8Array.from(value);
-  // JSON round-trips Uint8Array into a {0:..,1:..} integer-map object.
+  
   if (typeof value === 'object') {
     const n = Object.keys(value).length;
     if (n === 0) return new Uint8Array(0);
@@ -224,9 +224,9 @@ export function getSessionId(userId1: string, userId2: string): string {
   return sessionManager.getSessionId(userId1, userId2);
 }
 
-// Drop the local Double-Ratchet session for a peer pair. The next exchanged
-// message re-establishes a fresh session via X3DH (used to heal sessions that
-// failed their initial handshake).
+
+
+
 export function resetSession(userId1: string, userId2: string): void {
   sessionManager.deleteSession(sessionManager.getSessionId(userId1, userId2));
 }

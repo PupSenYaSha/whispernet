@@ -126,8 +126,8 @@ function downloadFile(url: string, dest: string, onProgress?: (percent: number) 
   });
 }
 
-// 1.8c: streamed SHA-256 so the downloaded update package can be verified
-// against a published digest before anything is extracted or executed.
+
+
 function sha256File(filePath: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const hash = createHash('sha256');
@@ -156,7 +156,7 @@ function fetchText(url: string): Promise<string> {
 }
 
 async function verifyUpdateIntegrity(release: any, zipPath: string): Promise<void> {
-  // Take the digest from the release asset metadata when the repo publishes it.
+  
   if (typeof release.sha256 === 'string' && release.sha256.length === 64) {
     const actual = await sha256File(zipPath);
     if (actual !== release.sha256) {

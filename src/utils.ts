@@ -15,10 +15,10 @@ export function cn(...classes: (string | boolean | undefined | null)[]): string 
   return classes.filter(Boolean).join(' ');
 }
 
-// Short, human-readable device label for the Sessions list, e.g.
-// "Chrome 126 · Windows 11" or "WhisperNet Desktop · macOS 14.5".
-// Async variant tries User-Agent Client Hints (navigator.userAgentData) for
-// exact OS/version info; falls back to the sync UA parser after 800ms.
+
+
+
+
 export async function getDeviceLabel(): Promise<string> {
   let high: any;
   try {

@@ -55,7 +55,7 @@ function serveStatic(req, res) {
     res.writeHead(200, {
       'Content-Type': mime,
       'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000',
-      // 3.8: the site is a static file drop; lock down framing/sniffing/listing.
+      
       'X-Content-Type-Options': 'nosniff',
       'X-Frame-Options': 'sameorigin',
       'Referrer-Policy': 'no-referrer',

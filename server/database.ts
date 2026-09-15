@@ -125,9 +125,9 @@ function ensureSchema(): void {
     );
   `);
 
-  // Full-text search index over message text. Standalone FTS5 table (no
-  // content= sync) so any SQLite build can ignore it; every write is mirrored
-  // by syncFts*. When FTS5 is unavailable at runtime we fall back to instr().
+  
+  
+  
   try {
     d.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS ${FTS_TABLE} USING fts5(text, content='');`);
     ftsAvailable = true;
@@ -203,11 +203,11 @@ function syncFtsDeleteExpired(cutoff: number): void {
   }
 }
 
-// --- Legacy JSON -> SQLite migration ---
-// Runs once when the SQLite database is first created and legacy JSON data
-// files exist in the data directory. After a successful migration the JSON
-// files are left untouched (safe archive) and SQLite becomes the only source
-// of truth. No data is ever deleted.
+
+
+
+
+
 
 function legacyJsonFileNames(): string[] {
   return ['users.json', 'messages.json', 'reactions.json', 'prekeys.json', 'keybackups.json', 'reports.json', 'sessions.json', 'admins.json', 'channel.json'];
@@ -227,7 +227,7 @@ function migrateLegacy(): void {
   const d = getDb();
   d.exec('BEGIN');
   try {
-    // Channel media key
+    
     try {
       if (!metaGet('channel_media_key')) {
         let legacyKey: string | null = null;
@@ -358,10 +358,10 @@ export function setDataDir(dir: string): void {
   mkdirSync(MEDIA_DIR, { recursive: true });
 }
 
-// General-chat media key: a persisted server-side channel key that every
-// registered user receives at login, so media posted to the general channel
-// can be decrypted by ANY member (including members who join later). The key
-// is never exposed before authentication and is never sent to third parties.
+
+
+
+
 export async function getChannelMediaKey(): Promise<string> {
   const existing = metaGet('channel_media_key');
   if (existing && existing.length >= 16) return existing;
@@ -374,7 +374,7 @@ export function getMediaDir(): string {
   return MEDIA_DIR;
 }
 
-// --- Users ---
+
 
 export async function createUser(nickname: string, password: string, publicKey?: any): Promise<{ id: string; nickname: string } | null> {
   const d = getDb();
@@ -465,7 +465,7 @@ export async function deleteKeyBackup(userId: string): Promise<void> {
   getDb().prepare('DELETE FROM keybackups WHERE user_id = ?').run(userId);
 }
 
-// --- Messages ---
+
 
 export function getDmChannelId(userId1: string, userId2: string): string {
   return [userId1, userId2].sort().join(':');
@@ -543,8 +543,8 @@ export async function getDmHistory(userId1: string, userId2: string, limit: numb
 
 export async function getDmContacts(userId: string): Promise<{ id: string; nickname: string; lastMessage: number }[]> {
   const d = getDb();
-  // Only consider DM channels this user actually participates in; the (channel,
-  // timestamp) index keeps this scan narrow.
+  
+  
   const rows = d.prepare(
     "SELECT channel, MAX(timestamp) AS ts FROM messages WHERE channel != 'general' AND (channel LIKE ? OR channel LIKE ?) GROUP BY channel"
   ).all(userId + ':%', '%:' + userId) as { channel: string; ts: number }[];
@@ -671,7 +671,7 @@ export function initializeDatabase(): void {
   console.log(`SQLite storage ready (${p})`);
 }
 
-// --- Reactions ---
+
 
 export async function addReaction(messageId: string, userId: string, emoji: string): Promise<void> {
   const d = getDb();
@@ -689,7 +689,7 @@ export async function getReactionsForMessage(messageId: string): Promise<{ messa
   return getDb().prepare('SELECT message_id as messageId, user_id as userId, emoji, timestamp FROM reactions WHERE message_id = ? ORDER BY timestamp ASC').all(messageId) as any[];
 }
 
-// Batch reactions lookup: avoids N+1 queries when hydrating histories/search.
+
 export async function getReactionsForMessages(messageIds: string[]): Promise<Map<string, { messageId: string; userId: string; emoji: string; timestamp: number }[]>> {
   const result = new Map<string, { messageId: string; userId: string; emoji: string; timestamp: number }[]>();
   const ids = [...new Set(messageIds.filter((m) => typeof m === 'string' && m.length > 0))];
@@ -704,7 +704,7 @@ export async function getReactionsForMessages(messageIds: string[]): Promise<Map
   return result;
 }
 
-// --- Moderation & blocking ---
+
 
 export async function setUserBannedByIdent(userId: string | null, nickname: string | null, banned: boolean): Promise<boolean> {
   const res = userId
@@ -736,7 +736,7 @@ export async function setUserBlocked(userId: string, blockedId: string, blocked:
   d.prepare('UPDATE users SET blocked = ? WHERE id = ?').run(json(next), userId);
 }
 
-// --- Reports ---
+
 
 export async function addReport(report: { id: string; reporterId: string; reporterNick?: string; targetId: string; targetNick?: string; channel: string; messageId?: string; messageText?: string; reason: string; timestamp: number }): Promise<void> {
   const d = getDb();
@@ -757,7 +757,7 @@ export async function removeReportsForTarget(targetId: string): Promise<number> 
   return (res as any).changes;
 }
 
-// --- Persisted session registry ---
+
 
 export interface StoredSession {
   userId: string;
@@ -787,7 +787,7 @@ export async function touchSession(userId: string, deviceId: string): Promise<vo
   getDb().prepare('UPDATE sessions SET last_active = ? WHERE user_id = ? AND device_id = ?').run(Date.now(), userId, deviceId);
 }
 
-// --- Admins ---
+
 
 export async function getAdminNicknames(): Promise<string[]> {
   const rows = getDb().prepare('SELECT nickname FROM admins').all() as { nickname: string }[];

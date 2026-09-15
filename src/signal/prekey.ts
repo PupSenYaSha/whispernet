@@ -335,10 +335,10 @@ export class PreKeyManager {
     return opk;
   }
 
-  // One-time pre-keys referenced by the published bundle are consumed exactly
-  // once (by the remote peer's session handshake). Multiple publishes for the
-  // same account MUST reference the same key so the responder can reconstruct
-  // dh4; each fresh session consumes one key and the next publish rotates.
+  
+  
+  
+  
   private selectPublishedOpk(): PreKeyRecord | null {
     if (this.publishedOpkKeyId != null) {
       const existing = this.oneTimePreKeys.find((k) => k.keyId === this.publishedOpkKeyId);

@@ -151,9 +151,9 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
 
     const showNumber = async () => {
       try {
-        // 1.3: the safety number is derived from the X3DH identity keys (own +
-        // peer), not the RSA transport key. It is only comparable once a DM has
-        // exchanged pre-key bundles.
+        
+        
+        
         const myId = getMyIdentityKeyB64();
         if (!myId) {
           setSafetyNum('IDENTITY NOT FOUND -- re-login required');
