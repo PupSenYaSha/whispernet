@@ -63,6 +63,8 @@ function MessageListImpl({ messages, fontSizeClass, t }: { messages: Message[]; 
     return acc;
   }, []);
 
+  const newest = messages[messages.length - 1];
+
   function formatDateSeparator(ts: number): string {
     const d = new Date(ts);
     const now = new Date();
@@ -89,7 +91,7 @@ function MessageListImpl({ messages, fontSizeClass, t }: { messages: Message[]; 
   }
 
   return (
-    <div ref={containerRef} className="flex-1 overflow-y-auto overflow-x-hidden px-2 py-3 space-y-2" role="log" aria-live="polite">
+    <div ref={containerRef} className="flex-1 overflow-y-auto overflow-x-hidden px-2 py-3 space-y-2 animate-fade-slide" role="log" aria-live="polite">
       {groupedMessages.map((group, i) => {
         const prevGroup = groupedMessages[i - 1];
         const newDay = !prevGroup || new Date(prevGroup[0].timestamp).toDateString() !== new Date(group[0].timestamp).toDateString();
@@ -109,6 +111,7 @@ function MessageListImpl({ messages, fontSizeClass, t }: { messages: Message[]; 
                   message={msg}
                   showAvatar={j === 0}
                   fontSizeClass={fontSizeClass}
+                  animate={msg.id === newest?.id && Date.now() - msg.timestamp < 15000}
                 />
               ))}
             </div>

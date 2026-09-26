@@ -29,7 +29,7 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
   };
 
   return (
-    <header className="sticky top-0 z-30 bg-bg-secondary/80 backdrop-blur-xl border-b border-border-default">
+    <header className="sticky top-0 z-30 bg-bg-secondary/80 backdrop-blur-md pt-safe border-b border-border-default">
       <div className={isMobile ? "px-4" : "px-3"}>
         <div className={cn("flex items-center justify-between", isMobile ? "h-16" : "h-14")}>
           <div className="flex items-center gap-3">
@@ -55,7 +55,7 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
               {isDm && dmNickname ? (
                 <span>{dmNickname.charAt(0).toUpperCase()}</span>
               ) : (
-                <svg width={isMobile ? "20" : "18"} height={isMobile ? "20" : "18"} viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-text)" strokeWidth="2.5">
+                <svg width={isMobile ? "20" : "18"} height={isMobile ? "20" : "18"} viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-accent-text))" strokeWidth="2.5">
                   <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                 </svg>
               )}
@@ -67,12 +67,12 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
               <div className="flex items-center gap-1.5 mt-0.5">
                 {isDm ? (
                   <>
-                    <span className={cn(isMobile ? 'w-2.5 h-2.5' : 'w-2 h-2', 'rounded-full', isOnline ? 'bg-status-success shadow-[0_0_6px_var(--color-status-success)]' : 'bg-fg-subtle')} />
+                    <span className={cn(isMobile ? 'w-2.5 h-2.5' : 'w-2 h-2', 'rounded-full', isOnline ? 'bg-status-success shadow-[0_0_6px_rgb(var(--color-status-success))]' : 'bg-fg-subtle')} />
                     <span className={cn(isMobile ? 'text-[12px]' : 'text-[11px]', 'text-fg-muted')}>{isOnline ? t('online') : t('offline')}</span>
                   </>
                 ) : (
                   <>
-                    <span className={cn(isMobile ? 'w-2.5 h-2.5' : 'w-2 h-2', 'rounded-full', state.status === 'connected' ? 'bg-status-success shadow-[0_0_6px_var(--color-status-success)]' : state.status === 'disconnected' ? 'bg-status-error' : 'bg-status-warning animate-pulse')} />
+                    <span className={cn(isMobile ? 'w-2.5 h-2.5' : 'w-2 h-2', 'rounded-full', state.status === 'connected' ? 'bg-status-success shadow-[0_0_6px_rgb(var(--color-status-success))]' : state.status === 'disconnected' ? 'bg-status-error' : 'bg-status-warning animate-pulse')} />
                     <span className={cn(isMobile ? 'text-[12px]' : 'text-[11px]', 'text-fg-muted')}>{state.status === 'connected' ? t('status_connected') : state.status === 'disconnected' ? t('status_disconnected') : t('status_connecting')}</span>
                   </>
                 )}
@@ -130,7 +130,7 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
         <div className="border-t border-border-default px-4 py-2.5 bg-bg-secondary">
           <div className="flex flex-wrap gap-1.5">
             <span className="px-2.5 py-1 text-[12px] font-medium bg-accent-primary/10 text-accent-primary rounded-lg">
-              @{state.nickname} (you)
+              @{state.nickname} ({t('you')})
             </span>
             {state.users.map(u => (
               <button key={u.id} onClick={() => { setShowUsers(false); openDm(u.id, u.nickname); }}
@@ -149,7 +149,7 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
             <div className="bg-bg-secondary border border-border-default rounded-3xl shadow-2xl max-w-sm w-full p-6"
               style={{ animation: 'scaleIn 0.2s cubic-bezier(0.22, 1, 0.36, 1)' }}>
               <div className="w-14 h-14 rounded-2xl bg-status-error/15 flex items-center justify-center mx-auto mb-5">
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--color-status-error)" strokeWidth="2">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-status-error))" strokeWidth="2">
                   <circle cx="12" cy="12" r="10" />
                   <path d="M4.93 4.93l14.14 14.14" />
                 </svg>

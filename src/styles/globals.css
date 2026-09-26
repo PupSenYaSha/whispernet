@@ -34,32 +34,32 @@
 
 @layer base {
   :root {
-    --color-bg-primary: #f0f2f5;
-    --color-bg-secondary: #ffffff;
-    --color-bg-tertiary: #f4f5f7;
-    --color-bg-hover: #e8eaed;
-    --color-bg-active: #dcdfe3;
-    --color-fg-primary: #1a1c20;
-    --color-fg-secondary: #5d6570;
-    --color-fg-muted: #8d939d;
-    --color-fg-subtle: #b5bac0;
-    --color-accent-primary: #8b5cf6;
-    --color-accent-dim: #7c3aed;
-    --color-accent-glow: #8b5cf6;
-    --color-accent-text: #ffffff;
+    --color-bg-primary: 240 242 245;
+    --color-bg-secondary: 255 255 255;
+    --color-bg-tertiary: 244 245 247;
+    --color-bg-hover: 232 234 237;
+    --color-bg-active: 220 223 227;
+    --color-fg-primary: 26 28 32;
+    --color-fg-secondary: 93 101 112;
+    --color-fg-muted: 107 114 128;
+    --color-fg-subtle: 154 161 171;
+    --color-accent-primary: 139 92 246;
+    --color-accent-dim: 124 58 237;
+    --color-accent-glow: 139 92 246;
+    --color-accent-text: 255 255 255;
     --color-accent-bg: rgba(139, 92, 246, 0.08);
     --color-accent-bg-hover: rgba(139, 92, 246, 0.14);
     --color-selection: rgba(139, 92, 246, 0.25);
     --color-selection-text: #1a1c20;
-    --color-border-default: #dcdfe3;
-    --color-border-focus: #8b5cf6;
-    --color-status-success: #16a34a;
-    --color-status-warning: #ca8a04;
-    --color-status-error: #dc2626;
-    --color-bubble-mine: #8b5cf6;
-    --color-bubble-mine-text: #ffffff;
-    --color-bubble-other: #ffffff;
-    --color-bubble-other-text: #1a1c20;
+    --color-border-default: 220 223 227;
+    --color-border-focus: 139 92 246;
+    --color-status-success: 22 163 74;
+    --color-status-warning: 202 138 4;
+    --color-status-error: 220 38 38;
+    --color-bubble-mine: 139 92 246;
+    --color-bubble-mine-text: 255 255 255;
+    --color-bubble-other: 255 255 255;
+    --color-bubble-other-text: 26 28 32;
     color-scheme: light;
     --safe-bottom: env(safe-area-inset-bottom, 0px);
     --safe-top: env(safe-area-inset-top, 0px);
@@ -67,189 +67,189 @@
 
   
   .accent-blue {
-    --color-accent-primary: #2563eb;
-    --color-accent-dim: #1d4ed8;
-    --color-accent-glow: #3b82f6;
-    --color-accent-text: #ffffff;
+    --color-accent-primary: 37 99 235;
+    --color-accent-dim: 29 78 216;
+    --color-accent-glow: 59 130 246;
+    --color-accent-text: 255 255 255;
     --color-accent-bg: rgba(37, 99, 235, 0.08);
     --color-accent-bg-hover: rgba(37, 99, 235, 0.14);
     --color-selection: rgba(37, 99, 235, 0.25);
-    --color-border-focus: #2563eb;
-    --color-bubble-mine: #2563eb;
+    --color-border-focus: 37 99 235;
+    --color-bubble-mine: 37 99 235;
   }
   .accent-green {
-    --color-accent-primary: #16a34a;
-    --color-accent-dim: #15803d;
-    --color-accent-glow: #22c55e;
-    --color-accent-text: #ffffff;
+    --color-accent-primary: 22 163 74;
+    --color-accent-dim: 21 128 61;
+    --color-accent-glow: 34 197 94;
+    --color-accent-text: 255 255 255;
     --color-accent-bg: rgba(22, 163, 74, 0.08);
     --color-accent-bg-hover: rgba(22, 163, 74, 0.14);
     --color-selection: rgba(22, 163, 74, 0.25);
-    --color-border-focus: #16a34a;
-    --color-bubble-mine: #16a34a;
+    --color-border-focus: 22 163 74;
+    --color-bubble-mine: 22 163 74;
   }
   .accent-red {
-    --color-accent-primary: #dc2626;
-    --color-accent-dim: #b91c1c;
-    --color-accent-glow: #ef4444;
-    --color-accent-text: #ffffff;
+    --color-accent-primary: 220 38 38;
+    --color-accent-dim: 185 28 28;
+    --color-accent-glow: 239 68 68;
+    --color-accent-text: 255 255 255;
     --color-accent-bg: rgba(220, 38, 38, 0.08);
     --color-accent-bg-hover: rgba(220, 38, 38, 0.14);
     --color-selection: rgba(220, 38, 38, 0.25);
-    --color-border-focus: #dc2626;
-    --color-bubble-mine: #dc2626;
+    --color-border-focus: 220 38 38;
+    --color-bubble-mine: 220 38 38;
   }
   .accent-orange {
-    --color-accent-primary: #ea580c;
-    --color-accent-dim: #c2410c;
-    --color-accent-glow: #f97316;
-    --color-accent-text: #ffffff;
+    --color-accent-primary: 234 88 12;
+    --color-accent-dim: 194 65 12;
+    --color-accent-glow: 249 115 22;
+    --color-accent-text: 255 255 255;
     --color-accent-bg: rgba(234, 88, 12, 0.08);
     --color-accent-bg-hover: rgba(234, 88, 12, 0.14);
     --color-selection: rgba(234, 88, 12, 0.25);
-    --color-border-focus: #ea580c;
-    --color-bubble-mine: #ea580c;
+    --color-border-focus: 234 88 12;
+    --color-bubble-mine: 234 88 12;
   }
   .accent-pink {
-    --color-accent-primary: #db2777;
-    --color-accent-dim: #be185d;
-    --color-accent-glow: #ec4899;
-    --color-accent-text: #ffffff;
+    --color-accent-primary: 219 39 119;
+    --color-accent-dim: 190 24 93;
+    --color-accent-glow: 236 72 153;
+    --color-accent-text: 255 255 255;
     --color-accent-bg: rgba(219, 39, 119, 0.08);
     --color-accent-bg-hover: rgba(219, 39, 119, 0.14);
     --color-selection: rgba(219, 39, 119, 0.25);
-    --color-border-focus: #db2777;
-    --color-bubble-mine: #db2777;
+    --color-border-focus: 219 39 119;
+    --color-bubble-mine: 219 39 119;
   }
   .accent-teal {
-    --color-accent-primary: #0d9488;
-    --color-accent-dim: #0f766e;
-    --color-accent-glow: #14b8a6;
-    --color-accent-text: #ffffff;
+    --color-accent-primary: 13 148 136;
+    --color-accent-dim: 15 118 110;
+    --color-accent-glow: 20 184 166;
+    --color-accent-text: 255 255 255;
     --color-accent-bg: rgba(13, 148, 136, 0.08);
     --color-accent-bg-hover: rgba(13, 148, 136, 0.14);
     --color-selection: rgba(13, 148, 136, 0.25);
-    --color-border-focus: #0d9488;
-    --color-bubble-mine: #0d9488;
+    --color-border-focus: 13 148 136;
+    --color-bubble-mine: 13 148 136;
   }
   .accent-indigo {
-    --color-accent-primary: #4f46e5;
-    --color-accent-dim: #4338ca;
-    --color-accent-glow: #6366f1;
-    --color-accent-text: #ffffff;
+    --color-accent-primary: 79 70 229;
+    --color-accent-dim: 67 56 202;
+    --color-accent-glow: 99 102 241;
+    --color-accent-text: 255 255 255;
     --color-accent-bg: rgba(79, 70, 229, 0.08);
     --color-accent-bg-hover: rgba(79, 70, 229, 0.14);
     --color-selection: rgba(79, 70, 229, 0.25);
-    --color-border-focus: #4f46e5;
-    --color-bubble-mine: #4f46e5;
+    --color-border-focus: 79 70 229;
+    --color-bubble-mine: 79 70 229;
   }
 
   .dark {
-    --color-bg-primary: #0e1015;
-    --color-bg-secondary: #16181d;
-    --color-bg-tertiary: #1e2027;
-    --color-bg-hover: #26282f;
-    --color-bg-active: #2c2e36;
-    --color-fg-primary: #f0f2f5;
-    --color-fg-secondary: #b0b8c4;
-    --color-fg-muted: #6c7883;
-    --color-fg-subtle: #3e444d;
-    --color-accent-primary: #8b5cf6;
-    --color-accent-dim: #7c3aed;
-    --color-accent-glow: #a78bfa;
-    --color-accent-text: #ffffff;
+    --color-bg-primary: 14 16 21;
+    --color-bg-secondary: 22 24 29;
+    --color-bg-tertiary: 30 32 39;
+    --color-bg-hover: 38 40 47;
+    --color-bg-active: 44 46 54;
+    --color-fg-primary: 240 242 245;
+    --color-fg-secondary: 176 184 196;
+    --color-fg-muted: 138 149 161;
+    --color-fg-subtle: 62 68 77;
+    --color-accent-primary: 139 92 246;
+    --color-accent-dim: 124 58 237;
+    --color-accent-glow: 167 139 250;
+    --color-accent-text: 255 255 255;
     --color-accent-bg: rgba(139, 92, 246, 0.12);
     --color-accent-bg-hover: rgba(139, 92, 246, 0.2);
     --color-selection: rgba(139, 92, 246, 0.35);
     --color-selection-text: #ffffff;
-    --color-border-default: #2b2d35;
-    --color-border-focus: #8b5cf6;
-    --color-status-success: #4ade80;
-    --color-status-warning: #facc15;
-    --color-status-error: #f87171;
-    --color-bubble-mine: #8b5cf6;
-    --color-bubble-mine-text: #ffffff;
-    --color-bubble-other: #1e2027;
-    --color-bubble-other-text: #f0f2f5;
+    --color-border-default: 43 45 53;
+    --color-border-focus: 139 92 246;
+    --color-status-success: 74 222 128;
+    --color-status-warning: 250 204 21;
+    --color-status-error: 248 113 113;
+    --color-bubble-mine: 139 92 246;
+    --color-bubble-mine-text: 255 255 255;
+    --color-bubble-other: 30 32 39;
+    --color-bubble-other-text: 240 242 245;
     color-scheme: dark;
   }
 
   .dark.accent-blue {
-    --color-accent-primary: #3b82f6;
-    --color-accent-dim: #2563eb;
-    --color-accent-glow: #60a5fa;
-    --color-accent-text: #ffffff;
+    --color-accent-primary: 59 130 246;
+    --color-accent-dim: 37 99 235;
+    --color-accent-glow: 96 165 250;
+    --color-accent-text: 255 255 255;
     --color-accent-bg: rgba(59, 130, 246, 0.12);
     --color-accent-bg-hover: rgba(59, 130, 246, 0.2);
     --color-selection: rgba(59, 130, 246, 0.35);
-    --color-border-focus: #3b82f6;
-    --color-bubble-mine: #3b82f6;
+    --color-border-focus: 59 130 246;
+    --color-bubble-mine: 59 130 246;
   }
   .dark.accent-green {
-    --color-accent-primary: #22c55e;
-    --color-accent-dim: #16a34a;
-    --color-accent-glow: #4ade80;
-    --color-accent-text: #ffffff;
+    --color-accent-primary: 34 197 94;
+    --color-accent-dim: 22 163 74;
+    --color-accent-glow: 74 222 128;
+    --color-accent-text: 255 255 255;
     --color-accent-bg: rgba(34, 197, 94, 0.12);
     --color-accent-bg-hover: rgba(34, 197, 94, 0.2);
     --color-selection: rgba(34, 197, 94, 0.35);
-    --color-border-focus: #22c55e;
-    --color-bubble-mine: #22c55e;
+    --color-border-focus: 34 197 94;
+    --color-bubble-mine: 34 197 94;
   }
   .dark.accent-red {
-    --color-accent-primary: #ef4444;
-    --color-accent-dim: #dc2626;
-    --color-accent-glow: #f87171;
-    --color-accent-text: #ffffff;
+    --color-accent-primary: 239 68 68;
+    --color-accent-dim: 220 38 38;
+    --color-accent-glow: 248 113 113;
+    --color-accent-text: 255 255 255;
     --color-accent-bg: rgba(239, 68, 68, 0.12);
     --color-accent-bg-hover: rgba(239, 68, 68, 0.2);
     --color-selection: rgba(239, 68, 68, 0.35);
-    --color-border-focus: #ef4444;
-    --color-bubble-mine: #ef4444;
+    --color-border-focus: 239 68 68;
+    --color-bubble-mine: 239 68 68;
   }
   .dark.accent-orange {
-    --color-accent-primary: #f97316;
-    --color-accent-dim: #ea580c;
-    --color-accent-glow: #fb923c;
-    --color-accent-text: #ffffff;
+    --color-accent-primary: 249 115 22;
+    --color-accent-dim: 234 88 12;
+    --color-accent-glow: 251 146 60;
+    --color-accent-text: 255 255 255;
     --color-accent-bg: rgba(249, 115, 22, 0.12);
     --color-accent-bg-hover: rgba(249, 115, 22, 0.2);
     --color-selection: rgba(249, 115, 22, 0.35);
-    --color-border-focus: #f97316;
-    --color-bubble-mine: #f97316;
+    --color-border-focus: 249 115 22;
+    --color-bubble-mine: 249 115 22;
   }
   .dark.accent-pink {
-    --color-accent-primary: #ec4899;
-    --color-accent-dim: #db2777;
-    --color-accent-glow: #f472b6;
-    --color-accent-text: #ffffff;
+    --color-accent-primary: 236 72 153;
+    --color-accent-dim: 219 39 119;
+    --color-accent-glow: 244 114 182;
+    --color-accent-text: 255 255 255;
     --color-accent-bg: rgba(236, 72, 153, 0.12);
     --color-accent-bg-hover: rgba(236, 72, 153, 0.2);
     --color-selection: rgba(236, 72, 153, 0.35);
-    --color-border-focus: #ec4899;
-    --color-bubble-mine: #ec4899;
+    --color-border-focus: 236 72 153;
+    --color-bubble-mine: 236 72 153;
   }
   .dark.accent-teal {
-    --color-accent-primary: #14b8a6;
-    --color-accent-dim: #0d9488;
-    --color-accent-glow: #2dd4bf;
-    --color-accent-text: #ffffff;
+    --color-accent-primary: 20 184 166;
+    --color-accent-dim: 13 148 136;
+    --color-accent-glow: 45 212 191;
+    --color-accent-text: 255 255 255;
     --color-accent-bg: rgba(20, 184, 166, 0.12);
     --color-accent-bg-hover: rgba(20, 184, 166, 0.2);
     --color-selection: rgba(20, 184, 166, 0.35);
-    --color-border-focus: #14b8a6;
-    --color-bubble-mine: #14b8a6;
+    --color-border-focus: 20 184 166;
+    --color-bubble-mine: 20 184 166;
   }
   .dark.accent-indigo {
-    --color-accent-primary: #6366f1;
-    --color-accent-dim: #4f46e5;
-    --color-accent-glow: #818cf8;
-    --color-accent-text: #ffffff;
+    --color-accent-primary: 99 102 241;
+    --color-accent-dim: 79 70 229;
+    --color-accent-glow: 129 140 248;
+    --color-accent-text: 255 255 255;
     --color-accent-bg: rgba(99, 102, 241, 0.12);
     --color-accent-bg-hover: rgba(99, 102, 241, 0.2);
     --color-selection: rgba(99, 102, 241, 0.35);
-    --color-border-focus: #6366f1;
-    --color-bubble-mine: #6366f1;
+    --color-border-focus: 99 102 241;
+    --color-bubble-mine: 99 102 241;
   }
 
   * {
@@ -289,6 +289,13 @@
     font-family: inherit;
   }
 
+  button:not(.btn):not(.icon-button):not(.input):focus-visible,
+  [role='button']:focus-visible,
+  a:focus-visible {
+    outline: 2px solid rgb(var(--color-border-focus));
+    outline-offset: 2px;
+  }
+
   
   code, pre, kbd, .font-mono {
     font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
@@ -307,15 +314,15 @@
     background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: var(--color-fg-subtle);
+    background: rgb(var(--color-fg-subtle));
     border-radius: 8px;
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: var(--color-fg-muted);
+    background: rgb(var(--color-fg-muted));
   }
   * {
     scrollbar-width: thin;
-    scrollbar-color: var(--color-fg-subtle) transparent;
+    scrollbar-color: rgb(var(--color-fg-subtle)) transparent;
   }
 }
 
@@ -367,14 +374,14 @@
   .message-bubble-mine {
     @apply message-bubble bg-bubble-mine text-bubble-mine-text rounded-br-sm;
     @apply ml-auto;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15), 0 4px 16px -4px var(--color-accent-dim);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15), 0 4px 16px -4px rgb(var(--color-accent-dim));
   }
 
   .message-bubble-other {
     @apply message-bubble bg-bg-tertiary text-fg-primary rounded-bl-sm;
     @apply mr-auto;
     box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
-    border: 1px solid var(--color-border-default);
+    border: 1px solid rgb(var(--color-border-default));
   }
 
   .status-dot {
@@ -383,7 +390,7 @@
 
   .status-dot-connected {
     @apply status-dot bg-status-success;
-    box-shadow: 0 0 6px var(--color-status-success);
+    box-shadow: 0 0 6px rgb(var(--color-status-success));
   }
 
   .status-dot-disconnected {
@@ -432,8 +439,16 @@
     padding-bottom: max(0.75rem, var(--safe-bottom));
   }
 
+  .pt-safe {
+    padding-top: var(--safe-top);
+  }
+
   .transition-page {
     transition: opacity 0.25s ease, transform 0.25s ease;
+  }
+
+  .animate-step-in {
+    animation: stepIn 0.2s ease-out both;
   }
 }
 
@@ -487,4 +502,9 @@
   50% { opacity: 1; transform: scale(1.05); }
   70% { transform: scale(0.9); }
   100% { transform: scale(1); }
+}
+
+@keyframes stepIn {
+  from { opacity: 0; transform: translateY(10px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
 }

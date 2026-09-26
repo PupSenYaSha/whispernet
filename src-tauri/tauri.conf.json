@@ -1,0 +1,41 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "WhisperNet",
+  "version": "0.2.0",
+  "identifier": "ru.cloudpub.whispernet",
+  "build": {
+    "beforeDevCommand": "",
+    "devUrl": "https://rightfully-nice-ram.cloudpub.ru",
+    "beforeBuildCommand": "",
+    "frontendDist": "https://rightfully-nice-ram.cloudpub.ru"
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "label": "main",
+        "title": "WhisperNet",
+        "width": 1000,
+        "height": 700,
+        "minWidth": 800,
+        "minHeight": 550,
+        "visible": false,
+        "backgroundColor": "#f0f2f5"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis", "msi"],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ]
+  }
+}

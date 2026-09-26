@@ -70,14 +70,6 @@ declare global {
         };
       };
     };
-    electronAPI?: {
-      setTitle: (title: string) => void;
-      setScreenshotProtection?: (enabled: boolean) => void;
-      onUpdateAvailable: (callback: (e: any, data: any) => void) => () => void;
-      onUpdateProgress: (callback: (e: any, data: any) => void) => () => void;
-      onUpdateReady: (callback: (e: any, data: any) => void) => () => void;
-      onUpdateError: (callback: (e: any, data: any) => void) => () => void;
-      applyUpdate: () => void;
-    };
+    __wnDesktop?: boolean;
   }
 }

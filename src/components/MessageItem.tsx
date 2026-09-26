@@ -4,7 +4,7 @@ import { createPortal } from 'react-dom';
 import { useConnection } from '../context';
 import { cn, formatTime, getAvatarText, getAvatarGradient } from '../utils';
 
-function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15px]' }: { message: Message; showAvatar?: boolean; fontSizeClass?: string }) {
+function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15px]', animate = false }: { message: Message; showAvatar?: boolean; fontSizeClass?: string; animate?: boolean }) {
   const { state, deleteMessage: deleteMsg, addReaction, removeReaction, setEditing, decryptMedia, setReply, reportUser, t } = useConnection();
   const isSystem = message.senderId === 'system';
   const isOwn = message.isOwn;
@@ -27,9 +27,9 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
     const text = found?.text;
     if (!text) return '[encrypted]';
     const mm = text.match(/^\[(image|video)\][\s\S]*?\[\/\1\]/);
-    if (mm) return mm[1] === 'video' ? '🎥 Video' : '📷 Photo';
+    if (mm) return mm[1] === 'video' ? `🎥 ${t('video_att')}` : `📷 ${t('photo_att')}`;
     return text;
-  }, [message.quotedMessageText, message.quotedMessageId, state.messages, state.dmMessages]);
+  }, [message.quotedMessageText, message.quotedMessageId, state.messages, state.dmMessages, t]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -98,7 +98,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
 
   return (
     <>
-      <div className={`flex gap-2.5 px-4 animate-message max-w-full ${isOwn ? 'flex-row-reverse' : 'flex-row'}`}>
+      <div className={`flex gap-2.5 px-4 max-w-full ${isOwn ? 'flex-row-reverse' : 'flex-row'}${animate ? ' animate-message' : ''}`}>
       {!isOwn && showAvatar && (
         <div className="flex-shrink-0 w-9 h-9 rounded-full flex items-center justify-center mt-1 shadow-sm"
           style={{ background: getAvatarGradient(message.senderNickname) }}>
@@ -125,11 +125,11 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
               : 'bg-bubble-other text-bubble-other-text border border-border-default rounded-2xl rounded-bl-sm'
           )}>
             {(message.quotedMessageText || (message.quotedMessageId && resolvedQuoteText)) && (
-              <div className="mb-2 p-2 rounded-xl bg-black/70 border border-white/15 flex items-start gap-2">
-                <span className="text-[14px] text-accent-primary leading-tight flex-shrink-0">↩</span>
+              <div className="mb-2 p-2 rounded-xl bg-black/10 border border-black/5 dark:bg-white/5 dark:border-white/10 flex items-start gap-2">
+                <span className={`text-[14px] leading-tight flex-shrink-0 ${isOwn ? 'text-bubble-mine-text/80' : 'text-accent-primary'}`}>↩</span>
                 <div className="min-w-0">
-                  <div className="text-[11px] font-bold text-accent-primary truncate">@{message.quotedMessageSender || '?'}</div>
-                  <div className="text-[13px] text-white truncate">{resolvedQuoteText}</div>
+                  <div className={`text-[11px] font-bold truncate ${isOwn ? 'text-bubble-mine-text/80' : 'text-accent-primary'}`}>@{message.quotedMessageSender || '?'}</div>
+                  <div className="text-[13px] truncate">{resolvedQuoteText}</div>
                 </div>
               </div>
             )}
@@ -154,30 +154,30 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
                   if (tag === 'video') {
                     return (
                       <video src={mediaUrl} controls
-                        className="rounded-xl max-w-[340px] max-h-[340px]" />
+                        className="rounded-xl w-full max-w-[340px] max-h-[340px]" />
                     );
                   }
                   return (
                     <img src={mediaUrl} alt=""
-                      className="rounded-xl max-w-[300px] max-h-[300px] object-cover cursor-pointer"
+                      className="rounded-xl w-full max-w-[300px] max-h-[300px] object-cover cursor-pointer"
                       onClick={() => { setLightbox({ url: mediaUrl, isVideo: false }); }} />
                   );
                 }
                 const [, , url] = mediaMatch;
                 const safeUrl = /^(https?:\/\/)/i.test(url) ? url : null;
                 if (!safeUrl) {
-                  return <p className="whitespace-pre-wrap break-words text-status-error text-[13px]">Invalid URL</p>;
+                  return <p className="whitespace-pre-wrap break-words text-status-error text-[13px]">{t('invalid_url')}</p>;
                 }
                 const proxyUrl = `/api/media?url=${encodeURIComponent(safeUrl)}`;
                 if (tag === 'video') {
                   return (
                     <video src={proxyUrl} controls
-                      className="rounded-xl max-w-[340px] max-h-[340px] cursor-pointer" />
+                      className="rounded-xl w-full max-w-[340px] max-h-[340px] cursor-pointer" />
                   );
                 }
                 return (
                   <img src={proxyUrl} alt=""
-                    className="rounded-xl max-w-[300px] max-h-[300px] object-cover cursor-pointer"
+                    className="rounded-xl w-full max-w-[300px] max-h-[300px] object-cover cursor-pointer"
                     onClick={() => { setLightbox({ url: proxyUrl, isVideo: false }); }} />
                 );
               }
@@ -216,11 +216,11 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
               onClick={() => {
                 const mediaMatch = message.text.match(/^\[(image|video)\]([\s\S]*?)\[\/\1\]/);
                 const quoteText = mediaMatch
-                  ? (mediaMatch[1] === 'video' ? '🎥 Video' : '📷 Photo')
+                  ? (mediaMatch[1] === 'video' ? `🎥 ${t('video_att')}` : `📷 ${t('photo_att')}`)
                   : message.text.trim().slice(0, 140);
                 setReply({ id: message.id, senderNickname: message.senderNickname, text: quoteText });
               }}
-              className="p-1.5 -ml-1.5 rounded-full text-fg-subtle hover:text-fg-primary hover:bg-bg-tertiary transition-colors"
+              className="p-1.5 -ml-1.5 rounded-full text-fg-muted hover:text-fg-primary hover:bg-bg-tertiary transition-colors"
               title={t('reply')} aria-label={t('reply')}>
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <path d="M12 19l-7-7 7-7" /><path d="M19 12H5" />
@@ -228,14 +228,14 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
             </button>
             <button
               onClick={() => setShowReactions(!showReactions)}
-              className="p-1.5 rounded-full text-fg-subtle hover:text-fg-primary hover:bg-bg-tertiary transition-colors"
-              title="Reactions" aria-label="Reactions">
+              className="p-1.5 rounded-full text-fg-muted hover:text-fg-primary hover:bg-bg-tertiary transition-colors"
+              title={t('reactions')} aria-label={t('reactions')}>
               😊
             </button>
             {isOwn && !isMedia && !message.channel && (
               <button
                 onClick={() => setEditing(message)}
-                className="p-1.5 rounded-full text-fg-subtle hover:text-fg-primary hover:bg-bg-tertiary transition-colors"
+                className="p-1.5 rounded-full text-fg-muted hover:text-fg-primary hover:bg-bg-tertiary transition-colors"
                 title={t('edit_message')} aria-label={t('edit_message')}>
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
@@ -245,7 +245,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
             {isOwn && (
               <button
                 onClick={() => deleteMsg(message.id)}
-                className="p-1.5 rounded-full text-fg-subtle hover:text-status-error hover:bg-status-error/10 transition-colors"
+                className="p-1.5 rounded-full text-fg-muted hover:text-status-error hover:bg-status-error/10 transition-colors"
                 title={t('delete')} aria-label={t('delete')}>
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                   <path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
@@ -255,17 +255,17 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
             {!isOwn && (
               <button
                 onClick={() => { setReportOpen(true); setReportDone(false); setReportReason(''); setReportCustom(''); }}
-                className="p-1.5 rounded-full text-fg-subtle hover:text-status-error hover:bg-status-error/10 transition-colors"
+                className="p-1.5 rounded-full text-fg-muted hover:text-status-error hover:bg-status-error/10 transition-colors"
                 title={t('report')} aria-label={t('report')}>
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M12 3l9 5-9 5-9-5 9-5z" /><path d="M3 13v6a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6" />
                 </svg>
               </button>
             )}
-            <span className="text-[10px] text-fg-subtle ml-auto">
+            <span className="text-[11px] text-fg-muted ml-auto">
               {formatTime(message.timestamp)}
               {message.editedAt && (
-                <span className="ml-1.5 text-fg-subtle/70">• edited</span>
+                <span className="ml-1.5 text-fg-muted/80">• {t('edited')}</span>
               )}
               {expiresIn && (
                 <span className={`ml-1.5 text-[10px] font-mono ${expiresIn === 'expired' ? 'text-status-error' : 'text-accent-primary'}`}>
@@ -301,20 +301,20 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
               {reportDone ? (
                 <>
                   <div className="w-14 h-14 rounded-2xl bg-accent-primary/15 flex items-center justify-center mx-auto mb-5">
-                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-accent-primary))" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M20 6L9 17l-5-5" />
                     </svg>
                   </div>
                   <p className="text-center text-[15px] text-fg-primary leading-relaxed">{t('report_sent')}</p>
                   <button onClick={() => setReportOpen(false)}
                     className="mt-6 w-full py-3 rounded-2xl bg-accent-primary text-accent-text text-[15px] font-semibold hover:opacity-90 transition-opacity">
-                    OK
+                    {t('ok')}
                   </button>
                 </>
               ) : (
                 <>
                   <div className="w-14 h-14 rounded-2xl bg-status-error/15 flex items-center justify-center mx-auto mb-5">
-                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--color-status-error)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-status-error))" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <path d="M12 3l9 5-9 5-9-5 9-5z" /><path d="M3 13v6a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6" />
                     </svg>
                   </div>
@@ -371,7 +371,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
         <button
           onClick={() => setLightbox(null)}
           className="absolute top-4 right-4 w-10 h-10 rounded-full bg-white/10 text-white text-[20px] flex items-center justify-center hover:bg-white/25 transition-colors z-10"
-          aria-label="Close">✕</button>
+          aria-label={t('close')}>✕</button>
         {lightbox.isVideo ? (
           <video src={lightbox.url} controls autoPlay
             className="max-h-[90vh] max-w-[92vw] rounded-xl" onClick={(e) => e.stopPropagation()} />

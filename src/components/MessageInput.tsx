@@ -86,11 +86,11 @@ export function MessageInput() {
   };
 
   return isBlockedChat ? (
-    <div className="px-3 py-3 border-t border-border-default bg-bg-secondary/60">
+    <div className="px-3 pt-3 pb-safe border-t border-border-default bg-bg-secondary/60">
       <div className="flex items-center justify-between gap-3 rounded-2xl px-4 py-3 border border-border-default bg-bg-tertiary/50">
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="w-8 h-8 rounded-full bg-status-error/15 flex items-center justify-center flex-shrink-0">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--color-status-error)" strokeWidth="2">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-status-error))" strokeWidth="2">
               <circle cx="12" cy="12" r="10" /><path d="M4.93 4.93l14.14 14.14" />
             </svg>
           </div>
@@ -107,12 +107,12 @@ export function MessageInput() {
       </div>
     </div>
   ) : (
-    <form onSubmit={handleSubmit} className="px-3 py-2.5">
+    <form onSubmit={handleSubmit} className="px-3 pt-2.5 pb-safe">
       <input ref={fileRef} type="file" hidden accept="image/*,video/*"
         onChange={(e) => { const f = e.target.files?.[0]; if (f) handleFile(f); e.target.value = ''; }} />
       {editingTarget && (
-        <div className="flex items-center gap-2 mb-2 px-3 py-2 rounded-xl bg-accent-primary/10 border border-accent-primary/30">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0">
+        <div className="flex items-center gap-2 mb-2 px-3 py-2 rounded-xl bg-accent-primary/10 border border-accent-primary/30 animate-step-in">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-accent-primary))" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0">
             <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
           </svg>
           <div className="min-w-0 flex-1">
@@ -126,8 +126,8 @@ export function MessageInput() {
         </div>
       )}
       {replyTo && !editingTarget && (
-        <div className="flex items-center gap-2 mb-2 px-3 py-2 rounded-xl bg-bg-tertiary border border-border-default">
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0">
+        <div className="flex items-center gap-2 mb-2 px-3 py-2 rounded-xl bg-bg-tertiary border border-border-default animate-step-in">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-accent-primary))" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="flex-shrink-0">
             <path d="M12 19l-7-7 7-7" /><path d="M19 12H5" />
           </svg>
           <div className="min-w-0 flex-1">
@@ -144,7 +144,7 @@ export function MessageInput() {
         <button type="button" disabled={!isConnected || uploading}
           onClick={() => fileRef.current?.click()}
           className="flex-shrink-0 w-11 h-11 rounded-2xl bg-bg-tertiary border border-border-default text-fg-muted flex items-center justify-center hover:bg-bg-hover hover:text-fg-primary disabled:opacity-30 transition-all"
-          aria-label="Attach file">
+          aria-label={t('attach_file')}>
           {uploading ? (
             <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" /></svg>
           ) : (
@@ -157,7 +157,7 @@ export function MessageInput() {
           onKeyDown={handleKeyDown}
           placeholder={isConnected ? t('type_message') : t('not_connected')}
           disabled={!isConnected}
-          className="flex-1 px-4 py-2.5 rounded-2xl bg-bg-tertiary border border-border-default text-fg-primary text-[15px] placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary focus:border-transparent transition-all duration-200 resize-none"
+          className="flex-1 px-4 py-2.5 rounded-2xl bg-bg-tertiary border border-border-default text-fg-primary text-[15px] placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary focus:border-transparent transition-[border-color,background-color,box-shadow] duration-200 resize-none"
           style={{ minHeight: '44px', maxHeight: '120px', overflow: 'hidden' }}
           rows={1}
           maxLength={4096}

@@ -14,7 +14,6 @@ export function LoginScreen() {
 
   useEffect(() => {
     document.title = 'WhisperNet';
-    window.electronAPI?.setTitle('WhisperNet');
   }, []);
 
   useEffect(() => {
@@ -67,7 +66,7 @@ export function LoginScreen() {
           </div>
 
           {state.authError && (
-            <div className="p-3 rounded-xl bg-status-error/10 border border-status-error/20 text-status-error text-sm text-center">
+            <div className="p-3 rounded-xl bg-status-error/10 border border-status-error/20 text-status-error text-sm text-center animate-step-in">
               {state.authError}
             </div>
           )}

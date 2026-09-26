@@ -36,7 +36,6 @@ import { ContactsPanel } from './components/ContactsPanel';
 import { SettingsPanel } from './components/SettingsPanel';
 
 const WS_URL = import.meta.env.VITE_WS_URL || (() => {
-  if (window.electronAPI) return 'ws://localhost:50025/ws';
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${proto}//${location.host}/ws`;
 })();
@@ -285,6 +284,9 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     if (state.settings.accentColor && state.settings.accentColor !== 'purple') {
       root.classList.add(`accent-${state.settings.accentColor}`);
     }
+    const accent = getComputedStyle(root).getPropertyValue('--color-accent-primary').trim();
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta && accent) meta.setAttribute('content', `rgb(${accent})`);
   }, [state.settings.theme, state.settings.accentColor]);
 
   const t = useCallback((key: string) => {
@@ -298,7 +300,6 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     const newTitle = count > 0 ? `${base} (${count})` : base;
     document.title = newTitle;
     titleRef.current = newTitle;
-    window.electronAPI?.setTitle(newTitle);
   }, [state.nickname]);
 
   const fireNotification = useCallback((title: string, body: string) => {
@@ -607,7 +608,6 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               if (!privateKeyRef.current) dispatch({ type: 'SET_KEY_SETUP_NEEDED', needed: true });
               dispatch({ type: 'SET_E2EE_READY', ready: !!privateKeyRef.current });
               if (message.payload.onlineUsers) dispatch({ type: 'SET_USERS', users: message.payload.onlineUsers.filter((u: User) => u.id !== message.payload.userId) });
-              window.electronAPI?.setTitle(`WhisperNet @${message.payload.nickname}`);
               document.title = `WhisperNet @${message.payload.nickname}`;
               titleRef.current = document.title;
               unreadCountRef.current = 0;
@@ -894,7 +894,6 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     localStorage.removeItem('wn_auth');
     localStorage.removeItem('wn_settings');
     localStorage.removeItem('wn_device_id');
-    window.electronAPI?.setTitle('WhisperNet');
     document.title = 'WhisperNet';
   }, [disconnect]);
 
@@ -1180,7 +1179,7 @@ function PasswordModalInline({ title, cancelLabel, onConfirm, onCancel }: { titl
       <div className="fixed inset-0 z-[61] flex items-center justify-center p-4">
         <div className="bg-bg-secondary border border-border-default rounded-2xl shadow-2xl max-w-sm w-full p-6">
           <div className="w-14 h-14 rounded-2xl bg-accent-primary/15 flex items-center justify-center mx-auto mb-5">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-accent-primary))" strokeWidth="2">
               <rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
             </svg>
           </div>
@@ -1201,6 +1200,7 @@ function PasswordModalInline({ title, cancelLabel, onConfirm, onCancel }: { titl
 
 function AppInner() {
   const { state, t, reconnect, openGeneral, openDm, searchUsers } = useConnection();
+  const isMobile = useIsMobile();
   const [mobileTab, setMobileTab] = useState<'home' | 'settings'>('home');
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -1223,7 +1223,6 @@ function AppInner() {
     document.addEventListener('visibilitychange', syncBlur);
     window.addEventListener('blur', onBlur);
     window.addEventListener('focus', onFocus);
-    window.electronAPI?.setScreenshotProtection?.(on);
     syncBlur();
     return () => {
       document.removeEventListener('contextmenu', handler);
@@ -1231,7 +1230,6 @@ function AppInner() {
       document.removeEventListener('visibilitychange', syncBlur);
       window.removeEventListener('blur', onBlur);
       window.removeEventListener('focus', onFocus);
-      window.electronAPI?.setScreenshotProtection?.(false);
     };
   }, [mobileTab]);
 
@@ -1306,8 +1304,6 @@ function AppInner() {
 
   if (!state.userId) return <LoginScreen />;
 
-  const isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
-
   const handleSearch = (value: string) => {
     setSearchQuery(value);
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -1345,7 +1341,7 @@ function AppInner() {
                       <button onClick={() => { openGeneral(); setMobileChatOpen(true); pushView('chat'); }}
                         className="w-full flex items-center gap-4 px-4 py-4 rounded-2xl transition-all text-left hover:bg-bg-tertiary">
                         <div className="w-14 h-14 rounded-2xl bg-accent-primary/20 flex items-center justify-center flex-shrink-0">
-                          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2">
+                          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-accent-primary))" strokeWidth="2">
                             <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
                           </svg>
                         </div>
@@ -1467,6 +1463,18 @@ function AppInner() {
       <ChatArea showContacts={true} />
     </div>
   );
+}
+
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(() => typeof window !== 'undefined' && window.innerWidth < 768);
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 767px)');
+    const update = () => setIsMobile(mq.matches);
+    update();
+    mq.addEventListener('change', update);
+    return () => mq.removeEventListener('change', update);
+  }, []);
+  return isMobile;
 }
 
 export default function App() {

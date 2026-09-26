@@ -90,7 +90,7 @@ function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, onCon
           <div className={cn('w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-5',
             danger ? 'bg-status-error/15' : 'bg-accent-primary/15'
           )}>
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke={danger ? 'var(--color-status-error)' : 'var(--color-accent-primary)'} strokeWidth="2">
+            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke={danger ? 'rgb(var(--color-status-error))' : 'rgb(var(--color-accent-primary))'} strokeWidth="2">
               {danger ? (
                 <><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></>
               ) : (
@@ -137,10 +137,15 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
   }, [inline, requestSessions, isAdmin, adminReports, adminGetBanned]);
 
   const accentColors: AccentColor[] = ['purple', 'blue', 'green', 'red', 'orange', 'pink', 'teal', 'indigo'];
-  const accentColorPreview: Record<AccentColor, string> = {
-    purple: '#8b5cf6', blue: '#3b82f6', green: '#22c55e', red: '#ef4444',
-    orange: '#f97316', pink: '#ec4899', teal: '#14b8a6', indigo: '#6366f1',
-  };
+  const accentColorPreview: Record<AccentColor, string> = state.settings.theme === 'dark'
+    ? {
+      purple: '#8b5cf6', blue: '#3b82f6', green: '#22c55e', red: '#ef4444',
+      orange: '#f97316', pink: '#ec4899', teal: '#14b8a6', indigo: '#6366f1',
+    }
+    : {
+      purple: '#8b5cf6', blue: '#2563eb', green: '#16a34a', red: '#dc2626',
+      orange: '#ea580c', pink: '#db2777', teal: '#0d9488', indigo: '#4f46e5',
+    };
 
   const SafetyNumberButton = () => {
     const { state, getMyIdentityKeyB64, getPeerIdentityKeyB64, identityWarning, t } = useConnection();
@@ -464,7 +469,7 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
         <div className="px-4 h-14 flex items-center border-b border-border-default">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-accent-primary/15 flex items-center justify-center">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-accent-primary))" strokeWidth="2">
                 <circle cx="12" cy="12" r="3" />
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
               </svg>
@@ -500,7 +505,7 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
         <div className="flex items-center justify-between px-4 h-14 border-b border-border-default">
           <div className="flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-accent-primary/15 flex items-center justify-center">
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--color-accent-primary)" strokeWidth="2">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-accent-primary))" strokeWidth="2">
                 <circle cx="12" cy="12" r="3" />
                 <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.6a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z" />
               </svg>

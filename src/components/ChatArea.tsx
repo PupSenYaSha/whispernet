@@ -28,9 +28,9 @@ export function ChatArea({ showContacts: _showContacts, isMobile, onBack }: { sh
       <TopBar onSettingsClick={() => setShowSettings(true)} isMobile={isMobile} onBack={onBack} />
       {warningForCurrent && (
         <button onClick={dismissIdentityWarning}
-          className="flex items-center gap-2 mx-3 mt-2 px-3 py-2 rounded-xl bg-red-500/15 border border-red-500/40 text-red-300 text-[12.5px] font-medium text-left leading-snug hover:bg-red-500/25 transition-colors">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0 text-red-400"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
-          Identity key changed for @{warningForCurrent.nickname || ''} — verify the new safety number in Security Settings.
+          className="flex items-center gap-2 mx-3 mt-2 px-3 py-2 rounded-xl bg-status-error/10 border border-status-error/30 text-status-error text-[12.5px] font-medium text-left leading-snug hover:bg-status-error/20 transition-colors animate-step-in">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="shrink-0"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg>
+          {t('identity_warning').replace('{nick}', warningForCurrent.nickname || '')}
         </button>
       )}
       <MessageList key={state.activeChannel} messages={currentMessages} fontSizeClass={fontSizeClass} t={t} />
