@@ -308,7 +308,7 @@ function createWindow() {
       nodeIntegration: false,
       sandbox: false,
     },
-    backgroundColor: '#0c0a14',
+    backgroundColor: '#f0f2f5',
     show: false,
   });
 
@@ -411,7 +411,7 @@ function createWindow() {
 
 app.whenReady().then(async () => {
   Menu.setApplicationMenu(null);
-  nativeTheme.themeSource = 'dark';
+  nativeTheme.themeSource = 'light';
 
   createWindow();
 

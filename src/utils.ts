@@ -1,7 +1,7 @@
 import type { AppSettings } from './types';
 
 export const defaultSettings: AppSettings = {
-  theme: 'dark',
+  theme: 'light',
   accentColor: 'purple',
   language: 'en',
   notifications: true,

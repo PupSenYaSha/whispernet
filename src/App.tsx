@@ -275,10 +275,10 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const root = document.documentElement;
-    if (state.settings.theme === 'light') {
-      root.classList.add('light');
+    if (state.settings.theme === 'dark') {
+      root.classList.add('dark');
     } else {
-      root.classList.remove('light');
+      root.classList.remove('dark');
     }
     const accentClasses = ['accent-blue', 'accent-green', 'accent-red', 'accent-orange', 'accent-pink', 'accent-teal', 'accent-indigo'];
     accentClasses.forEach(c => root.classList.remove(c));
