@@ -54,7 +54,7 @@ function serveStatic(req, res) {
     const content = readFileSync(filePath);
     res.writeHead(200, {
       'Content-Type': mime,
-      'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000',
+      'Cache-Control': ext === '.html' || ext === '.css' || ext === '.js' ? 'no-cache' : 'public, max-age=31536000',
       
       'X-Content-Type-Options': 'nosniff',
       'X-Frame-Options': 'sameorigin',
