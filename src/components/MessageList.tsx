@@ -96,7 +96,7 @@ function MessageListImpl({ messages, fontSizeClass, t }: { messages: Message[]; 
         const prevGroup = groupedMessages[i - 1];
         const newDay = !prevGroup || new Date(prevGroup[0].timestamp).toDateString() !== new Date(group[0].timestamp).toDateString();
         return (
-          <div key={i}>
+          <div key={group[0]?.id || i}>
             {newDay && (
               <div className="flex items-center justify-center py-2">
                 <span className="px-3 py-1 rounded-full bg-bg-tertiary/60 text-[11px] font-medium text-fg-muted">

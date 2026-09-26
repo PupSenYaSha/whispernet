@@ -1,10 +1,10 @@
 import { WebSocket } from 'ws';
-import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getAllPreKeyBundles, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, cleanupExpiredPreKeys, cleanupExpiredMessages, startCleanupJobs, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, type StoredSession, getChannelMediaKey } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, getIdentityKeyB64, setUserAvatar, removeUserAvatar, getAvatarDir, getDataDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, type StoredSession, getChannelMediaKey } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import { appendFileSync } from 'fs';
+import { appendFileSync, mkdirSync } from 'fs';
+import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'url';
 import { nextMondayMidnightMSK } from './time.js';
 import {
   RATE_LIMIT_WINDOW,
@@ -19,18 +19,21 @@ import {
   HEARTBEAT_INTERVAL,
   CLIENT_TIMEOUT,
   DM_TTL_ALLOWED_MS,
+  MAX_AVATAR_BYTES,
+  MAX_AVATAR_PAYLOAD,
+  AVATAR_CHANGE_INTERVAL_MS,
 } from './constants.js';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const LOG_DIR = path.join(__dirname, '../data');
-const SECURITY_LOG = path.join(LOG_DIR, 'security.log');
+const SECURITY_LOG = () => path.join(getDataDir(), 'security.log');
 
 function logSecurity(event: string, details: Record<string, any>) {
   const entry = `[${new Date().toISOString()}] ${event} ${JSON.stringify(details)}\n`;
   try {
-    appendFileSync(SECURITY_LOG, entry);
+    const file = SECURITY_LOG();
+    try { mkdirSync(path.dirname(file), { recursive: true }); } catch {}
+    appendFileSync(file, entry);
   } catch (e) {
-    console.error('Failed to write security log:', e);
+    console.error('Failed to write security log:', (e as Error).message);
   }
 }
 
@@ -172,6 +175,57 @@ const authAttempts = new Map<string, { count: number; resetAt: number }>();
 const lastMessageTime = new Map<string, number>();
 const connectionCounts = new Map<string, number>();
 const failedLogins = new Map<string, { count: number; lockedUntil: number; lastActive: number }>();
+
+const lastAvatarChange = new Map<string, number>();
+
+interface AvatarInfo {
+  ext: string;
+  updatedAt: number | null;
+}
+
+function avatarInfo(u: { avatarExt: string | null; avatarUpdatedAt: number | null } | null | undefined): AvatarInfo | null {
+  if (!u || !u.avatarExt) return null;
+  return { ext: u.avatarExt, updatedAt: u.avatarUpdatedAt };
+}
+
+async function getProfileMeta(userId: string): Promise<{ avatarExt: string | null; avatarUpdatedAt: number | null } | null> {
+  const u = await getUserById(userId);
+  return u ? { avatarExt: u.avatarExt, avatarUpdatedAt: u.avatarUpdatedAt } : null;
+}
+
+async function buildAvatarInfoMap(): Promise<Map<string, { avatarExt: string | null; avatarUpdatedAt: number | null }>> {
+  const users = await getAllUsers();
+  return new Map(users.map(u => [u.id, { avatarExt: u.avatarExt, avatarUpdatedAt: u.avatarUpdatedAt }]));
+}
+
+function avatarRateOk(userId: string): boolean {
+  const last = lastAvatarChange.get(userId) || 0;
+  if (Date.now() - last < AVATAR_CHANGE_INTERVAL_MS) return false;
+  lastAvatarChange.set(userId, Date.now());
+  return true;
+}
+
+const AVATAR_MAGIC: Record<string, (b: Buffer) => boolean> = {
+  png: (b) => b.length > 8 && b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47,
+  jpeg: (b) => b.length > 2 && b[0] === 0xff && b[1] === 0xd8,
+  webp: (b) => b.length > 12 && b.toString('ascii', 0, 4) === 'RIFF' && b.toString('ascii', 8, 12) === 'WEBP',
+  gif: (b) => b.length > 6 && b.toString('ascii', 0, 3) === 'GIF',
+};
+
+function decodeAvatarDataUrl(dataUrl: unknown): { ext: string; buffer: Buffer } | null {
+  if (typeof dataUrl !== 'string' || dataUrl.length > MAX_AVATAR_PAYLOAD) return null;
+  const m = /^data:image\/(png|jpeg|webp|gif);base64,([A-Za-z0-9+/=]+)$/.exec(dataUrl);
+  if (!m) return null;
+  const ext = m[1];
+  const body = m[2];
+  if (body.length % 4 === 1) return null;
+  let buffer: Buffer;
+  try { buffer = Buffer.from(body, 'base64'); } catch { return null; }
+  if (buffer.length === 0 || buffer.length > MAX_AVATAR_BYTES) return null;
+  const check = AVATAR_MAGIC[ext];
+  if (!check || !check(buffer)) return null;
+  return { ext, buffer };
+}
 
 function recordFailedLogin(lockKey: string, count: number, lockedUntil: number): void {
   failedLogins.set(lockKey, { count, lockedUntil, lastActive: Date.now() });
@@ -333,9 +387,11 @@ export function handleConnection(ws: WebSocket): void {
         send(ws, { type: 'error', payload: { code: 'INVALID_JSON', message: 'Invalid message format' }, timestamp: Date.now() });
         return;
       }
-      const message: ClientMessage = { type: sanitize(parsed.type), payload: parsed.payload };
-      handleMessage(ws, currentUserId, message).catch((err) => {
-        console.error('Handler error:', err);
+      const payload = (parsed.payload && typeof parsed.payload === 'object' && !Array.isArray(parsed.payload)) ? parsed.payload : {};
+      const message: ClientMessage = { type: sanitize(parsed.type), payload };
+      handleMessage(ws, currentUserId, message).catch((err: unknown) => {
+        const e = err as { message?: string; code?: string };
+        console.error(`Handler error (${e?.code || 'n/a'}): ${e?.message || 'unknown'}`);
         send(ws, { type: 'error', payload: { code: 'INTERNAL', message: 'Internal server error' }, timestamp: Date.now() });
       });
     } catch {
@@ -343,14 +399,15 @@ export function handleConnection(ws: WebSocket): void {
     }
   });
 
-  ws.on('close', () => {
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
     handleDisconnect(currentDeviceId, currentUserId);
     releaseConnection(ip);
-  });
-  ws.on('error', () => {
-    handleDisconnect(currentDeviceId, currentUserId);
-    releaseConnection(ip);
-  });
+  };
+  ws.on('close', dispose);
+  ws.on('error', dispose);
 
   ws.on('pong', () => {
     if (currentDeviceId) {
@@ -452,7 +509,17 @@ export function handleConnection(ws: WebSocket): void {
       case 'get_banned':
         await handleGetBanned(userId, ws, message.payload);
         break;
+      case 'profile_get':
+        if (userId) await handleProfileGet(userId, ws, message.payload);
+        break;
+      case 'avatar_set':
+        if (userId) await handleAvatarSet(userId, ws, message.payload);
+        break;
+      case 'avatar_remove':
+        if (userId) await handleAvatarRemove(userId, ws);
+        break;
       default:
+        logSecurity('UNKNOWN_COMMAND', { type: message.type, auth: !!userId, ip });
         send(ws, { type: 'error', payload: { code: 'UNKNOWN_MESSAGE', message: 'Unknown message type' }, timestamp: Date.now() });
     }
   }
@@ -565,6 +632,18 @@ export function handleConnection(ws: WebSocket): void {
       return;
     }
 
+    if (await isAdminNickname(cleanNick)) {
+      send(ws, { type: 'auth_failure', payload: { reason: 'This nickname is reserved' }, timestamp: Date.now() });
+      logSecurity('RESERVED_NICK_REGISTER', { nick: cleanNick, ip });
+      return;
+    }
+
+    const sameNick = await getUserByNickname(cleanNick.toLowerCase()) || (await getAllUsers()).find(u => u.nickname.toLowerCase() === cleanNick.toLowerCase());
+    if (sameNick) {
+      send(ws, { type: 'auth_failure', payload: { reason: 'Nickname already taken' }, timestamp: Date.now() });
+      return;
+    }
+
     if (typeof cleanPass !== 'string' || cleanPass.length < 8 || cleanPass.length > 32) {
       send(ws, { type: 'auth_failure', payload: { reason: 'Password must be 8-32 characters' }, timestamp: Date.now() });
       return;
@@ -607,11 +686,12 @@ export function handleConnection(ws: WebSocket): void {
 
   async function onAuthenticated(userId: string, nickname: string, ws: WebSocket, deviceId?: string): Promise<void> {
     const publicKeys = await getAllPublicKeys();
+    const userMeta = await buildAvatarInfoMap();
 
     const seen = new Set<string>();
-    const onlineUsers: { id: string; nickname: string }[] = [];
+    const onlineUsers: { id: string; nickname: string; avatar: AvatarInfo | null }[] = [];
     for (const c of clients.values()) {
-      if (!seen.has(c.userId)) { seen.add(c.userId); onlineUsers.push({ id: c.userId, nickname: c.nickname }); }
+      if (!seen.has(c.userId)) { seen.add(c.userId); onlineUsers.push({ id: c.userId, nickname: c.nickname, avatar: avatarInfo(userMeta.get(c.userId)) }); }
     }
 
     send(ws, { type: 'auth_success', payload: { userId, nickname, deviceId, publicKeys, preKeyBundles: {}, onlineUsers, role: await isAdminNickname(nickname) ? 'admin' : 'user', channelMediaKey: await getChannelMediaKey() }, timestamp: Date.now() });
@@ -622,6 +702,7 @@ export function handleConnection(ws: WebSocket): void {
       id: m.id,
       senderId: m.senderId,
       senderNickname: m.senderNickname,
+      senderAvatar: avatarInfo(userMeta.get(m.senderId)),
       text: m.text,
       encrypted: m.encrypted || null,
       timestamp: m.timestamp,
@@ -642,7 +723,7 @@ export function handleConnection(ws: WebSocket): void {
       timestamp: Date.now(),
     });
 
-    broadcast({ type: 'user_joined', payload: { userId, nickname }, timestamp: Date.now() }, userId);
+    broadcast({ type: 'user_joined', payload: { userId, nickname, avatar: avatarInfo(userMeta.get(userId)) }, timestamp: Date.now() }, userId);
   }
 
   
@@ -693,6 +774,7 @@ export function handleConnection(ws: WebSocket): void {
       id: messageId,
       senderId,
       senderNickname: sender.nickname,
+      senderAvatar: avatarInfo(await getProfileMeta(senderId)),
       text,
       timestamp,
       isOwn: false,
@@ -712,7 +794,7 @@ export function handleConnection(ws: WebSocket): void {
     }
   }
 
-    async function handleDmSend(senderId: string, ws: WebSocket, payload: { to?: string; toKey?: any; text: string; encrypted?: any; signalEncrypted?: any; fileKey?: Record<string, string>; sealed?: string; ttl?: number; reaction?: { messageId: string; userId: string; emoji: string }; quoted?: { id?: string; text?: string; sender?: string } }): Promise<void> {
+    async function handleDmSend(senderId: string, ws: WebSocket, payload: { to?: string; toKey?: any; text: string; encrypted?: any; signalEncrypted?: any; x3dhMessage?: any; ratchetPublicKey?: number[]; fileKey?: Record<string, string>; sealed?: string; ttl?: number; quoted?: { id?: string; text?: string; sender?: string } }): Promise<void> {
     if (!checkMessageRateLimit(ip)) {
       send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down.' }, timestamp: Date.now() });
       return;
@@ -776,21 +858,11 @@ export function handleConnection(ws: WebSocket): void {
       ? { id: String(payload.quoted.id || ''), text: sanitizeText(String(payload.quoted.text || '')).slice(0, 4096), sender: sanitizeText(payload.quoted.sender).slice(0, 64) }
       : null;
 
-    if (payload?.reaction && typeof payload.reaction === 'object') {
-      const { messageId, emoji } = payload.reaction;
-      if (typeof messageId !== 'string' || !messageId || !isValidEmoji(emoji)) {
-        send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Invalid reaction' }, timestamp: Date.now() });
-        return;
-      }
-      await addReaction(messageId, senderId, emoji);
-      const reactions = await getReactionsForMessage(messageId);
-      broadcast({ type: 'reaction_update', payload: { messageId, reactions, userId: senderId }, timestamp: Date.now() }, senderId);
-      for (const dev of recipientDevices) send(dev.ws, { type: 'reaction_update', payload: { messageId, reactions, userId: senderId }, timestamp: Date.now() });
-      return;
-    }
+    const x3dhMessage = payload?.x3dhMessage && typeof payload.x3dhMessage === 'object' ? payload.x3dhMessage : null;
+    const ratchetPublicKey = Array.isArray(payload?.ratchetPublicKey) ? payload.ratchetPublicKey : null;
 
     if (isSignalEncrypted) {
-      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey, undefined, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined);
+      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey, undefined, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined, payload.signalEncrypted, x3dhMessage, ratchetPublicKey);
     } else if (isSealed) {
       await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey, payload.sealed, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined);
     } else if (isEncrypted) {
@@ -805,9 +877,12 @@ export function handleConnection(ws: WebSocket): void {
       id: messageId,
       senderId,
       senderNickname: sender.nickname,
+      senderAvatar: avatarInfo(await getProfileMeta(senderId)),
       text: '',
       encrypted: isEncrypted ? payload.encrypted : null,
       signalEncrypted: isSignalEncrypted ? payload.signalEncrypted : null,
+      x3dhMessage,
+      ratchetPublicKey,
       sealed: isSealed ? payload.sealed : null,
       timestamp,
       channel: channelId,
@@ -843,6 +918,44 @@ function canonicalJwk(jwk: any): string {
   const sorted: Record<string, any> = {};
   for (const k of Object.keys(jwk || {}).sort()) sorted[k] = jwk[k];
   return JSON.stringify(sorted);
+}
+
+function b64ToBytes(b64: string): Buffer | null {
+  try {
+    const buf = Buffer.from(b64, 'base64');
+    return buf.length > 0 ? buf : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Safety number в формате клиента (X3DH identity keys):
+ * sort(self, peer) -> SHA-256 -> первые 24 байта -> 6 групп по 4 байта, upper-case.
+ * Должен совпадать с generateX3dhSafetyNumber() на клиенте.
+ */
+function formatSafetyNumber(selfB64: string, peerB64: string | null): string | null {
+  const self = b64ToBytes(selfB64);
+  if (!self) return null;
+  const peer = peerB64 ? b64ToBytes(peerB64) : null;
+  const data = peer
+    ? (Buffer.compare(self, peer) <= 0 ? Buffer.concat([self, peer]) : Buffer.concat([peer, self]))
+    : self;
+  const digest = crypto.createHash('sha256').update(data).digest();
+  const groups: string[] = [];
+  for (let i = 0; i < 24; i += 4) {
+    groups.push(digest.subarray(i, i + 4).toString('hex').toUpperCase());
+  }
+  return groups.join(' ');
+}
+
+async function computeSafetyNumber(viewerId: string, targetId: string): Promise<string | null> {
+  const selfId = await getIdentityKeyB64(viewerId);
+  if (!selfId) return null;
+  if (targetId === viewerId) return formatSafetyNumber(selfId, null);
+  const peerId = await getIdentityKeyB64(targetId);
+  if (!peerId) return null;
+  return formatSafetyNumber(selfId, peerId);
 }
 
    async function handleSealedSend(senderId: string, ws: WebSocket, payload: any): Promise<void> {
@@ -905,7 +1018,7 @@ function canonicalJwk(jwk: any): string {
     })();
   }
 
-  async function handleDmHistory(userId: string, ws: WebSocket, payload: { with: string }): Promise<void> {
+async function handleDmHistory(userId: string, ws: WebSocket, payload: { with: string }): Promise<void> {
     if (!payload?.with || typeof payload.with !== 'string') return;
     if (payload.with === userId) return;
     const channel = getDmChannelId(userId, payload.with);
@@ -913,28 +1026,33 @@ function canonicalJwk(jwk: any): string {
     if (parts.length !== 2 || (parts[0] !== userId && parts[1] !== userId)) return;
     const messages = await getDmHistory(userId, payload.with, 100);
     const publicKeys = await getPublicKeysByIds([userId, payload.with]);
+    const userMeta = await buildAvatarInfoMap();
     send(ws, {
       type: 'dm_history',
       payload: {
         channel,
         with: payload.with,
         publicKeys,
-        messages: await handleDmHistoryMessages(userId, messages),
+        messages: await handleDmHistoryMessages(userId, messages, userMeta),
       },
       timestamp: Date.now(),
     });
   }
 
   
-  async function handleDmHistoryMessages(userId: string, messages: any[]): Promise<any[]> {
+  async function handleDmHistoryMessages(userId: string, messages: any[], userMeta: Map<string, { avatarExt: string | null; avatarUpdatedAt: number | null }>): Promise<any[]> {
     const reactionsById = await getReactionsForMessages(messages.map((m) => m.id));
     return messages.map(m => ({
       id: m.id,
       senderId: m.senderId,
       senderNickname: m.senderNickname,
-      text: m.text || '',
-      encrypted: m.encrypted || null,
-      sealed: m.sealed || null,
+      senderAvatar: avatarInfo(userMeta.get(m.senderId)),
+   text: m.text || '',
+   encrypted: m.encrypted || null,
+   signalEncrypted: m.signalEncrypted || null,
+   x3dhMessage: m.x3dhMessage || null,
+   ratchetPublicKey: m.ratchetPublicKey || null,
+   sealed: m.sealed || null,
       timestamp: m.timestamp,
       isOwn: m.senderId === userId,
       fileKey: m.fileKey || null,
@@ -950,7 +1068,8 @@ function canonicalJwk(jwk: any): string {
     const contacts = await getDmContacts(userId);
     const publicKeys = await getPublicKeysByIds([userId, ...contacts.map(c => c.id)]);
     const onlineIds = new Set(userDevices.keys());
-    const contactsWithOnline = contacts.map(c => ({ ...c, online: onlineIds.has(c.id) }));
+    const userMeta = await buildAvatarInfoMap();
+    const contactsWithOnline = contacts.map(c => ({ ...c, online: onlineIds.has(c.id), avatar: avatarInfo(userMeta.get(c.id)) }));
     send(ws, { type: 'dm_contacts', payload: { contacts: contactsWithOnline, publicKeys }, timestamp: Date.now() });
   }
 
@@ -961,12 +1080,13 @@ function canonicalJwk(jwk: any): string {
       return;
     }
     const allUsers = await getAllUsers();
+    const userMeta = new Map(allUsers.map(u => [u.id, u]));
     const users = allUsers.filter((u: { id: string; nickname: string }) => u.id !== userId);
     const onlineIds = new Set(userDevices.keys());
     const results = users
       .filter((u: { id: string; nickname: string }) => u.nickname.toLowerCase().includes(query))
       .slice(0, 20)
-      .map((u: { id: string; nickname: string }) => ({ id: u.id, nickname: u.nickname, online: onlineIds.has(u.id) }));
+      .map((u: { id: string; nickname: string }) => ({ id: u.id, nickname: u.nickname, online: onlineIds.has(u.id), avatar: avatarInfo(userMeta.get(u.id)) }));
     send(ws, { type: 'search_results', payload: { results }, timestamp: Date.now() });
   }
 
@@ -1047,6 +1167,81 @@ function canonicalJwk(jwk: any): string {
       if (bundle) bundles[id] = bundle;
     }
     send(ws, { type: 'prekey_bundles', payload: { bundles }, timestamp: Date.now() });
+  }
+
+  async function handleProfileGet(userId: string, ws: WebSocket, payload: { userId?: string }): Promise<void> {
+    const targetId = typeof payload?.userId === 'string' ? payload.userId : '';
+    if (!targetId) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'userId required' }, timestamp: Date.now() });
+      return;
+    }
+    const u = await getUserProfile(targetId);
+    if (!u) {
+      send(ws, { type: 'error', payload: { code: 'USER_NOT_FOUND', message: 'User not found' }, timestamp: Date.now() });
+      return;
+    }
+    const isMe = targetId === userId;
+    const isBlockedByMe = !isMe && (await getBlockedUserIds(userId)).includes(targetId);
+    const isBanned = await getUserBanned(targetId);
+    const safetyNumber = await computeSafetyNumber(userId, targetId);
+    send(ws, {
+      type: 'profile',
+      payload: {
+        profile: {
+          id: u.id,
+          nickname: u.nickname,
+          avatar: u.avatarExt ? { ext: u.avatarExt, updatedAt: u.avatarUpdatedAt } : null,
+          createdAt: u.createdAt,
+          online: isUserOnline(targetId),
+          isMe,
+          isBlockedByMe,
+          isBanned,
+          safetyNumber,
+        },
+      },
+      timestamp: Date.now(),
+    });
+  }
+
+  async function handleAvatarSet(userId: string, ws: WebSocket, payload: { dataUrl?: string }): Promise<void> {
+    const decoded = decodeAvatarDataUrl(payload?.dataUrl);
+    if (!decoded) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_AVATAR', message: 'Invalid avatar image' }, timestamp: Date.now() });
+      return;
+    }
+    if (!avatarRateOk(userId)) {
+      send(ws, { type: 'error', payload: { code: 'AVATAR_RATE_LIMITED', message: 'You can change your avatar once a minute' }, timestamp: Date.now() });
+      return;
+    }
+    const previous = await getUserProfile(userId);
+    const updatedAt = await setUserAvatar(userId, decoded.ext);
+    if (!updatedAt) {
+      send(ws, { type: 'error', payload: { code: 'INTERNAL', message: 'Could not save avatar' }, timestamp: Date.now() });
+      return;
+    }
+    try {
+      await fs.promises.mkdir(getAvatarDir(), { recursive: true });
+      await fs.promises.writeFile(path.join(getAvatarDir(), userId), decoded.buffer);
+    } catch {
+      if (previous?.avatarExt) await setUserAvatar(userId, previous.avatarExt);
+      else await removeUserAvatar(userId);
+      send(ws, { type: 'error', payload: { code: 'INTERNAL', message: 'Could not save avatar' }, timestamp: Date.now() });
+      return;
+    }
+    const avatar = { ext: decoded.ext, updatedAt };
+    broadcast({ type: 'user_avatar', payload: { userId, avatar }, timestamp: Date.now() }, userId);
+    send(ws, { type: 'user_avatar', payload: { userId, avatar }, timestamp: Date.now() });
+  }
+
+  async function handleAvatarRemove(userId: string, ws: WebSocket): Promise<void> {
+    if (!avatarRateOk(userId)) {
+      send(ws, { type: 'error', payload: { code: 'AVATAR_RATE_LIMITED', message: 'You can change your avatar once a minute' }, timestamp: Date.now() });
+      return;
+    }
+    await removeUserAvatar(userId);
+    try { await fs.promises.rm(path.join(getAvatarDir(), userId), { force: true }); } catch {}
+    broadcast({ type: 'user_avatar', payload: { userId, avatar: null }, timestamp: Date.now() }, userId);
+    send(ws, { type: 'user_avatar', payload: { userId, avatar: null }, timestamp: Date.now() });
   }
 
   function handleDisconnect(deviceId: string | null, userId: string | null): void {
@@ -1170,7 +1365,11 @@ function canonicalJwk(jwk: any): string {
   
   
   async function adminIdentity(userId: string | null, ws: WebSocket, payload: { key?: string }): Promise<string | null> {
-    if (ADMIN_KEY && typeof payload?.key === 'string' && payload.key === ADMIN_KEY) return 'admin';
+    if (ADMIN_KEY && typeof payload?.key === 'string') {
+      const a = Buffer.from(payload.key);
+      const b = Buffer.from(ADMIN_KEY);
+      if (a.length === b.length && crypto.timingSafeEqual(a, b)) return 'admin';
+    }
     if (!userId) return null;
     const ids = userDevices.get(userId);
     const client = ids ? clients.get([...ids][0] || '') : null;
@@ -1179,20 +1378,21 @@ function canonicalJwk(jwk: any): string {
     return null;
   }
 
-  async function handleReportUser(userId: string, ws: WebSocket, payload: { targetId?: string; messageId?: string; reason?: string }): Promise<void> {
+  async function handleReportUser(userId: string, ws: WebSocket, payload: { targetId?: string; messageId?: string; reason?: string; source?: string }): Promise<void> {
     const targetId = typeof payload?.targetId === 'string' ? payload.targetId : '';
     const reason = typeof payload?.reason === 'string' ? sanitizeText(payload.reason).slice(0, 500) : '';
     if (!targetId || targetId === userId || !reason) {
       send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Invalid report' }, timestamp: Date.now() });
       return;
     }
+    const source: 'profile' | 'message' = payload?.source === 'profile' ? 'profile' : 'message';
     const reporter = clients.get([...userDevices.get(userId) || []][0] || '') || null;
     const reporterNick = reporter ? reporter.nickname : 'unknown';
     const target = await getUserById(targetId);
     const targetNick = target ? target.nickname : undefined;
-    let channel = 'dm';
+    let channel = 'profile';
     let messageText: string | undefined;
-    if (typeof payload?.messageId === 'string') {
+    if (source === 'message' && typeof payload?.messageId === 'string') {
       const msg = await getMessageById(payload.messageId);
       if (msg) {
         if (!msg.channel || msg.channel === 'general') channel = 'general';
@@ -1207,12 +1407,13 @@ function canonicalJwk(jwk: any): string {
       targetId,
       targetNick,
       channel,
-      messageId: typeof payload?.messageId === 'string' ? payload.messageId : undefined,
+      messageId: source === 'message' && typeof payload?.messageId === 'string' ? payload.messageId : undefined,
       messageText,
       reason,
+      source,
       timestamp: Date.now(),
     });
-    send(ws, { type: 'report_received', payload: { ok: true }, timestamp: Date.now() });
+    send(ws, { type: 'report_received', payload: { ok: true, source } , timestamp: Date.now() });
   }
 
   async function handleAdminBan(userId: string | null, ws: WebSocket, payload: { key?: string; userId?: string; nickname?: string }): Promise<void> {
@@ -1301,7 +1502,10 @@ export function startHeartbeatCheck(): void {
     for (const [key, entry] of failedLogins) {
       if (entry.lockedUntil > 0 && now > entry.lockedUntil) failedLogins.delete(key);
     }
-  }, RATE_LIMIT_WINDOW);
+   for (const [uid, last] of lastAvatarChange) {
+   if (now - last > AVATAR_CHANGE_INTERVAL_MS) lastAvatarChange.delete(uid);
+   }
+   }, RATE_LIMIT_WINDOW);
 
   scheduleWeeklyCleanup();
 }

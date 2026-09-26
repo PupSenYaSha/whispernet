@@ -6,7 +6,7 @@ export const MAX_CONNECTIONS_PER_IP = 10;
 export const MAX_FAILED_LOGINS = 5;
 export const ACCOUNT_LOCKOUT_DURATION = 300_000;
 export const FAILED_LOGIN_RETENTION_MS = 60 * 60 * 1000;
-export const MAX_WS_PAYLOAD_SIZE = 65536;
+export const MAX_WS_PAYLOAD_SIZE = 786432;
 
 export const HEARTBEAT_INTERVAL = 15_000;
 export const CLIENT_TIMEOUT = 90_000;
@@ -18,7 +18,7 @@ export const PREKEY_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 export const REPORT_CAP = 1000;
 
 export const MAX_UPLOAD_SIZE = 10 * 1024 * 1024;
-export const MAX_MEDIA_STREAM = 5 * 1024 * 1024;
+export const MAX_MEDIA_STREAM = MAX_UPLOAD_SIZE + 1024 * 1024;
 export const UPLOAD_RATE_LIMIT = 10;
 export const UPLOAD_RATE_WINDOW = 60_000;
 export const MEDIA_RATE_LIMIT = 30;
@@ -32,3 +32,8 @@ export const DM_TTL_ALLOWED_MS: Record<number, number> = {
 };
 
 export const FTS_TABLE = 'messages_fts';
+
+export const MAX_AVATAR_BYTES = 512 * 1024;
+export const MAX_AVATAR_PAYLOAD = 800 * 1024;
+export const AVATAR_CHANGE_INTERVAL_MS = 60_000;
+export const AVATAR_EXTS = ['png', 'jpeg', 'webp', 'gif'] as const;

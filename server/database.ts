@@ -1,4 +1,4 @@
-﻿import path from 'path';
+import path from 'path';
 import { fileURLToPath } from 'url';
 import { mkdirSync, existsSync } from 'fs';
 import fs from 'fs';
@@ -17,6 +17,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '../data');
 export const DB_FILE = 'whispernet.db';
 let MEDIA_DIR = path.join(DATA_DIR, 'media');
+let AVATAR_DIR = path.join(DATA_DIR, 'avatars');
 
 let db: DatabaseSync | null = null;
 let DB_PATH: string | null = null;
@@ -57,7 +58,10 @@ function ensureSchema(): void {
       public_key TEXT,
       created_at INTEGER NOT NULL,
       is_banned INTEGER NOT NULL DEFAULT 0,
-      blocked TEXT NOT NULL DEFAULT '[]'
+      banned_at INTEGER,
+      blocked TEXT NOT NULL DEFAULT '[]',
+      avatar_ext TEXT,
+      avatar_updated_at INTEGER
     );
     CREATE TABLE IF NOT EXISTS messages (
       id TEXT PRIMARY KEY,
@@ -72,11 +76,15 @@ function ensureSchema(): void {
       quoted_message_id TEXT,
       quoted_message_text TEXT,
       quoted_message_sender TEXT,
+      signal_encrypted TEXT,
+      x3dh_message TEXT,
+      ratchet_public_key TEXT,
       edited_at INTEGER,
       expires_at INTEGER
     );
     CREATE INDEX IF NOT EXISTS idx_messages_channel_ts ON messages(channel, timestamp);
     CREATE INDEX IF NOT EXISTS idx_messages_expires ON messages(expires_at);
+    CREATE INDEX IF NOT EXISTS idx_messages_id ON messages(id);
     CREATE TABLE IF NOT EXISTS reactions (
       message_id TEXT NOT NULL,
       user_id TEXT NOT NULL,
@@ -104,6 +112,7 @@ function ensureSchema(): void {
       message_id TEXT,
       message_text TEXT,
       reason TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'message',
       timestamp INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS sessions (
@@ -123,7 +132,30 @@ function ensureSchema(): void {
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
-  `);
+    CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);
+    CREATE INDEX IF NOT EXISTS idx_prekeys_created ON prekeys(created_at);
+    CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+    CREATE INDEX IF NOT EXISTS idx_sessions_last_active ON sessions(last_active);
+    CREATE INDEX IF NOT EXISTS idx_reports_target ON reports(target_id);
+    CREATE INDEX IF NOT EXISTS idx_reports_timestamp ON reports(timestamp);
+`);
+
+  
+  for (const col of ['avatar_ext TEXT', 'avatar_updated_at INTEGER', 'banned_at INTEGER']) {
+    try {
+      d.exec(`ALTER TABLE users ADD COLUMN ${col}`);
+    } catch {}
+  }
+
+  try {
+    d.exec(`ALTER TABLE reports ADD COLUMN source TEXT NOT NULL DEFAULT 'message'`);
+  } catch {}
+
+  for (const col of ['signal_encrypted TEXT', 'x3dh_message TEXT', 'ratchet_public_key TEXT']) {
+    try {
+      d.exec(`ALTER TABLE messages ADD COLUMN ${col}`);
+    } catch {}
+  }
 
   
   
@@ -139,6 +171,18 @@ function ensureSchema(): void {
 
 function backfillFts(): void {
   if (!ftsAvailable) return;
+  if (!metaGet('fts_index_v2')) {
+    try {
+      getDb().exec(`DROP TABLE IF EXISTS ${FTS_TABLE};`);
+      getDb().exec(`CREATE VIRTUAL TABLE ${FTS_TABLE} USING fts5(text, content='');`);
+      metaSet('fts_index_v2', '1');
+      metaSet('fts_backfilled', '');
+    } catch (e) {
+      console.warn('[db] FTS rebuild failed:', (e as Error).message);
+      ftsAvailable = false;
+      return;
+    }
+  }
   if (metaGet('fts_backfilled')) return;
   try {
     const rows = getDb().prepare('SELECT rowid, text FROM messages WHERE text IS NOT NULL AND text != ?').all('') as { rowid: number; text: string }[];
@@ -163,43 +207,59 @@ function syncFtsInsert(rowid: number, text: string): void {
   }
 }
 
-function syncFtsDelete(messageId: string): void {
-  if (!ftsAvailable) return;
-  try {
-    getDb().prepare(`DELETE FROM ${FTS_TABLE} WHERE rowid = (SELECT rowid FROM messages WHERE id = ?)`).run(messageId);
-  } catch (e) {
-    console.warn('[db] FTS delete failed, disabling FTS:', (e as Error).message);
-    ftsAvailable = false;
+function ftsDropRowids(rowids: number[], texts: string[]): void {
+  if (!ftsAvailable || rowids.length === 0) return;
+  const del = getDb().prepare(`INSERT INTO ${FTS_TABLE} (${FTS_TABLE}, rowid, text) VALUES ('delete', ?, ?)`);
+  for (let i = 0; i < rowids.length; i++) {
+    try {
+      del.run(rowids[i], texts[i] ?? '');
+    } catch (e) {
+      console.warn('[db] FTS delete row failed:', (e as Error).message);
+    }
   }
 }
 
-function syncFtsUpdate(messageId: string, text: string): void {
+function syncFtsDelete(messageId: string): void {
   if (!ftsAvailable) return;
   try {
-    getDb().prepare(`UPDATE ${FTS_TABLE} SET text = ? WHERE rowid = (SELECT rowid FROM messages WHERE id = ?)`).run(text, messageId);
+    const rows = getDb().prepare('SELECT rowid AS rid, text FROM messages WHERE id = ?').all(messageId) as { rid: number; text: string }[];
+    ftsDropRowids(rows.map(r => r.rid), rows.map(r => r.text));
   } catch (e) {
-    console.warn('[db] FTS update failed, disabling FTS:', (e as Error).message);
-    ftsAvailable = false;
+    console.warn('[db] FTS delete failed:', (e as Error).message);
+  }
+}
+
+function syncFtsUpdate(messageId: string, oldText: string, newText: string): void {
+  if (!ftsAvailable) return;
+  try {
+    const row = getDb().prepare('SELECT rowid AS rid FROM messages WHERE id = ?').get(messageId) as { rid: number } | undefined;
+    if (!row) return;
+    if (oldText) ftsDropRowids([row.rid], [oldText]);
+    if (newText) {
+      getDb().prepare(`INSERT INTO ${FTS_TABLE} (rowid, text) VALUES (?, ?)`).run(row.rid, newText);
+    }
+  } catch (e) {
+    console.warn('[db] FTS update failed:', (e as Error).message);
   }
 }
 
 function syncFtsDeleteByChannel(channel: string): void {
   if (!ftsAvailable) return;
   try {
-    getDb().prepare(`DELETE FROM ${FTS_TABLE} WHERE rowid IN (SELECT rowid FROM messages WHERE channel = ?)`).run(channel);
+    const rows = getDb().prepare('SELECT rowid AS rid, text FROM messages WHERE channel = ?').all(channel) as { rid: number; text: string }[];
+    ftsDropRowids(rows.map(r => r.rid), rows.map(r => r.text));
   } catch (e) {
-    console.warn('[db] FTS channel delete failed, disabling FTS:', (e as Error).message);
-    ftsAvailable = false;
+    console.warn('[db] FTS channel delete failed:', (e as Error).message);
   }
 }
 
 function syncFtsDeleteExpired(cutoff: number): void {
   if (!ftsAvailable) return;
   try {
-    getDb().prepare(`DELETE FROM ${FTS_TABLE} WHERE rowid IN (SELECT rowid FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?)`).run(cutoff);
+    const rows = getDb().prepare('SELECT rowid AS rid, text FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?').all(cutoff) as { rid: number; text: string }[];
+    ftsDropRowids(rows.map(r => r.rid), rows.map(r => r.text));
   } catch (e) {
-    console.warn('[db] FTS expired delete failed, disabling FTS:', (e as Error).message);
-    ftsAvailable = false;
+    console.warn('[db] FTS expired delete failed:', (e as Error).message);
   }
 }
 
@@ -345,10 +405,14 @@ export function setDataDir(dir: string): void {
   if (DB_PATH === path.join(dir, DB_FILE)) {
     DATA_DIR = dir;
     MEDIA_DIR = path.join(dir, 'media');
+    AVATAR_DIR = path.join(dir, 'avatars');
+    try { mkdirSync(MEDIA_DIR, { recursive: true }); } catch {}
+    try { mkdirSync(AVATAR_DIR, { recursive: true }); } catch {}
     return;
   }
   DATA_DIR = dir;
   MEDIA_DIR = path.join(dir, 'media');
+  AVATAR_DIR = path.join(dir, 'avatars');
   if (db) {
     try { db.close(); } catch {}
     db = null;
@@ -356,6 +420,7 @@ export function setDataDir(dir: string): void {
   }
   mkdirSync(DATA_DIR, { recursive: true });
   mkdirSync(MEDIA_DIR, { recursive: true });
+  mkdirSync(AVATAR_DIR, { recursive: true });
 }
 
 
@@ -372,6 +437,30 @@ export async function getChannelMediaKey(): Promise<string> {
 
 export function getMediaDir(): string {
   return MEDIA_DIR;
+}
+
+export function getDataDir(): string {
+  return DATA_DIR;
+}
+
+export function getAvatarDir(): string {
+  return AVATAR_DIR;
+}
+
+export async function getUserProfile(userId: string): Promise<{ id: string; nickname: string; avatarExt: string | null; avatarUpdatedAt: number | null; createdAt: number } | null> {
+  const row = getDb().prepare('SELECT id, nickname, avatar_ext as avatarExt, avatar_updated_at as avatarUpdatedAt, created_at as createdAt FROM users WHERE id = ?').get(userId) as any;
+  if (!row) return null;
+  return { id: row.id, nickname: row.nickname, avatarExt: row.avatarExt || null, avatarUpdatedAt: row.avatarUpdatedAt || null, createdAt: row.createdAt };
+}
+
+export async function setUserAvatar(userId: string, ext: string): Promise<number | null> {
+  const updatedAt = Date.now();
+  const res = getDb().prepare('UPDATE users SET avatar_ext = ?, avatar_updated_at = ? WHERE id = ?').run(ext, updatedAt, userId);
+  return (res as any).changes > 0 ? updatedAt : null;
+}
+
+export async function removeUserAvatar(userId: string): Promise<void> {
+  getDb().prepare('UPDATE users SET avatar_ext = NULL, avatar_updated_at = NULL WHERE id = ?').run(userId);
 }
 
 
@@ -398,10 +487,10 @@ export async function getUserByNickname(nickname: string): Promise<{ id: string;
   return { id: row.id, nickname: row.nickname, passwordHash: row.passwordHash, publicKey: parseJson(row.publicKey, null) };
 }
 
-export async function getUserById(id: string): Promise<{ id: string; nickname: string; publicKey: any } | null> {
-  const row = getDb().prepare('SELECT id, nickname, public_key as publicKey FROM users WHERE id = ?').get(id) as any;
+export async function getUserById(id: string): Promise<{ id: string; nickname: string; publicKey: any; avatarExt: string | null; avatarUpdatedAt: number | null; createdAt: number } | null> {
+  const row = getDb().prepare('SELECT id, nickname, public_key as publicKey, avatar_ext as avatarExt, avatar_updated_at as avatarUpdatedAt, created_at as createdAt FROM users WHERE id = ?').get(id) as any;
   if (!row) return null;
-  return { id: row.id, nickname: row.nickname, publicKey: parseJson(row.publicKey, null) };
+  return { id: row.id, nickname: row.nickname, publicKey: parseJson(row.publicKey, null), avatarExt: row.avatarExt || null, avatarUpdatedAt: row.avatarUpdatedAt || null, createdAt: row.createdAt };
 }
 
 export async function getAllPublicKeys(): Promise<Record<string, any>> {
@@ -440,6 +529,12 @@ export async function getPreKeyBundle(userId: string): Promise<any | null> {
   return row ? parseJson(row.bundle, null) : null;
 }
 
+export async function getIdentityKeyB64(userId: string): Promise<string | null> {
+  const bundle = await getPreKeyBundle(userId);
+  const idKey = bundle?.identityKey;
+  return typeof idKey === 'string' && idKey.length > 0 ? idKey : null;
+}
+
 export async function getAllPreKeyBundles(): Promise<Record<string, any>> {
   const rows = getDb().prepare('SELECT user_id as userId, bundle FROM prekeys').all() as any[];
   const result: Record<string, any> = {};
@@ -447,8 +542,8 @@ export async function getAllPreKeyBundles(): Promise<Record<string, any>> {
   return result;
 }
 
-export async function getAllUsers(): Promise<{ id: string; nickname: string }[]> {
-  return getDb().prepare('SELECT id, nickname FROM users').all() as { id: string; nickname: string }[];
+export async function getAllUsers(): Promise<{ id: string; nickname: string; avatarExt: string | null; avatarUpdatedAt: number | null }[]> {
+  return getDb().prepare('SELECT id, nickname, avatar_ext as avatarExt, avatar_updated_at as avatarUpdatedAt FROM users').all() as { id: string; nickname: string; avatarExt: string | null; avatarUpdatedAt: number | null }[];
 }
 
 export async function saveKeyBackup(userId: string, blob: string): Promise<void> {
@@ -472,9 +567,10 @@ export function getDmChannelId(userId1: string, userId2: string): string {
 }
 
 const MESSAGE_COLUMNS = `id, sender_id AS senderId, sender_nickname AS senderNickname, text, timestamp, channel,
-  encrypted, file_key AS fileKey, sealed, quoted_message_id AS quotedMessageId,
-  quoted_message_text AS quotedMessageText, quoted_message_sender AS quotedMessageSender,
-  edited_at AS editedAt, expires_at AS expiresAt`;
+   encrypted, file_key AS fileKey, sealed, quoted_message_id AS quotedMessageId,
+   quoted_message_text AS quotedMessageText, quoted_message_sender AS quotedMessageSender,
+   signal_encrypted AS signalEncrypted, x3dh_message AS x3dhMessage, ratchet_public_key AS ratchetPublicKey,
+   edited_at AS editedAt, expires_at AS expiresAt`;
 
 function rowToMessage(row: any, includeText: boolean = true): any {
   return {
@@ -490,6 +586,9 @@ function rowToMessage(row: any, includeText: boolean = true): any {
     quotedMessageId: row.quotedMessageId || undefined,
     quotedMessageText: row.quotedMessageText || undefined,
     quotedMessageSender: row.quotedMessageSender || undefined,
+    signalEncrypted: parseJson(row.signalEncrypted, null),
+    x3dhMessage: parseJson(row.x3dhMessage, null),
+    ratchetPublicKey: parseJson(row.ratchetPublicKey, null),
     editedAt: row.editedAt || undefined,
     expiresAt: row.expiresAt || undefined,
   };
@@ -508,20 +607,25 @@ export async function saveMessage(
   quotedMessageId?: string,
   editedAt?: number,
   expiresAt?: number,
-  quotedMessageText?: string,
-  quotedMessageSender?: string
+   quotedMessageText?: string,
+   quotedMessageSender?: string,
+   signalEncrypted?: any,
+   x3dhMessage?: any,
+   ratchetPublicKey?: any
 ): Promise<void> {
   const d = getDb();
-  const res = d.prepare(`INSERT INTO messages (id, sender_id, sender_nickname, text, timestamp, channel, encrypted, file_key, sealed, quoted_message_id, quoted_message_text, quoted_message_sender, edited_at, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(id, senderId, senderNickname, text, timestamp, channel, json(encrypted), json(fileKey), sealed ?? null, quotedMessageId ?? null, quotedMessageText ?? null, quotedMessageSender ?? null, editedAt ?? null, expiresAt ?? null);
+  const res = d.prepare(`INSERT INTO messages (id, sender_id, sender_nickname, text, timestamp, channel, encrypted, file_key, sealed, quoted_message_id, quoted_message_text, quoted_message_sender, signal_encrypted, x3dh_message, ratchet_public_key, edited_at, expires_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+    .run(id, senderId, senderNickname, text, timestamp, channel, json(encrypted), json(fileKey), sealed ?? null, quotedMessageId ?? null, quotedMessageText ?? null, quotedMessageSender ?? null, json(signalEncrypted), json(x3dhMessage), json(ratchetPublicKey), editedAt ?? null, expiresAt ?? null);
   syncFtsInsert(Number((res as any).lastInsertRowid), text);
 }
 
 export async function updateMessageText(messageId: string, senderId: string, newText: string): Promise<boolean> {
-  const res = getDb().prepare('UPDATE messages SET text = ?, edited_at = ? WHERE id = ? AND sender_id = ?')
+  const d = getDb();
+  const before = d.prepare('SELECT text FROM messages WHERE id = ? AND sender_id = ?').get(messageId, senderId) as { text: string } | undefined;
+  const res = d.prepare('UPDATE messages SET text = ?, edited_at = ? WHERE id = ? AND sender_id = ?')
     .run(newText, Date.now(), messageId, senderId);
-  syncFtsUpdate(messageId, newText);
+  if ((res as any).changes > 0) syncFtsUpdate(messageId, before?.text ?? '', newText);
   return (res as any).changes > 0;
 }
 
@@ -622,7 +726,9 @@ export async function searchMessages(query: string, channel?: string, limit: num
 }
 
 export async function deleteMessage(messageId: string, userId: string): Promise<boolean> {
-  const res = getDb().prepare('DELETE FROM messages WHERE id = ? AND sender_id = ?').run(messageId, userId);
+  const d = getDb();
+  d.prepare('DELETE FROM reactions WHERE message_id = ?').run(messageId);
+  const res = d.prepare('DELETE FROM messages WHERE id = ? AND sender_id = ?').run(messageId, userId);
   if ((res as any).changes > 0) syncFtsDelete(messageId);
   return (res as any).changes > 0;
 }
@@ -637,7 +743,9 @@ export async function deleteGeneralMessages(): Promise<number> {
 
 export async function cleanupExpiredMessages(): Promise<number> {
   const cutoff = Date.now();
-  const res = getDb().prepare('DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?').run(cutoff);
+  const d = getDb();
+  d.prepare(`DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?)`).run(cutoff);
+  const res = d.prepare('DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?').run(cutoff);
   syncFtsDeleteExpired(cutoff);
   return (res as any).changes;
 }
@@ -649,12 +757,17 @@ export async function cleanupExpiredPreKeys(): Promise<number> {
 }
 
 export async function startCleanupJobs(): Promise<void> {
-  setInterval(() => cleanupExpiredPreKeys().then(n => n && console.log(`Cleaned ${n} expired prekeys`)), PREKEY_CLEANUP_INTERVAL_MS);
-  setInterval(() => cleanupExpiredMessages().then(n => n && console.log(`Cleaned ${n} expired messages`)), MESSAGE_CLEANUP_INTERVAL_MS);
+  const tick = (label: string, job: () => Promise<number>) => {
+    job().then(n => { if (n) console.log(`Cleaned ${n} expired ${label}`); })
+      .catch(e => console.warn(`[db] ${label} cleanup failed:`, (e as Error).message));
+  };
+  setInterval(() => tick('prekeys', cleanupExpiredPreKeys), PREKEY_CLEANUP_INTERVAL_MS).unref?.();
+  setInterval(() => tick('messages', cleanupExpiredMessages), MESSAGE_CLEANUP_INTERVAL_MS).unref?.();
 }
 
 export function initializeDatabase(): void {
   try { mkdirSync(MEDIA_DIR, { recursive: true }); } catch {}
+  try { mkdirSync(AVATAR_DIR, { recursive: true }); } catch {}
   const p = path.join(DATA_DIR, DB_FILE);
   const dbExisted = existsSync(p);
   ensureSchema();
@@ -707,11 +820,11 @@ export async function getReactionsForMessages(messageIds: string[]): Promise<Map
 
 
 export async function setUserBannedByIdent(userId: string | null, nickname: string | null, banned: boolean): Promise<boolean> {
-  const res = userId
-    ? getDb().prepare('UPDATE users SET is_banned = ? WHERE id = ?').run(banned ? 1 : 0, userId)
-    : (nickname ? getDb().prepare('UPDATE users SET is_banned = ? WHERE nickname = ?').run(banned ? 1 : 0, nickname) : null);
-  return !!res && (res as any).changes > 0;
-}
+   const res = userId
+   ? getDb().prepare('UPDATE users SET is_banned = ?, banned_at = ? WHERE id = ?').run(banned ? 1 : 0, banned ? Date.now() : null, userId)
+   : (nickname ? getDb().prepare('UPDATE users SET is_banned = ?, banned_at = ? WHERE nickname = ?').run(banned ? 1 : 0, banned ? Date.now() : null, nickname) : null);
+   return !!res && (res as any).changes > 0;
+   }
 
 export async function getUserBanned(userId: string): Promise<boolean> {
   const row = getDb().prepare('SELECT is_banned as isBanned FROM users WHERE id = ?').get(userId) as any;
@@ -719,7 +832,7 @@ export async function getUserBanned(userId: string): Promise<boolean> {
 }
 
 export async function getBannedUsers(): Promise<{ userId: string; nickname: string; bannedAt: number }[]> {
-  return getDb().prepare('SELECT id as userId, nickname, created_at as bannedAt FROM users WHERE is_banned = 1 ORDER BY created_at DESC').all() as any[];
+  return getDb().prepare('SELECT id as userId, nickname, COALESCE(banned_at, created_at) as bannedAt FROM users WHERE is_banned = 1 ORDER BY bannedAt DESC').all() as any[];
 }
 
 export async function getBlockedUserIds(userId: string): Promise<string[]> {
@@ -738,10 +851,10 @@ export async function setUserBlocked(userId: string, blockedId: string, blocked:
 
 
 
-export async function addReport(report: { id: string; reporterId: string; reporterNick?: string; targetId: string; targetNick?: string; channel: string; messageId?: string; messageText?: string; reason: string; timestamp: number }): Promise<void> {
+export async function addReport(report: { id: string; reporterId: string; reporterNick?: string; targetId: string; targetNick?: string; channel: string; messageId?: string; messageText?: string; reason: string; source?: 'profile' | 'message'; timestamp: number }): Promise<void> {
   const d = getDb();
-  d.prepare('INSERT INTO reports (id, reporter_id, reporter_nick, target_id, target_nick, channel, message_id, message_text, reason, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
-    .run(report.id, report.reporterId, report.reporterNick ?? null, report.targetId, report.targetNick ?? null, report.channel, report.messageId ?? null, report.messageText ?? null, report.reason, report.timestamp);
+  d.prepare('INSERT INTO reports (id, reporter_id, reporter_nick, target_id, target_nick, channel, message_id, message_text, reason, source, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
+    .run(report.id, report.reporterId, report.reporterNick ?? null, report.targetId, report.targetNick ?? null, report.channel, report.messageId ?? null, report.messageText ?? null, report.reason, report.source === 'profile' ? 'profile' : 'message', report.timestamp);
   const count = d.prepare('SELECT COUNT(*) AS c FROM reports').get() as any;
   if (count.c > REPORT_CAP) {
     d.prepare(`DELETE FROM reports WHERE id IN (SELECT id FROM reports ORDER BY timestamp ASC LIMIT ?)`).run(count.c - REPORT_CAP);
@@ -749,7 +862,7 @@ export async function addReport(report: { id: string; reporterId: string; report
 }
 
 export async function getReports(): Promise<any[]> {
-  return getDb().prepare('SELECT id, reporter_id as reporterId, reporter_nick as "reporterNick", target_id as targetId, target_nick as "targetNick", channel, message_id as messageId, message_text as messageText, reason, timestamp FROM reports ORDER BY timestamp DESC').all() as any[];
+  return getDb().prepare('SELECT id, reporter_id as reporterId, reporter_nick as "reporterNick", target_id as targetId, target_nick as "targetNick", channel, message_id as messageId, message_text as messageText, reason, source, timestamp FROM reports ORDER BY timestamp DESC').all() as any[];
 }
 
 export async function removeReportsForTarget(targetId: string): Promise<number> {

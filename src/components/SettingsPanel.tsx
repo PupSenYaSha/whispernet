@@ -1,9 +1,10 @@
-import { useState, useEffect } from 'react';
+﻿import { useState, useEffect, useMemo, useCallback } from 'react';
 import type { AccentColor } from '../types';
 import { useConnection } from '../context';
-import { cn, getAvatarText } from '../utils';
-import { generateX3dhSafetyNumber } from '../crypto';
-import QRCode from 'qrcode';
+import { cn } from '../utils';
+import { Avatar } from './Avatar';
+import { SafetyNumberButton } from './SafetyNumberButton';
+import { useEscapeKey } from '../useEscapeKey';
 
 declare const __APP_VERSION__: string;
 
@@ -82,11 +83,12 @@ function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, onCon
   title: string; message: string; confirmLabel: string; cancelLabel: string; danger?: boolean;
   onConfirm: () => void; onCancel: () => void;
 }) {
+  useEscapeKey(onCancel, true, 61);
   return (
-    <>
-      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60]" onClick={onCancel} />
-      <div className="fixed inset-0 z-[61] flex items-center justify-center p-4">
-        <div className="bg-bg-secondary border border-border-default rounded-2xl shadow-2xl max-w-sm w-full p-6" style={{ animation: 'scaleIn 0.2s cubic-bezier(0.22, 1, 0.36, 1)' }}>
+    <div className="fixed inset-0 z-[61] flex items-center justify-center p-4" onClick={onCancel}>
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
+        <div className="relative bg-bg-secondary border border-border-default rounded-2xl shadow-2xl max-w-sm w-full p-6" style={{ animation: 'scaleIn 0.2s cubic-bezier(0.22, 1, 0.36, 1)' }}
+          onClick={(e) => e.stopPropagation()}>
           <div className={cn('w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-5',
             danger ? 'bg-status-error/15' : 'bg-accent-primary/15'
           )}>
@@ -115,17 +117,39 @@ function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, onCon
             </button>
           </div>
         </div>
-      </div>
-    </>
+    </div>
   );
 }
 
 export function SettingsPanel({ onClose, closing, inline }: { onClose: () => void; closing?: boolean; inline?: boolean }) {
-  const { state, updateSettings, logout, sessions, requestSessions, isAdmin, reports, adminReports, adminBan, adminUnban, bannedUsers, adminGetBanned, adminError, dismissAdminError, revokeSession: revoke, t } = useConnection();
+  const { state, updateSettings, logout, sessions, requestSessions, isAdmin, reports, adminReports, adminBan, adminUnban, bannedUsers, adminGetBanned, adminError, dismissAdminError, revokeSession: revoke, openProfile, openDm, t } = useConnection();
   const [confirmAction, setConfirmAction] = useState<'logout' | 'clearData' | 'adminBan' | 'adminUnban' | null>(null);
   const [banNick, setBanNick] = useState('');
   const [pendingBan, setPendingBan] = useState<string | null>(null);
   const [banListOpen, setBanListOpen] = useState(false);
+  const [screenshotProt, setScreenshotProtState] = useState(() => !!localStorage.getItem('wn_screenshot_prot'));
+  const setScreenshotProt = useCallback((v: boolean) => {
+    setScreenshotProtState(v);
+    if (v) localStorage.setItem('wn_screenshot_prot', '1');
+    else localStorage.removeItem('wn_screenshot_prot');
+  }, []);
+
+  const reportGroups = useMemo(() => {
+    const map = new Map<string, { targetId: string; targetNick?: string; count: number; lastTimestamp: number; reasons: { reason: string; reporterNick?: string; channel: string; source?: string }[] }>();
+    for (const r of reports as any[]) {
+      if (!r?.targetId) continue;
+      let g = map.get(r.targetId);
+      if (!g) {
+        g = { targetId: r.targetId, targetNick: r.targetNick, count: 0, lastTimestamp: 0, reasons: [] };
+        map.set(r.targetId, g);
+      }
+      if (!g.targetNick && r.targetNick) g.targetNick = r.targetNick;
+      g.count++;
+      if ((r.timestamp || 0) > g.lastTimestamp) g.lastTimestamp = r.timestamp || 0;
+      g.reasons.push({ reason: r.reason, reporterNick: r.reporterNick, channel: r.channel, source: r.source });
+    }
+    return [...map.values()].sort((a, b) => b.lastTimestamp - a.lastTimestamp);
+  }, [reports]);
 
   useEffect(() => {
     requestSessions();
@@ -135,6 +159,8 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
       return () => { document.body.style.overflow = ''; };
     }
   }, [inline, requestSessions, isAdmin, adminReports, adminGetBanned]);
+
+  useEscapeKey(() => { if (confirmAction) setConfirmAction(null); else if (!inline) onClose(); }, !inline, 40);
 
   const accentColors: AccentColor[] = ['purple', 'blue', 'green', 'red', 'orange', 'pink', 'teal', 'indigo'];
   const accentColorPreview: Record<AccentColor, string> = state.settings.theme === 'dark'
@@ -146,98 +172,6 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
       purple: '#8b5cf6', blue: '#2563eb', green: '#16a34a', red: '#dc2626',
       orange: '#ea580c', pink: '#db2777', teal: '#0d9488', indigo: '#4f46e5',
     };
-
-  const SafetyNumberButton = () => {
-    const { state, getMyIdentityKeyB64, getPeerIdentityKeyB64, identityWarning, t } = useConnection();
-    const [showSafety, setShowSafety] = useState(false);
-    const [safetyNum, setSafetyNum] = useState('');
-    const [qrCode, setQrCode] = useState<string>('');
-    const [copyOk, setCopyOk] = useState(false);
-
-    const showNumber = async () => {
-      try {
-        
-        
-        
-        const myId = getMyIdentityKeyB64();
-        if (!myId) {
-          setSafetyNum('IDENTITY NOT FOUND -- re-login required');
-          setQrCode('');
-          setShowSafety(true);
-          return;
-        }
-        const peerId = state.activeChannel !== 'general' ? getPeerIdentityKeyB64(state.activeChannel) : null;
-        const num = await generateX3dhSafetyNumber(myId, peerId);
-        setSafetyNum(num);
-        const qr = await QRCode.toDataURL(num);
-        setQrCode(qr);
-        setShowSafety(true);
-      } catch (e: any) {
-        setSafetyNum('ERROR: ' + (e.message || 'unknown'));
-        setShowSafety(true);
-      }
-    };
-
-    const handleCopy = async () => {
-      try {
-        if (navigator.clipboard?.writeText) {
-          await navigator.clipboard.writeText(safetyNum);
-        } else {
-          const ta = document.createElement('textarea');
-          ta.value = safetyNum;
-          ta.style.position = 'fixed';
-          ta.style.opacity = '0';
-          document.body.appendChild(ta);
-          ta.select();
-          document.execCommand('copy');
-          document.body.removeChild(ta);
-        }
-        setCopyOk(true);
-        setTimeout(() => setCopyOk(false), 2000);
-      } catch {}
-    };
-
-    return (
-      <>
-        <button onClick={showNumber}
-          className="px-3 py-1.5 rounded-xl text-[13px] font-medium bg-bg-tertiary text-fg-muted hover:text-fg-primary transition-colors">
-          {t('safety_number')}
-        </button>
-        {showSafety && (
-          <>
-            <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-[60]" onClick={() => setShowSafety(false)} />
-            <div className="fixed inset-0 flex items-center justify-center z-[61] p-4">
-              <div className="bg-bg-secondary border border-border-default rounded-2xl w-full max-w-sm p-6 space-y-4 animate-in" onClick={(e) => e.stopPropagation()}>
-                <h3 className="text-[17px] font-semibold text-fg-primary">{t('safety_yours')}</h3>
-                <p className="text-[13px] text-fg-muted">{t('safety_number_desc')}</p>
-                {qrCode && (
-                  <div className="flex justify-center mb-4">
-                    <img src={qrCode} alt="Safety Number QR" className="w-48 h-48" />
-                  </div>
-                )}
-                <div className="p-4 rounded-xl bg-bg-tertiary font-mono text-[13px] text-fg-primary break-all text-center leading-relaxed">
-                  {safetyNum}
-                </div>
-                {identityWarning && identityWarning.userId === state.activeChannel && (
-                  <div className="p-3 rounded-xl bg-red-500/10 border border-red-500/30 text-[12px] text-red-400 text-center leading-relaxed">
-                    Identity key changed for this contact. Verify the new safety number with them out-of-band before trusting messages.
-                  </div>
-                )}
-                <button onClick={handleCopy}
-                  className="w-full py-3 rounded-xl border border-border-default text-fg-primary text-[15px] hover:bg-bg-tertiary transition-colors font-medium">
-                  {copyOk ? 'OK Copied' : t('copy')}
-                </button>
-                <button onClick={() => setShowSafety(false)}
-                  className="w-full py-3 rounded-xl bg-accent-primary text-accent-text text-[15px] font-semibold hover:opacity-90 transition-opacity">
-                  {t('done')}
-                </button>
-              </div>
-            </div>
-          </>
-        )}
-      </>
-    );
-  };
 
   const content = (
     <div className="flex-1 overflow-y-auto p-4 space-y-6">
@@ -310,10 +244,7 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
           />
         </Option>
         <Option label={t('screenshot_prot')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="3" x2="21" y2="21" /></svg>}>
-          <Toggle checked={!!localStorage.getItem('wn_screenshot_prot')} onChange={(v) => {
-            if (v) localStorage.setItem('wn_screenshot_prot', '1');
-            else localStorage.removeItem('wn_screenshot_prot');
-          }} />
+          <Toggle checked={screenshotProt} onChange={setScreenshotProt} />
         </Option>
       </Section>
 
@@ -334,12 +265,12 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 min-w-0">
                     <span className={cn('w-2 h-2 rounded-full flex-shrink-0', s.online === false ? 'bg-fg-muted/50' : 'bg-status-success')} />
-                    <span className="text-[13px] text-fg-primary truncate">{s.name || `…${s.id.slice(-6)}`}</span>
+                    <span className="text-[13px] text-fg-primary truncate">{s.name || `вЂ¦${s.id.slice(-6)}`}</span>
                     {s.current && (
                       <span className="flex-shrink-0 px-2 py-0.5 rounded-full bg-accent-primary/15 text-accent-primary text-[10px] font-bold">{t('current_session')}</span>
                     )}
                   </div>
-                  <span className="text-[11px] text-fg-muted block mt-0.5">{new Date(s.lastActive).toLocaleString()}{s.online === false ? ` · ${t('offline')}` : ''}</span>
+                  <span className="text-[11px] text-fg-muted block mt-0.5">{new Date(s.lastActive).toLocaleString()}{s.online === false ? ` В· ${t('offline')}` : ''}</span>
                 </div>
                 {!s.current && (
                   <button onClick={() => revoke(s.id)}
@@ -359,7 +290,7 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
             {adminError && (
               <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-status-error/10 border border-status-error/30 text-status-error text-[12px]">
                 <span className="min-w-0 leading-relaxed">{adminError}</span>
-                <button onClick={dismissAdminError} className="flex-shrink-0 text-status-error/70 hover:text-status-error text-[16px] leading-none px-1" aria-label="Dismiss">✕</button>
+                <button onClick={dismissAdminError} className="flex-shrink-0 text-status-error/70 hover:text-status-error text-[16px] leading-none px-1" aria-label="Dismiss">вњ•</button>
               </div>
             )}
 
@@ -423,29 +354,58 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
 
             <div>
               <p className="text-[11px] font-bold text-fg-muted uppercase tracking-wider mb-1.5">{t('admin_reports')}</p>
-              {reports.length === 0 ? (
+              {reportGroups.length === 0 ? (
                 <p className="text-[13px] text-fg-muted py-1">{t('admin_no_reports')}</p>
               ) : (
                 <div className="space-y-2">
-                  {reports.map((r) => (
-                    <div key={r.id} className="px-3 py-2.5 rounded-xl bg-bg-tertiary border border-border-default space-y-1">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="text-[13px] font-bold text-fg-primary truncate">@{r.targetNick || '?'}</span>
-                        <span className="text-[10px] text-fg-muted flex-shrink-0">{new Date(r.timestamp).toLocaleString()}</span>
+                  {reportGroups.map(g => (
+                    <div key={g.targetId} className="px-3 py-2.5 rounded-xl bg-bg-tertiary border border-border-default space-y-2">
+                      <div className="flex items-center gap-2.5">
+                        <button
+                          onClick={() => openProfile(g.targetId)}
+                          title={t('profile')}
+                          className="relative flex-shrink-0 p-0 border-0 bg-transparent rounded-full appearance-none hover:brightness-110 transition">
+                          <Avatar userId={g.targetId} nickname={g.targetNick || '?'} avatar={state.avatars[g.targetId]}
+                            className="w-8 h-8 rounded-full" textClassName="text-[11px]" />
+                        </button>
+                        <button
+                          onClick={() => openProfile(g.targetId)}
+                          className="min-w-0 text-left bg-transparent border-0 p-0 appearance-none hover:underline">
+                          <span className="text-[13px] font-bold text-fg-primary truncate block">@{g.targetNick || '?'}</span>
+                          <span className="text-[10.5px] text-fg-subtle block truncate">{new Date(g.lastTimestamp).toLocaleString()}</span>
+                        </button>
+                        {g.count > 1 && (
+                          <span className="ml-auto flex-shrink-0 px-2 py-0.5 rounded-full bg-status-error/15 text-status-error text-[10.5px] font-bold">
+                            Г—{g.count}
+                          </span>
+                        )}
                       </div>
-                      {r.messageText && <p className="text-[12px] text-fg-muted leading-relaxed break-words">"{r.messageText}"</p>}
-                      <div className="flex items-center gap-1.5 flex-wrap">
-                        <span className="px-1.5 py-0.5 rounded-full bg-accent-primary/15 text-accent-primary text-[10px] font-semibold">
-                          {r.channel === 'general' ? t('admin_channel_general') : t('admin_channel_dm')}
-                        </span>
-                        <span className="text-[12px] text-fg-primary">{r.reason}</span>
+                      <div className="space-y-1">
+                        {g.reasons.map((r, i) => (
+                          <div key={i} className="flex items-start gap-1.5 flex-wrap">
+                            <span className={cn('px-1.5 py-0.5 rounded-full text-[10px] font-semibold flex-shrink-0',
+                              r.source === 'profile' ? 'bg-accent-primary/15 text-accent-primary'
+                                : r.channel === 'general' ? 'bg-status-success/15 text-status-success'
+                                  : 'bg-status-warning/15 text-status-warning')}>
+                              {r.source === 'profile' ? t('report_from_profile') : r.channel === 'general' ? t('admin_channel_general') : t('admin_channel_dm')}
+                            </span>
+                            <span className="text-[12px] text-fg-primary leading-snug break-words min-w-0">{r.reason}</span>
+                            <span className="text-[10.5px] text-fg-subtle flex-shrink-0">from @{r.reporterNick || '?'}</span>
+                          </div>
+                        ))}
                       </div>
-                      <div className="text-[11px] text-fg-subtle">from @{r.reporterNick || '?'}</div>
-                      <button
-                        onClick={() => { if (r.targetNick) { setPendingBan(r.targetNick); setConfirmAction('adminBan'); } }}
-                        className="mt-0.5 px-3 py-1.5 rounded-lg bg-status-error/10 text-status-error text-[12px] font-semibold hover:bg-status-error/20 transition-colors">
-                        {t('admin_ban')} @{r.targetNick}
-                      </button>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => { if (g.targetNick) { setPendingBan(g.targetNick); setConfirmAction('adminBan'); } }}
+                          className="px-3 py-1.5 rounded-lg bg-status-error/10 text-status-error text-[12px] font-semibold hover:bg-status-error/20 transition-colors">
+                          {t('admin_ban')} @{g.targetNick}
+                        </button>
+                        <button
+                          onClick={() => openDm(g.targetId, g.targetNick)}
+                          className="px-3 py-1.5 rounded-lg bg-bg-secondary border border-border-default text-fg-muted text-[12px] font-semibold hover:text-fg-primary transition-colors">
+                          {t('message_user')}
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -455,11 +415,9 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
         </Section>
       )}
 
-      <Section title={t('sec_account')}>
-        <Option label={state.nickname ? `@${state.nickname}` : ''} icon={<div className="w-9 h-9 rounded-xl bg-accent-primary/15 flex items-center justify-center text-[13px] font-bold text-accent-primary">{state.nickname ? getAvatarText(state.nickname) : ''}</div>}>
-          <span className="text-[12px] text-fg-muted">{t('version')} {typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : ''}</span>
-        </Option>
-      </Section>
+      <div className="px-4 py-5 text-center text-[11px] text-fg-subtle">
+        WhisperNet {typeof __APP_VERSION__ !== 'undefined' ? `v${__APP_VERSION__}` : ''}
+      </div>
     </div>
   );
 

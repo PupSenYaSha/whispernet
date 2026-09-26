@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef } from 'react';
 import { useConnection } from '../context';
-import { cn, formatTime, getAvatarText, getAvatarGradient } from '../utils';
+import { cn, formatTime } from '../utils';
+import { Avatar } from './Avatar';
 
 export function ContactsPanel({ onSelect }: { onSelect: () => void }) {
-  const { state, openDm, openGeneral, refreshContacts, searchUsers, t } = useConnection();
+  const { state, openDm, openGeneral, openProfile, refreshContacts, searchUsers, t } = useConnection();
   const isDm = state.activeChannel !== 'general';
   const [query, setQuery] = useState('');
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
@@ -64,27 +65,28 @@ export function ContactsPanel({ onSelect }: { onSelect: () => void }) {
             </div>
             <div className="p-2 space-y-0.5">
               {state.searchResults.map(user => (
-                <button
-                  key={user.id}
+                <div
+                  key={user.id} role="button" tabIndex={0}
                   onClick={() => { openDm(user.id, user.nickname); setQuery(''); onSelect(); }}
-                  className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left hover:bg-bg-tertiary text-fg-primary"
+                  onKeyDown={(e) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.stopPropagation(); if (true) { e.preventDefault(); openDm(user.id, user.nickname); setQuery(''); onSelect(); } }}
+                  className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all cursor-pointer hover:bg-bg-tertiary text-fg-primary"
                 >
-                  <div className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 relative shadow-sm"
-                    style={{ background: getAvatarGradient(user.nickname) }}>
-                    <span className="text-[13px] font-bold text-white">
-                      {getAvatarText(user.nickname)}
-                    </span>
+                  <button onKeyDown={(e) => { e.stopPropagation(); }}
+                          onClick={(e) => { e.stopPropagation(); openProfile(user.id); }}
+                    className="relative flex-shrink-0 p-0 border-0 bg-transparent rounded-2xl appearance-none"
+                    aria-label={t('profile')}>
+                    <Avatar userId={user.id} nickname={user.nickname} avatar={state.avatars[user.id]} className="w-12 h-12 rounded-2xl" textClassName="text-[13px]" />
                     {user.online && (
                       <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-status-success border-[2.5px] border-bg-secondary" />
                     )}
-                  </div>
+                  </button>
                   <div>
                     <span className="text-[15px] font-semibold">@{user.nickname}</span>
                     <span className={cn('block text-[12px] mt-0.5', user.online ? 'text-status-success' : 'text-fg-muted')}>
                       {user.online ? t('online') : t('offline')}
                     </span>
                   </div>
-                </button>
+                </div>
               ))}
             </div>
           </>
@@ -107,28 +109,29 @@ export function ContactsPanel({ onSelect }: { onSelect: () => void }) {
                   const isActive = state.activeChannel === contact.id;
                   const userOnline = state.users.some(u => u.id === contact.id);
                   return (
-                    <button
-                      key={contact.id}
+                    <div
+                      key={contact.id} role="button" tabIndex={0}
                       onClick={() => { openDm(contact.id, contact.nickname); onSelect(); }}
+                      onKeyDown={(e) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.stopPropagation(); if (true) { e.preventDefault(); openDm(contact.id, contact.nickname); onSelect(); } }}
                       className={cn(
-                        'w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left',
+                        'w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all cursor-pointer',
                         isActive ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-bg-tertiary text-fg-primary'
                       )}
                     >
-                      <div className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 relative shadow-sm"
-                        style={{ background: getAvatarGradient(contact.nickname) }}>
-                        <span className="text-[13px] font-bold text-white">
-                          {getAvatarText(contact.nickname)}
-                        </span>
+                      <button onKeyDown={(e) => { e.stopPropagation(); }}
+                          onClick={(e) => { e.stopPropagation(); openProfile(contact.id); }}
+                        className="relative flex-shrink-0 p-0 border-0 bg-transparent rounded-2xl appearance-none"
+                        aria-label={t('profile')}>
+                        <Avatar userId={contact.id} nickname={contact.nickname} avatar={state.avatars[contact.id]} className="w-12 h-12 rounded-2xl" textClassName="text-[13px]" />
                         {userOnline && (
                           <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-status-success border-[2.5px] border-bg-secondary" />
                         )}
-                      </div>
+                      </button>
                       <div className="min-w-0 flex-1">
                         <span className="text-[15px] font-semibold block truncate">@{contact.nickname}</span>
                         <span className="text-[12px] text-fg-muted mt-0.5 block">{formatTime(contact.lastMessage)}</span>
                       </div>
-                    </button>
+                    </div>
                   );
                 })}
               </div>
@@ -140,6 +143,22 @@ export function ContactsPanel({ onSelect }: { onSelect: () => void }) {
           </>
         )}
       </div>
+
+      <button onClick={() => { if (state.userId) openProfile(state.userId); }}
+        className="flex items-center gap-3 px-4 h-14 border-t border-border-default bg-bg-secondary hover:bg-bg-tertiary transition-colors text-left flex-shrink-0">
+        <Avatar userId={state.userId || ''} nickname={state.nickname} avatar={state.userId ? state.avatars[state.userId] : null}
+          className="w-9 h-9 rounded-full" textClassName="text-[12px]" />
+        <div className="min-w-0 flex-1">
+          <span className="text-[14px] font-semibold text-fg-primary block truncate">@{state.nickname}</span>
+          <span className={cn('text-[11.5px]', state.status === 'connected' ? 'text-status-success' : 'text-fg-muted')}>
+            {t(state.status === 'connected' ? 'my_profile_online' : 'my_profile_offline')}
+          </span>
+        </div>
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-fg-muted flex-shrink-0">
+          <circle cx="12" cy="8" r="4" />
+          <path d="M4 21c0-4 3.6-6.5 8-6.5s8 2.5 8 6.5" />
+        </svg>
+      </button>
     </div>
   );
 }

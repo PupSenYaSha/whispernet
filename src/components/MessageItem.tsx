@@ -2,10 +2,13 @@ import type { Message } from '../types';
 import { useState, useRef, useEffect, useMemo, memo } from 'react';
 import { createPortal } from 'react-dom';
 import { useConnection } from '../context';
-import { cn, formatTime, getAvatarText, getAvatarGradient } from '../utils';
+import { cn, formatTime } from '../utils';
+import { Avatar } from './Avatar';
+import { ReportModal } from './ReportModal';
+import { useEscapeKey } from '../useEscapeKey';
 
 function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15px]', animate = false }: { message: Message; showAvatar?: boolean; fontSizeClass?: string; animate?: boolean }) {
-  const { state, deleteMessage: deleteMsg, addReaction, removeReaction, setEditing, decryptMedia, setReply, reportUser, t } = useConnection();
+  const { state, deleteMessage: deleteMsg, addReaction, removeReaction, setEditing, decryptMedia, setReply, openProfile, t } = useConnection();
   const isSystem = message.senderId === 'system';
   const isOwn = message.isOwn;
 
@@ -13,11 +16,10 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const [mediaFailed, setMediaFailed] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
-  const [reportReason, setReportReason] = useState('');
-  const [reportCustom, setReportCustom] = useState('');
-  const [reportDone, setReportDone] = useState(false);
   const [lightbox, setLightbox] = useState<{ url: string; isVideo: boolean } | null>(null);
   const reactionPickerRef = useRef<HTMLDivElement>(null);
+
+  useEscapeKey(() => setLightbox(null), !!lightbox, 100);
 
   const resolvedQuoteText = useMemo(() => {
     if (message.quotedMessageText) return message.quotedMessageText;
@@ -43,10 +45,8 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
 
   useEffect(() => {
     if (!lightbox) return;
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setLightbox(null); };
-    document.addEventListener('keydown', onKey);
     document.body.style.overflow = 'hidden';
-    return () => { document.removeEventListener('keydown', onKey); document.body.style.overflow = ''; };
+    return () => { document.body.style.overflow = ''; };
   }, [lightbox]);
 
   const isMedia = /^\[(image|video)\][\s\S]*?\[\/\1\]/.test(message.text);
@@ -66,6 +66,18 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
     return () => { cancelled = true; };
   }, [message.id, message.text, message.fileKey, isMedia, decryptMedia]);
 
+  const expiresIn = useMemo(() => {
+    if (!message.expiresAt) return null;
+    const remaining = message.expiresAt - Date.now();
+    if (remaining <= 0) return 'expired';
+    const hours = Math.floor(remaining / 3600000);
+    const minutes = Math.floor((remaining % 3600000) / 60000);
+    const seconds = Math.floor((remaining % 60000) / 1000);
+    if (hours > 0) return `${hours}h ${minutes}m`;
+    if (minutes > 0) return `${minutes}m ${seconds}s`;
+    return `${seconds}s`;
+  }, [message.expiresAt]);
+
   if (isSystem) {
     return (
       <div className="flex items-center justify-center py-2">
@@ -84,36 +96,25 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
     }))
     .filter(e => e.count > 0);
 
-  const expiresIn = useMemo(() => {
-    if (!message.expiresAt) return null;
-    const remaining = message.expiresAt - Date.now();
-    if (remaining <= 0) return 'expired';
-    const hours = Math.floor(remaining / 3600000);
-    const minutes = Math.floor((remaining % 3600000) / 60000);
-    const seconds = Math.floor((remaining % 60000) / 1000);
-    if (hours > 0) return `${hours}h ${minutes}m`;
-    if (minutes > 0) return `${minutes}m ${seconds}s`;
-    return `${seconds}s`;
-  }, [message.expiresAt]);
-
   return (
     <>
       <div className={`flex gap-2.5 px-4 max-w-full ${isOwn ? 'flex-row-reverse' : 'flex-row'}${animate ? ' animate-message' : ''}`}>
       {!isOwn && showAvatar && (
-        <div className="flex-shrink-0 w-9 h-9 rounded-full flex items-center justify-center mt-1 shadow-sm"
-          style={{ background: getAvatarGradient(message.senderNickname) }}>
-          <span className="text-[11px] font-bold text-white">
-            {getAvatarText(message.senderNickname)}
-          </span>
-        </div>
+        <button onClick={() => openProfile(message.senderId)}
+          className="flex-shrink-0 w-9 h-9 rounded-full overflow-hidden mt-1 shadow-sm p-0 border-0 bg-transparent appearance-none"
+          aria-label={t('profile')}>
+          <Avatar userId={message.senderId} nickname={message.senderNickname} avatar={state.avatars[message.senderId]}
+            className="w-full h-full rounded-full" textClassName="text-[11px]" />
+        </button>
       )}
       {!isOwn && !showAvatar && <div className="w-9" />}
 
       <div className={`flex flex-col max-w-[78%] ${isOwn ? 'items-end' : 'items-start'}`}>
         {!isOwn && showAvatar && (
-          <span className="text-[12px] font-semibold text-accent-primary mb-1 px-1">
+          <button onClick={() => openProfile(message.senderId)}
+            className="text-[12px] font-semibold text-accent-primary mb-1 px-1 hover:underline cursor-pointer bg-transparent border-0 p-0 appearance-none">
             {message.senderNickname}
-          </span>
+          </button>
         )}
 
         <div className="relative">
@@ -254,7 +255,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
             )}
             {!isOwn && (
               <button
-                onClick={() => { setReportOpen(true); setReportDone(false); setReportReason(''); setReportCustom(''); }}
+                onClick={() => { setReportOpen(true); }}
                 className="p-1.5 rounded-full text-fg-muted hover:text-status-error hover:bg-status-error/10 transition-colors"
                 title={t('report')} aria-label={t('report')}>
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -292,79 +293,15 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
         </div>
       </div>
     </div>
-    {reportOpen && createPortal(
-        <>
-          <div className="fixed inset-0 bg-black/50 z-[90]" onClick={() => setReportOpen(false)} />
-          <div className="fixed inset-0 z-[91] flex items-center justify-center p-4">
-            <div className="bg-bg-secondary border border-border-default rounded-3xl shadow-2xl w-full max-w-sm p-6"
-              style={{ animation: 'scaleIn 0.2s cubic-bezier(0.22, 1, 0.36, 1)' }}>
-              {reportDone ? (
-                <>
-                  <div className="w-14 h-14 rounded-2xl bg-accent-primary/15 flex items-center justify-center mx-auto mb-5">
-                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-accent-primary))" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M20 6L9 17l-5-5" />
-                    </svg>
-                  </div>
-                  <p className="text-center text-[15px] text-fg-primary leading-relaxed">{t('report_sent')}</p>
-                  <button onClick={() => setReportOpen(false)}
-                    className="mt-6 w-full py-3 rounded-2xl bg-accent-primary text-accent-text text-[15px] font-semibold hover:opacity-90 transition-opacity">
-                    {t('ok')}
-                  </button>
-                </>
-              ) : (
-                <>
-                  <div className="w-14 h-14 rounded-2xl bg-status-error/15 flex items-center justify-center mx-auto mb-5">
-                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-status-error))" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M12 3l9 5-9 5-9-5 9-5z" /><path d="M3 13v6a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-6" />
-                    </svg>
-                  </div>
-                  <h3 className="text-center text-[17px] font-semibold text-fg-primary mb-1.5">{t('report_title')}</h3>
-                  <p className="text-center text-[13px] text-fg-muted mb-5 leading-relaxed">{t('report_desc')}</p>
-                  <div className="flex flex-col gap-2 mb-4">
-                    {['report_reason_scam', 'report_reason_harassment', 'report_reason_inappropriate', 'report_reason_other'].map(key => (
-                      <button key={key}
-                        onClick={() => setReportReason(key)}
-                        className={`px-4 py-2.5 rounded-xl text-left text-[14px] border transition-colors ${
-                          reportReason === key
-                            ? 'bg-status-error/15 border-status-error text-fg-primary'
-                            : 'bg-bg-tertiary border-border-default text-fg-muted hover:text-fg-primary'
-                        }`}>
-                        {t(key)}
-                      </button>
-                    ))}
-                  </div>
-                  <textarea
-                    value={reportCustom}
-                    onChange={(e) => setReportCustom(e.target.value)}
-                    placeholder={t('report_hint')}
-                    maxLength={500}
-                    rows={2}
-                    className="w-full px-3.5 py-2.5 rounded-xl bg-bg-tertiary border border-border-default text-[14px] text-fg-primary placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary resize-none mb-5" />
-                  <div className="flex gap-3">
-                    <button onClick={() => setReportOpen(false)}
-                      className="flex-1 py-3 rounded-2xl border border-border-default text-fg-primary text-[15px] font-medium hover:bg-bg-tertiary transition-colors">
-                      {t('cancel')}
-                    </button>
-                    <button
-                      onClick={() => {
-                        const reason = reportReason === 'report_reason_other'
-                          ? (reportCustom.trim() || t('report_reason_other'))
-                          : t(reportReason || 'report_reason_scam');
-                        reportUser(message.senderId, reason, message.id);
-                        setReportDone(true);
-                      }}
-                      disabled={!reportReason}
-                      className="flex-1 py-3 rounded-2xl bg-status-error text-white text-[15px] font-semibold hover:brightness-110 transition-all disabled:opacity-40">
-                      {t('report_send')}
-                    </button>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        </>,
-        document.body
-      )}
+    {reportOpen && (
+      <ReportModal
+        targetId={message.senderId}
+        targetNickname={message.senderNickname}
+        avatar={state.avatars[message.senderId]}
+        messageId={message.id}
+        onClose={() => setReportOpen(false)}
+      />
+    )}
     {lightbox && createPortal(
       <div className="fixed inset-0 z-[100] bg-black/90 flex items-center justify-center p-4" onClick={() => setLightbox(null)} role="dialog" aria-modal="true"
         style={{ animation: 'fadeIn 0.15s ease-out' }}>

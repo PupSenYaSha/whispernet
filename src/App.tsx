@@ -1,13 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useReducer, ReactNode } from 'react';
-import type { User, AppSettings, Message, Session, BannedUser } from './types';
+import type { User, AppSettings, Message, Session, BannedUser, AvatarUpdate, ProfileInfo } from './types';
 import { generateKeyPair, encryptMessage, decryptMessage } from './crypto';
 import { encryptPrivateKey, decryptPrivateKey, isEncryptedBundle, isKeyBackup } from './crypto-keys';
 import { encryptPassword, decryptPassword } from './device-crypto';
 import { uploadFile } from './upload';
 import { encryptFile, buildFileKeyMap, unwrapAndDecrypt, unwrapAndDecryptChannel, wrapForMedia } from './media-crypto';
 import { ConnectionContext, useConnection, type ConnectionState, type ConnectionAction, type ReplyTarget, type AdminReport } from './context';
-import { loadSettings, defaultSettings, translations, cn, getAvatarText, getAvatarGradient, formatTime, getDeviceLabel } from './utils';
+import { loadSettings, defaultSettings, translations, cn, formatTime, getDeviceLabel } from './utils';
 
 declare const __APP_VERSION__: string;
 import {
@@ -34,6 +34,10 @@ import { UpdateOverlay } from './components/UpdateOverlay';
 import { ChatArea } from './components/ChatArea';
 import { ContactsPanel } from './components/ContactsPanel';
 import { SettingsPanel } from './components/SettingsPanel';
+import { ProfileModal } from './components/ProfileModal';
+import { ReportModal } from './components/ReportModal';
+import { Avatar } from './components/Avatar';
+import { useEscapeKey } from './useEscapeKey';
 
 const WS_URL = import.meta.env.VITE_WS_URL || (() => {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -83,6 +87,10 @@ const initialState: ConnectionState = {
   searchResults: [],
   messageSearchResults: [],
   replyTo: null,
+  avatars: {},
+  profile: null,
+  reportTarget: null,
+  reportStatus: 'idle',
 };
 
 function applyAddReaction(msg: Message, emoji: string, userId: string): Message {
@@ -112,6 +120,29 @@ function normalizeReactions(fromServer: any): Record<string, string[]> | undefin
     return out;
   }
   return fromServer as Record<string, string[]>;
+}
+
+function avatarMapFromMessages(msgs: any[]): Record<string, AvatarUpdate> {
+  const out: Record<string, AvatarUpdate> = {};
+  for (const m of msgs || []) {
+    if (m && typeof m.senderId === 'string' && m.senderAvatar && m.senderAvatar.ext) {
+      out[m.senderId] = m.senderAvatar;
+    }
+  }
+  return out;
+}
+
+function avatarMapFromUsers(list: Array<{ id?: string; avatar?: any }>): Record<string, AvatarUpdate> {
+  const out: Record<string, AvatarUpdate> = {};
+  for (const u of list || []) {
+    if (u && u.id && u.avatar && u.avatar.ext) out[u.id] = u.avatar;
+  }
+  return out;
+}
+
+function avatarFromSender(senderId: string | null | undefined, avatar: any): Record<string, AvatarUpdate> {
+  if (!senderId || !avatar || !avatar.ext) return {};
+  return { [senderId]: avatar };
 }
 
 function connectionReducer(state: ConnectionState, action: ConnectionAction): ConnectionState {
@@ -153,6 +184,14 @@ function connectionReducer(state: ConnectionState, action: ConnectionAction): Co
       return { ...state, e2eeReady: action.ready };
     case 'SET_REPLY':
       return { ...state, replyTo: action.reply };
+    case 'SET_AVATARS':
+      return { ...state, avatars: { ...state.avatars, ...action.avatars } };
+    case 'SET_PROFILE':
+      return { ...state, profile: action.profile };
+    case 'SET_REPORT_TARGET':
+      return { ...state, reportTarget: action.target, reportStatus: 'idle' };
+      case 'SET_REPORT_STATUS':
+      return { ...state, reportStatus: action.status };
     case 'SET_KEY_SETUP_NEEDED':
       return { ...state, needsKeySetup: action.needed };
     case 'SET_ACTIVE_CHANNEL':
@@ -225,6 +264,10 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const publicKeyRef = useRef<JsonWebKey | null>(null);
   const publicKeysRef = useRef<Record<string, JsonWebKey>>({});
   const nicknameRef = useRef<string | null>(null);
+  const settingsRef = useRef<AppSettings>(defaultSettings);
+  const reportTargetRef = useRef<ProfileInfo | null>(null);
+  const requestedProfileIdRef = useRef<string | null>(null);
+  const stateRef = useRef<ConnectionState>(initialState);
   const unreadCountRef = useRef(0);
   const titleRef = useRef(document.title);
   const activePeerRef = useRef<string | null>(null);
@@ -269,6 +312,9 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
 
   useEffect(() => { userIdRef.current = state.userId; }, [state.userId]);
   useEffect(() => { nicknameRef.current = state.nickname; }, [state.nickname]);
+useEffect(() => { reportTargetRef.current = state.reportTarget; }, [state.reportTarget]);
+useEffect(() => { settingsRef.current = state.settings; }, [state.settings]);
+useEffect(() => { stateRef.current = state; }, [state]);
 
   useEffect(() => { setEditingTarget(null); }, [state.activeChannel]);
 
@@ -296,21 +342,22 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const updateTitle = useCallback(() => {
     const count = unreadCountRef.current;
     const peer = activePeerRef.current;
-    const base = peer ? `WhisperNet @${peer}` : (state.nickname ? `WhisperNet @${state.nickname}` : 'WhisperNet');
+    const me = nicknameRef.current;
+    const base = peer ? `WhisperNet @${peer}` : (me ? `WhisperNet @${me}` : 'WhisperNet');
     const newTitle = count > 0 ? `${base} (${count})` : base;
     document.title = newTitle;
     titleRef.current = newTitle;
-  }, [state.nickname]);
+  }, []);
 
   const fireNotification = useCallback((title: string, body: string) => {
-    if (!state.settings.notifications) return;
+    if (!settingsRef.current.notifications) return;
     if (!document.hidden) return;
     if (Notification.permission !== 'granted') return;
     try { new Notification(title, { body, icon: '/icons/icon-192.png', tag: 'whispernet' }); } catch {}
-  }, [state.settings.notifications]);
+  }, []);
 
   const playNotifSound = useCallback(() => {
-    if (!state.settings.soundEnabled) return;
+    if (!settingsRef.current.soundEnabled) return;
     try {
       if (!notifSoundRef.current) {
         notifSoundRef.current = new Audio('data:audio/wav;base64,UklGRnoGAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQoGAACBhYqFbF1fdH2JkZqRiX1waXOAjZaQiH1waXOGkZuTiH1wZ3KGkZuTiH1wZ3KGkZuTiH1wZ3KGkZuTiH1wZ3KGkZuTiH1wZw==');
@@ -319,7 +366,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
       notifSoundRef.current.currentTime = 0;
       notifSoundRef.current.play().catch(() => {});
     } catch {}
-  }, [state.settings.soundEnabled]);
+  }, []);
 
   useEffect(() => {
     const onVisibilityChange = () => { if (!document.hidden) { unreadCountRef.current = 0; updateTitle(); } };
@@ -448,8 +495,45 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'unblock_user', payload: { userId } }));
   }, []);
 
-  const reportUser = useCallback((targetId: string, reason: string, messageId?: string) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'report_user', payload: { targetId, reason, ...(messageId ? { messageId } : {}) } }));
+  const reportUser = useCallback((targetId: string, reason: string, messageId?: string, source: 'profile' | 'message' = 'message') => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'report_user', payload: { targetId, reason, source, ...(messageId ? { messageId } : {}) } }));
+  }, []);
+
+  const openProfile = useCallback((userId: string) => {
+    requestedProfileIdRef.current = userId;
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'profile_get', payload: { userId } }));
+    }
+  }, []);
+
+  const closeProfile = useCallback(() => {
+    requestedProfileIdRef.current = null;
+    dispatch({ type: 'SET_PROFILE', profile: null });
+  }, []);
+
+  const openReport = useCallback((target: ProfileInfo) => {
+    dispatch({ type: 'SET_REPORT_TARGET', target });
+    dispatch({ type: 'SET_PROFILE', profile: null });
+  }, []);
+
+  const closeReport = useCallback(() => dispatch({ type: 'SET_REPORT_TARGET', target: null }), []);
+
+  const backToProfile = useCallback(() => {
+    const target = reportTargetRef.current;
+    dispatch({ type: 'SET_REPORT_TARGET', target: null });
+    if (target) dispatch({ type: 'SET_PROFILE', profile: target });
+  }, []);
+
+  const setMyAvatar = useCallback(async (dataUrl: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'avatar_set', payload: { dataUrl } }));
+    }
+  }, []);
+
+  const removeMyAvatar = useCallback(() => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'avatar_remove', payload: {} }));
+    }
   }, []);
 
   const adminReports = useCallback(() => {
@@ -489,7 +573,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const connect = useCallback((nickname: string, password: string, isRegister: boolean) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) return;
+    if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) return;
     authRef.current = { nickname, password, isRegister };
     credentialsRef.current = { nickname, password, isRegister };
     reconnectAttemptsRef.current = 0;
@@ -571,6 +655,10 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               dispatch({ type: 'SET_STATUS', status: 'connected' });
               dispatch({ type: 'SET_RECONNECT_ATTEMPTS', attempts: 0 });
               dispatch({ type: 'SET_AUTH_ERROR', error: null });
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({ type: 'get_blocked', payload: {} }));
+                wsRef.current.send(JSON.stringify({ type: 'get_sessions', payload: {} }));
+              }
               publicKeysRef.current = message.payload.publicKeys || {};
               channelMediaKeyRef.current = typeof message.payload.channelMediaKey === 'string' ? message.payload.channelMediaKey : null;
               if (message.payload.preKeyBundles) {
@@ -608,6 +696,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               if (!privateKeyRef.current) dispatch({ type: 'SET_KEY_SETUP_NEEDED', needed: true });
               dispatch({ type: 'SET_E2EE_READY', ready: !!privateKeyRef.current });
               if (message.payload.onlineUsers) dispatch({ type: 'SET_USERS', users: message.payload.onlineUsers.filter((u: User) => u.id !== message.payload.userId) });
+              dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromUsers(message.payload.onlineUsers) });
               document.title = `WhisperNet @${message.payload.nickname}`;
               titleRef.current = document.title;
               unreadCountRef.current = 0;
@@ -634,6 +723,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               break;
             case 'chat_history':
               dispatch({ type: 'SET_MESSAGES', messages: message.payload.messages.map((m: any) => ({ id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text: m.text || '', timestamp: m.timestamp, isOwn: m.isOwn, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined, reactions: normalizeReactions(m.reactions) })) });
+              dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromMessages(message.payload.messages) });
               break;
             case 'dm_history': {
               mergePublicKeys(message.payload.publicKeys);
@@ -660,6 +750,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
                 return { id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text, timestamp: m.timestamp, isOwn: m.senderId === userIdRef.current, channel: otherId, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined, reactions: normalizeReactions(m.reactions) };
               }));
               dispatch({ type: 'SET_DM_MESSAGES', channel: otherId, messages: msgs });
+              dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromMessages(message.payload.messages) });
               break;
             }
             case 'dm_message': {
@@ -689,6 +780,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
                 try { msgText = await decryptMessage(message.payload.encrypted, userIdRef.current, privateKeyRef.current); } catch { if (!msgText) msgText = '[encrypted]'; }
               }
               dispatch({ type: 'ADD_DM_MESSAGE', channel: otherId, message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: msgText, timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, channel: otherId, fileKey: message.payload.fileKey, expiresAt: message.payload.expiresAt || undefined, quotedMessageId: message.payload.quotedMessageId ?? undefined, quotedMessageText: message.payload.quotedMessageText ?? undefined, quotedMessageSender: message.payload.quotedMessageSender ?? undefined, reactions: normalizeReactions(message.payload.reactions) } });
+              dispatch({ type: 'SET_AVATARS', avatars: avatarFromSender(message.payload.senderId, message.payload.senderAvatar) });
               dispatch({ type: 'SET_DM_NAME', userId: otherId, nickname: message.payload.senderNickname });
               dispatch({ type: 'SET_CONTACTS', contacts: [] });
               ws.send(JSON.stringify({ type: 'dm_contacts', payload: {} }));
@@ -697,6 +789,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
             }
             case 'chat_message':
               dispatch({ type: 'ADD_MESSAGE', message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: message.payload.text || '', timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, fileKey: message.payload.fileKey, expiresAt: message.payload.expiresAt || undefined, quotedMessageId: message.payload.quotedMessageId ?? undefined, quotedMessageText: message.payload.quotedMessageText ?? undefined, quotedMessageSender: message.payload.quotedMessageSender ?? undefined, reactions: normalizeReactions(message.payload.reactions) } });
+              dispatch({ type: 'SET_AVATARS', avatars: avatarFromSender(message.payload.senderId, message.payload.senderAvatar) });
               if (!message.payload.isOwn) { unreadCountRef.current++; updateTitle(); fireNotification(`@${message.payload.senderNickname}`, message.payload.text || ''); playNotifSound(); }
               break;
             case 'chat_cleared':
@@ -707,6 +800,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
             case 'dm_contacts':
               mergePublicKeys(message.payload.publicKeys);
               dispatch({ type: 'SET_CONTACTS', contacts: message.payload.contacts });
+              dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromUsers(message.payload.contacts) });
               for (const c of message.payload.contacts || []) {
                 if (c.id && c.nickname) dispatch({ type: 'SET_DM_NAME', userId: c.id, nickname: c.nickname });
               }
@@ -724,6 +818,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               break;
             case 'search_results':
               dispatch({ type: 'SET_SEARCH_RESULTS', results: message.payload.results });
+              dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromUsers(message.payload.results) });
               break;
             case 'message_search_results':
               dispatch({ type: 'SET_MESSAGE_SEARCH_RESULTS', results: message.payload.results });
@@ -763,6 +858,7 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               break;
             case 'user_joined':
               dispatch({ type: 'ADD_USER', user: { id: message.payload.userId, nickname: message.payload.nickname } });
+              dispatch({ type: 'SET_AVATARS', avatars: avatarFromSender(message.payload.userId, message.payload.avatar) });
               break;
             case 'user_left':
               dispatch({ type: 'REMOVE_USER', userId: message.payload.userId });
@@ -771,6 +867,14 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               dispatch({ type: 'ADD_MESSAGE', message: { id: crypto.randomUUID(), senderId: 'system', senderNickname: '', text: message.payload.text, timestamp: Date.now(), isOwn: false } });
               break;
             case 'error':
+              if (message.payload?.code === 'AVATAR_RATE_LIMITED' || message.payload?.code === 'INVALID_AVATAR') {
+                alert(message.payload?.message || 'Error');
+              }
+              if (message.payload?.code === 'INVALID_PAYLOAD' || message.payload?.code === 'RATE_LIMITED' || message.payload?.code === 'INTERNAL') {
+                if (stateRef.current.reportStatus === 'pending') {
+                  dispatch({ type: 'SET_REPORT_STATUS', status: 'failed' });
+                }
+              }
               if (message.payload?.code === 'USER_NOT_FOUND' || message.payload?.code === 'FORBIDDEN') {
                 setAdminError(message.payload?.message || message.payload?.code || 'Error');
               }
@@ -787,6 +891,37 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
               break;
             }
             case 'heartbeat_ack':
+              break;
+            case 'report_received':
+              dispatch({ type: 'SET_REPORT_STATUS', status: 'sent' });
+              break;
+            case 'report_failed':
+              dispatch({ type: 'SET_REPORT_STATUS', status: 'failed' });
+              break;
+            case 'profile':
+              if (message.payload?.profile) {
+                const p = message.payload.profile;
+                const requested = requestedProfileIdRef.current;
+                if (requested && p.id !== requested) break;
+                if (!requested && stateRef.current.profile) break;
+                dispatch({ type: 'SET_PROFILE', profile: p });
+                if (p.avatar && p.avatar.ext) {
+                  dispatch({ type: 'SET_AVATARS', avatars: { [p.id]: p.avatar } });
+                } else if (p.id) {
+                  dispatch({ type: 'SET_AVATARS', avatars: { [p.id]: { ext: null, updatedAt: null } } });
+                }
+              }
+              break;
+            case 'user_avatar':
+              if (typeof message.payload?.userId === 'string') {
+                const incoming = message.payload.avatar && message.payload.avatar.ext
+                  ? message.payload.avatar
+                  : { ext: null, updatedAt: null };
+                const uid = message.payload.userId;
+                const current = stateRef.current.avatars[uid];
+                if (current && incoming.updatedAt !== null && current.updatedAt !== null && incoming.updatedAt < current.updatedAt) break;
+                dispatch({ type: 'SET_AVATARS', avatars: { [uid]: incoming } });
+              }
               break;
           }
         } catch (e) { console.error('Message parse error:', e); }
@@ -885,11 +1020,13 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
     disconnect();
     
     
-    signalInitializedRef.current = false;
-    preKeyBundlesRef.current = {};
-    pendingX3dhRef.current = {};
-    identityFingerprintsRef.current = {};
-    setIdentityWarning(null);
+   signalInitializedRef.current = false;
+   preKeyBundlesRef.current = {};
+   pendingX3dhRef.current = {};
+   identityFingerprintsRef.current = {};
+   for (const url of decryptedMediaCacheRef.current.values()) { try { URL.revokeObjectURL(url); } catch {} }
+   decryptedMediaCacheRef.current.clear();
+   setIdentityWarning(null);
     dispatch({ type: 'RESET' });
     localStorage.removeItem('wn_auth');
     localStorage.removeItem('wn_settings');
@@ -959,11 +1096,15 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
       decryptedMediaCacheRef.current.set(message.id, objectUrl);
       if (decryptedMediaCacheRef.current.size > 100) {
         const oldest = decryptedMediaCacheRef.current.keys().next().value;
-        if (oldest != null) decryptedMediaCacheRef.current.delete(oldest);
+        if (oldest != null) {
+          const stale = decryptedMediaCacheRef.current.get(oldest);
+          decryptedMediaCacheRef.current.delete(oldest);
+          if (stale) { try { URL.revokeObjectURL(stale); } catch {} }
+        }
       }
       return objectUrl;
     } catch (e) {
-      console.error('Failed to create object URL:', e);
+      console.error('Failed to create object URL:', (e as Error).message);
       return null;
     }
   }, []);
@@ -1139,10 +1280,11 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
         bannedUsers, adminGetBanned, adminError, dismissAdminError,
         blockedUsers, refreshBlocked, blockUser, unblockUser, reportUser,
         showImportModal: (data: any, mode: 'setup' | 'settings') => setImportModal({ data, mode }),
+        openProfile, closeProfile, openReport, closeReport, backToProfile, setMyAvatar, removeMyAvatar,
       }}>
         {children}
-      </ConnectionContext.Provider>
-      {importModal && (
+        <ProfileOverlay />
+      </ConnectionContext.Provider>      {importModal && (
         <div className="fixed inset-0 z-[70]">
           <PasswordModalInline title={t('enter_backup_password')} cancelLabel={t('cancel')} onCancel={() => setImportModal(null)} onConfirm={async (pass) => {
             try {
@@ -1169,15 +1311,33 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   );
 }
 
+function ProfileOverlay() {
+  const { state, closeReport, backToProfile } = useConnection();
+  if (state.reportTarget) {
+    return (
+      <ReportModal
+        targetId={state.reportTarget.id}
+        targetNickname={state.reportTarget.nickname}
+        avatar={state.avatars[state.reportTarget.id] ?? state.reportTarget.avatar}
+        onClose={closeReport}
+        onBack={backToProfile}
+      />
+    );
+  }
+  if (!state.profile) return null;
+  return <ProfileModal profile={state.profile} />;
+}
+
 function PasswordModalInline({ title, cancelLabel, onConfirm, onCancel }: { title: string; cancelLabel: string; onConfirm: (password: string) => void; onCancel: () => void }) {
   const [password, setPassword] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => { inputRef.current?.focus(); }, []);
+  useEscapeKey(onCancel, true, 61);
   return (
-    <>
-      <div className="fixed inset-0 bg-black/50 backdrop-blur-sm z-[60]" onClick={onCancel} />
-      <div className="fixed inset-0 z-[61] flex items-center justify-center p-4">
-        <div className="bg-bg-secondary border border-border-default rounded-2xl shadow-2xl max-w-sm w-full p-6">
+    <div className="fixed inset-0 z-[61] flex items-center justify-center p-4" onClick={onCancel}>
+      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
+        <div className="relative bg-bg-secondary border border-border-default rounded-2xl shadow-2xl max-w-sm w-full p-6"
+          onClick={(e) => e.stopPropagation()}>
           <div className="w-14 h-14 rounded-2xl bg-accent-primary/15 flex items-center justify-center mx-auto mb-5">
             <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-accent-primary))" strokeWidth="2">
               <rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
@@ -1185,7 +1345,7 @@ function PasswordModalInline({ title, cancelLabel, onConfirm, onCancel }: { titl
           </div>
           <h3 className="text-center text-[17px] font-semibold text-fg-primary mb-4">{title}</h3>
           <input ref={inputRef} type="password" value={password} onChange={(e) => setPassword(e.target.value)}
-            onKeyDown={(e) => { if (e.key === 'Enter' && password) onConfirm(password); if (e.key === 'Escape') onCancel(); }}
+            onKeyDown={(e) => { if (e.key === 'Enter' && password) onConfirm(password); }}
             className="w-full px-4 py-3 rounded-xl bg-bg-tertiary border border-border-default text-[15px] text-fg-primary placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary mb-4"
             placeholder="Password" />
           <div className="flex gap-3">
@@ -1193,13 +1353,12 @@ function PasswordModalInline({ title, cancelLabel, onConfirm, onCancel }: { titl
             <button onClick={() => password && onConfirm(password)} disabled={!password} className="flex-1 py-3 rounded-2xl bg-accent-primary text-accent-text text-[15px] font-semibold hover:opacity-90 transition-colors disabled:opacity-40">OK</button>
           </div>
         </div>
-      </div>
-    </>
+    </div>
   );
 }
 
 function AppInner() {
-  const { state, t, reconnect, openGeneral, openDm, searchUsers } = useConnection();
+  const { state, t, reconnect, openGeneral, openDm, openProfile, searchUsers } = useConnection();
   const isMobile = useIsMobile();
   const [mobileTab, setMobileTab] = useState<'home' | 'settings'>('home');
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
@@ -1329,6 +1488,14 @@ function AppInner() {
                     <h1 className="text-[22px] font-bold text-fg-primary">WhisperNet</h1>
                     <p className="text-[12px] text-fg-muted">{state.status === 'connected' ? t('status_connected') : t('status_connecting')}</p>
                   </div>
+                  <button
+                    onClick={() => { if (state.userId) openProfile(state.userId); }}
+                    className="ml-auto flex items-center gap-2 px-2.5 py-1.5 rounded-2xl bg-bg-tertiary border border-border-default hover:bg-bg-tertiary/80 transition-colors"
+                    aria-label={t('my_profile')}
+                  >
+                    <Avatar userId={state.userId || ''} nickname={state.nickname} avatar={state.userId ? state.avatars[state.userId] : null} className="w-8 h-8 rounded-full" textClassName="text-[11px]" />
+                    <span className="text-[13px] font-semibold text-fg-primary">@{state.nickname}</span>
+                  </button>
                 </div>
                 <input type="text" value={searchQuery} onChange={(e) => handleSearch(e.target.value)}
                   placeholder={t('search_placeholder')}
@@ -1360,21 +1527,24 @@ function AppInner() {
                         {mobileContacts.map(contact => {
                           const userOnline = state.users.some(u => u.id === contact.id);
                           return (
-                            <button key={contact.id}
+                            <div key={contact.id} role="button" tabIndex={0}
                               onClick={() => { openDm(contact.id, contact.nickname); setMobileChatOpen(true); pushView('chat'); }}
-                              className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left hover:bg-bg-tertiary text-fg-primary">
-                              <div className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 relative shadow-sm"
-                                style={{ background: getAvatarGradient(contact.nickname) }}>
-                                <span className="text-[13px] font-bold text-white">{getAvatarText(contact.nickname)}</span>
+                              onKeyDown={(e) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.stopPropagation(); if (true) { e.preventDefault(); openDm(contact.id, contact.nickname); setMobileChatOpen(true); pushView('chat'); } }}
+                              className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all cursor-pointer hover:bg-bg-tertiary text-fg-primary">
+                              <button onKeyDown={(e) => { e.stopPropagation(); }}
+                          onClick={(e) => { e.stopPropagation(); openProfile(contact.id); }}
+                                className="relative flex-shrink-0 p-0 border-0 bg-transparent rounded-2xl appearance-none"
+                                aria-label={t('profile')}>
+                                <Avatar userId={contact.id} nickname={contact.nickname} avatar={state.avatars[contact.id]} className="w-12 h-12 rounded-2xl" textClassName="text-[13px]" />
                                 {userOnline && (
                                   <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-status-success border-[2.5px] border-bg-secondary" />
                                 )}
-                              </div>
+                              </button>
                               <div className="min-w-0 flex-1">
                                 <span className="text-[15px] font-semibold block truncate">@{contact.nickname}</span>
                                 <span className="text-[12px] text-fg-muted mt-0.5 block">{formatTime(contact.lastMessage)}</span>
                               </div>
-                            </button>
+                            </div>
                           );
                         })}
                       </div>
@@ -1388,23 +1558,26 @@ function AppInner() {
                       <span className="text-[11px] font-semibold text-fg-muted uppercase tracking-wider">{t('search_results')}</span>
                     </div>
                     {state.searchResults.map(user => (
-                      <button key={user.id}
+                      <div key={user.id} role="button" tabIndex={0}
                         onClick={() => { openDm(user.id, user.nickname); setMobileChatOpen(true); setSearchQuery(''); pushView('chat'); }}
-                        className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left hover:bg-bg-tertiary text-fg-primary">
-                        <div className="w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 relative shadow-sm"
-                          style={{ background: getAvatarGradient(user.nickname) }}>
-                          <span className="text-[13px] font-bold text-white">{getAvatarText(user.nickname)}</span>
+                        onKeyDown={(e) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.stopPropagation(); if (true) { e.preventDefault(); openDm(user.id, user.nickname); setMobileChatOpen(true); setSearchQuery(''); pushView('chat'); } }}
+                        className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all cursor-pointer hover:bg-bg-tertiary text-fg-primary">
+                        <button onKeyDown={(e) => { e.stopPropagation(); }}
+                          onClick={(e) => { e.stopPropagation(); openProfile(user.id); }}
+                          className="relative flex-shrink-0 p-0 border-0 bg-transparent rounded-2xl appearance-none"
+                          aria-label={t('profile')}>
+                          <Avatar userId={user.id} nickname={user.nickname} avatar={state.avatars[user.id]} className="w-12 h-12 rounded-2xl" textClassName="text-[13px]" />
                           {user.online && (
                             <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-status-success border-[2.5px] border-bg-secondary" />
                           )}
-                        </div>
+                        </button>
                         <div>
                           <span className="text-[15px] font-semibold">@{user.nickname}</span>
                           <span className={cn('block text-[12px] mt-0.5', user.online ? 'text-status-success' : 'text-fg-muted')}>
                             {user.online ? t('online') : t('offline')}
                           </span>
                         </div>
-                      </button>
+                      </div>
                     ))}
                   </div>
                 )}

@@ -40,9 +40,9 @@ async function getDeviceFingerprint(): Promise<string> {
     }
   } catch {}
   try {
-    parts.push(window.outerWidth.toString());
-    parts.push(window.outerHeight.toString());
     parts.push(screen.pixelDepth.toString());
+    parts.push(String(navigator.hardwareConcurrency || 0));
+    parts.push(String(navigator.language || ''));
   } catch {}
   const raw = parts.join('|||');
   const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw));

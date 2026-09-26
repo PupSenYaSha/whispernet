@@ -3,6 +3,23 @@ export interface User {
   nickname: string;
 }
 
+export interface AvatarUpdate {
+  ext: string | null;
+  updatedAt: number | null;
+}
+
+export interface ProfileInfo {
+  id: string;
+  nickname: string;
+  avatar: AvatarUpdate | null;
+  createdAt: number;
+  online: boolean;
+  isMe: boolean;
+  isBlockedByMe: boolean;
+  isBanned: boolean;
+  safetyNumber: string | null;
+}
+
 export interface Message {
   id: string;
   senderId: string;

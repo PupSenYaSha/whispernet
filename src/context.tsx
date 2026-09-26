@@ -1,7 +1,7 @@
 import React from 'react';
-import type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor, Session, BannedUser } from './types';
+import type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor, Session, BannedUser, AvatarUpdate, ProfileInfo } from './types';
 
-export type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor, Session, BannedUser };
+export type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor, Session, BannedUser, AvatarUpdate, ProfileInfo };
 
 export type ReplyTarget = { id: string; senderNickname: string; text: string } | null;
 
@@ -36,6 +36,10 @@ export interface ConnectionState {
   searchResults: { id: string; nickname: string; online: boolean }[];
   messageSearchResults: Message[];
   replyTo: ReplyTarget;
+  avatars: Record<string, AvatarUpdate>;
+  profile: ProfileInfo | null;
+  reportTarget: ProfileInfo | null;
+  reportStatus: 'idle' | 'pending' | 'sent' | 'failed';
 }
 
 export type ConnectionAction =
@@ -65,6 +69,10 @@ export type ConnectionAction =
   | { type: 'UPDATE_MESSAGE'; messageId: string; text: string; editedAt: number }
   | { type: 'SET_REPLY'; reply: ReplyTarget }
   | { type: 'CLEAR_GENERAL' }
+  | { type: 'SET_AVATARS'; avatars: Record<string, AvatarUpdate> }
+  | { type: 'SET_PROFILE'; profile: ProfileInfo | null }
+  | { type: 'SET_REPORT_TARGET'; target: ProfileInfo | null }
+  | { type: 'SET_REPORT_STATUS'; status: 'idle' | 'pending' | 'sent' | 'failed' }
   | { type: 'RESET' };
 
 export interface ConnectionContextType {
@@ -115,8 +123,15 @@ export interface ConnectionContextType {
   refreshBlocked: () => void;
   blockUser: (userId: string, nickname?: string) => void;
   unblockUser: (userId: string) => void;
-  reportUser: (targetId: string, reason: string, messageId?: string) => void;
+  reportUser: (targetId: string, reason: string, messageId?: string, source?: 'profile' | 'message') => void;
   showImportModal: (data: any, mode: 'setup' | 'settings') => void;
+  openProfile: (userId: string) => void;
+  closeProfile: () => void;
+  openReport: (target: ProfileInfo) => void;
+  closeReport: () => void;
+  backToProfile: () => void;
+  setMyAvatar: (dataUrl: string) => Promise<void>;
+  removeMyAvatar: () => void;
 }
 
 export const ConnectionContext = React.createContext<ConnectionContextType | null>(null);

@@ -1,12 +1,16 @@
-import { useState } from 'react';
+import { useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { useConnection } from '../context';
 import { cn } from '../utils';
+import { Avatar } from './Avatar';
+import { useEscapeKey } from '../useEscapeKey';
 
 export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick: () => void; isMobile?: boolean; onBack?: () => void }) {
-  const { state, openGeneral, openDm, t, blockedUsers, blockUser, unblockUser } = useConnection();
+  const { state, openGeneral, openDm, openProfile, t, blockedUsers, blockUser, unblockUser } = useConnection();
   const [showUsers, setShowUsers] = useState(false);
   const [blockModalOpen, setBlockModalOpen] = useState(false);
+  const closeBlockModal = useCallback(() => setBlockModalOpen(false), []);
+  useEscapeKey(closeBlockModal, blockModalOpen, 81);
   const isDm = state.activeChannel !== 'general';
   const dmContact = isDm ? state.contacts.find(c => c.id === state.activeChannel) : null;
   const dmUser = isDm ? state.users.find(u => u.id === state.activeChannel) : null;
@@ -47,19 +51,34 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
                 </svg>
               </button>
             )}
-            <div className={cn(
-              isMobile ? 'w-11 h-11 rounded-2xl' : 'w-10 h-10 rounded-2xl',
-              'flex items-center justify-center flex-shrink-0 text-[13px] font-bold',
-              isDm ? 'bg-accent-primary/15 text-accent-primary' : 'bg-accent-primary'
-            )}>
-              {isDm && dmNickname ? (
-                <span>{dmNickname.charAt(0).toUpperCase()}</span>
-              ) : (
-                <svg width={isMobile ? "20" : "18"} height={isMobile ? "20" : "18"} viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-accent-text))" strokeWidth="2.5">
-                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                </svg>
-              )}
-            </div>
+            {isDm && state.activeChannel ? (
+              <button
+                onClick={() => openProfile(state.activeChannel as string)}
+                title={t('profile')}
+                aria-label={t('profile')}
+                className={cn(
+                  isMobile ? 'w-11 h-11 rounded-2xl' : 'w-10 h-10 rounded-2xl',
+                  'flex items-center justify-center flex-shrink-0 overflow-hidden p-0 border-0 bg-transparent appearance-none cursor-pointer hover:brightness-110 transition'
+                )}
+              >
+                <Avatar userId={state.activeChannel} nickname={dmNickname || state.activeChannel} avatar={state.avatars[state.activeChannel]}
+                  className="w-full h-full" textClassName={isMobile ? 'text-[14px]' : 'text-[13px]'} />
+              </button>
+            ) : (
+              <div
+                aria-hidden="true"
+                className={cn(
+                  isMobile ? 'w-11 h-11 rounded-2xl' : 'w-10 h-10 rounded-2xl',
+                  'flex items-center justify-center flex-shrink-0 overflow-hidden cursor-default select-none'
+                )}
+              >
+                <div className="w-full h-full flex items-center justify-center bg-accent-primary">
+                  <svg width={isMobile ? "20" : "18"} height={isMobile ? "20" : "18"} viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-accent-text))" strokeWidth="2.5">
+                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                  </svg>
+                </div>
+              </div>
+            )}
             <div className="flex-1 min-w-0">
               <h1 className={cn(isMobile ? "text-[17px]" : "text-[15px]", "font-bold text-fg-primary leading-tight truncate")}>
                 {isDm ? `@${dmNickname || '...'}` : t('global_chat')}
@@ -129,9 +148,10 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
       {showUsers && !isDm && (
         <div className="border-t border-border-default px-4 py-2.5 bg-bg-secondary">
           <div className="flex flex-wrap gap-1.5">
-            <span className="px-2.5 py-1 text-[12px] font-medium bg-accent-primary/10 text-accent-primary rounded-lg">
+            <button onClick={() => { setShowUsers(false); if (state.userId) openProfile(state.userId); }}
+              className="px-2.5 py-1 text-[12px] font-medium bg-accent-primary/10 text-accent-primary rounded-lg">
               @{state.nickname} ({t('you')})
-            </span>
+            </button>
             {state.users.map(u => (
               <button key={u.id} onClick={() => { setShowUsers(false); openDm(u.id, u.nickname); }}
                 className="px-2.5 py-1 text-[12px] font-medium bg-bg-tertiary text-fg-muted rounded-lg hover:bg-accent-primary/10 hover:text-accent-primary transition-colors cursor-pointer">
@@ -143,11 +163,11 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
       )}
 
       {blockModalOpen && createPortal(
-        <>
-          <div className="fixed inset-0 bg-black/50 z-[80]" onClick={() => setBlockModalOpen(false)} />
-          <div className="fixed inset-0 z-[81] flex items-center justify-center p-4">
-            <div className="bg-bg-secondary border border-border-default rounded-3xl shadow-2xl max-w-sm w-full p-6"
-              style={{ animation: 'scaleIn 0.2s cubic-bezier(0.22, 1, 0.36, 1)' }}>
+        <div className="fixed inset-0 z-[81] flex items-center justify-center p-4" onClick={() => setBlockModalOpen(false)}>
+          <div className="absolute inset-0 bg-black/50" aria-hidden="true" />
+            <div className="relative bg-bg-secondary border border-border-default rounded-3xl shadow-2xl max-w-sm w-full p-6"
+              style={{ animation: 'scaleIn 0.2s cubic-bezier(0.22, 1, 0.36, 1)' }}
+              onClick={(e) => e.stopPropagation()}>
               <div className="w-14 h-14 rounded-2xl bg-status-error/15 flex items-center justify-center mx-auto mb-5">
                 <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-status-error))" strokeWidth="2">
                   <circle cx="12" cy="12" r="10" />
@@ -169,8 +189,7 @@ export function TopBar({ onSettingsClick, isMobile, onBack }: { onSettingsClick:
                 </button>
               </div>
             </div>
-          </div>
-        </>,
+        </div>,
         document.body
       )}
     </header>

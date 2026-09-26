@@ -8,7 +8,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import { existsSync } from 'fs';
 import { handleConnection, startHeartbeatCheck, getTotalConnections } from './handlers.js';
-import { initializeDatabase, getMediaDir } from './database.js';
+import { initializeDatabase, getMediaDir, getAvatarDir, getUserProfile } from './database.js';
 import {
   UPLOAD_RATE_LIMIT,
   UPLOAD_RATE_WINDOW,
@@ -17,6 +17,7 @@ import {
   MEDIA_RATE_LIMIT,
   MEDIA_RATE_WINDOW,
   MAX_MEDIA_STREAM,
+  MAX_WS_PAYLOAD_SIZE,
 } from './constants.js';
 import https from 'https';
 import http from 'http';
@@ -26,6 +27,15 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 
 const MIME_RE = /^(image|video)\/[a-z0-9.+-]+$/i;
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+const AVATAR_MIME: Record<string, string> = {
+  png: 'image/png',
+  jpeg: 'image/jpeg',
+  webp: 'image/webp',
+  gif: 'image/gif',
+};
 
 const uploadRateMap = new Map<string, { count: number; resetAt: number }>();
 const mediaRateMap = new Map<string, { count: number; resetAt: number }>();
@@ -89,7 +99,8 @@ function loadHttpsOptions(): { key: Buffer; cert: Buffer } | null {
 }
 
 export function createApp(clientDir?: string) {
-  const app = fastify({ logger: false });
+  const trustProxy = /^(1|true|yes)$/i.test(process.env.TRUST_PROXY || '');
+  const app = fastify({ logger: false, trustProxy });
   let mediaHost = 'img.n1ko.dev';
   try { mediaHost = getMediaBase().host; } catch {}
 
@@ -104,8 +115,13 @@ export function createApp(clientDir?: string) {
     reply.header('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://${mediaHost} http://${mediaHost}; media-src 'self' blob: https://${mediaHost} http://${mediaHost}; connect-src 'self' wss://${host} ws://${host}; font-src 'self' https://fonts.gstatic.com`);
     const origin = req.headers.origin;
     if (origin) {
-      const allowedHost = new URL(origin).host;
-      if (allowedHost === host) {
+      let allowedHost = '';
+      try {
+        allowedHost = new URL(origin).host;
+      } catch {
+        allowedHost = '';
+      }
+      if (allowedHost && allowedHost === host) {
         reply.header('Access-Control-Allow-Origin', origin);
         reply.header('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
         reply.header('Access-Control-Allow-Headers', 'Content-Type');
@@ -114,8 +130,8 @@ export function createApp(clientDir?: string) {
     reply.header('Vary', 'Origin');
   });
 
-  app.register(fastifyWebsocket);
-  app.register(fastifyMultipart, { limits: { fileSize: MAX_UPLOAD_SIZE } });
+  app.register(fastifyWebsocket, { options: { maxPayload: MAX_WS_PAYLOAD_SIZE } });
+  app.register(fastifyMultipart, { limits: { fileSize: MAX_UPLOAD_SIZE, files: 1, fields: 0, parts: 1 } });
 
   const resolvedClientDir = clientDir || path.join(__dirname, '../dist/client');
   app.register(fastifyStatic, {
@@ -134,6 +150,22 @@ export function createApp(clientDir?: string) {
   });
 
   app.get('/health', async () => ({ status: 'ok' }));
+
+  app.get('/api/avatar/:id', async (req, reply) => {
+    const id = (req.params as any).id || '';
+    if (!UUID_RE.test(id)) return reply.code(400).send({ error: 'Invalid user id' });
+    const prof = await getUserProfile(id);
+    if (!prof || !prof.avatarExt) return reply.code(404).send({ error: 'Not found' });
+    const mime = AVATAR_MIME[prof.avatarExt];
+    if (!mime) return reply.code(404).send({ error: 'Not found' });
+    const fp = path.join(getAvatarDir(), id);
+    if (!existsSync(fp)) return reply.code(404).send({ error: 'Not found' });
+    const buf = await fs.promises.readFile(fp);
+    return reply
+      .header('Content-Type', mime)
+      .header('Cache-Control', 'public, max-age=86400')
+      .send(buf);
+  });
 
   app.get('/api/media', async (req, reply) => {
     const ip = req.ip || 'unknown';
@@ -176,7 +208,8 @@ export function createApp(clientDir?: string) {
       timeout: 15000,
     }, (proxyRes) => {
       let proxyResCt = proxyRes.headers['content-type'] || 'application/octet-stream';
-      if (!/^(image\/|video\/|audio\/|application\/octet-stream)/i.test(proxyResCt)) {
+      const MEDIA_CT_ALLOW_RE = /^(image\/(png|jpeg|jpg|webp|gif)|video\/(mp4|webm|quicktime)|audio\/(mpeg|mp4|ogg|wav|webm)|application\/octet-stream)\b/i;
+      if (!MEDIA_CT_ALLOW_RE.test(proxyResCt)) {
         proxyRes.destroy();
         try { raw.writeHead(415); raw.end('Unsupported media type'); } catch {}
         return;
@@ -195,6 +228,9 @@ export function createApp(clientDir?: string) {
       raw.writeHead(proxyRes.statusCode || 502, {
         'Content-Type': proxyResCt,
         'Cache-Control': 'public, max-age=86400',
+        'X-Content-Type-Options': 'nosniff',
+        'Content-Security-Policy': "default-src 'none'; sandbox",
+        'Content-Disposition': 'inline',
       });
 
       proxyRes.on('data', (chunk) => {
@@ -257,6 +293,7 @@ export function createApp(clientDir?: string) {
     return new Promise<void>((resolve) => {
       const uploadUrl = new URL('/upload', getMediaBase());
       const lib = uploadUrl.protocol === 'https:' ? https : http;
+      req.raw.on('close', () => { try { req2.destroy(); } catch {} });
       const req2 = lib.request(uploadUrl, {
         method: 'POST',
         headers: {
@@ -267,7 +304,18 @@ export function createApp(clientDir?: string) {
         timeout: 120000,
       }, (res) => {
         let resBody = '';
-        res.on('data', (c) => { resBody += c; });
+        let resBytes = 0;
+        const MAX_UPLOAD_RESPONSE = 64 * 1024;
+        res.on('data', (c: Buffer) => {
+          resBytes += c.length;
+          if (resBytes > MAX_UPLOAD_RESPONSE) {
+            req2.destroy();
+            try { reply.code(502).send({ error: 'Upstream response too large' }); } catch {}
+            resolve();
+            return;
+          }
+          resBody += c;
+        });
         res.on('end', () => {
           for (const line of resBody.split('\n')) {
             if (line.startsWith('data: ')) {

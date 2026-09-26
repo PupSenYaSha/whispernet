@@ -46,7 +46,7 @@ export function MessageInput() {
     setSealedMode(false);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const ta = textareaRef.current;
     const val = ta?.value?.trim();
@@ -57,9 +57,17 @@ export function MessageInput() {
       return;
     }
     if (isDm && dmTarget) {
-      sendDm(dmTarget, val, sealedMode, replyTo || undefined);
+      try {
+        await sendDm(dmTarget, val, sealedMode, replyTo || undefined);
+      } catch {
+        return;
+      }
     } else {
-      sendMessage(val, replyTo || undefined);
+      try {
+        await sendMessage(val, replyTo || undefined);
+      } catch {
+        return;
+      }
     }
     clearComposer();
   };
