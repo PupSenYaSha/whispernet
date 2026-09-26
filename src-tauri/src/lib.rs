@@ -286,12 +286,32 @@ fn compare_versions(a: &str, b: &str) -> i32 {
     0
 }
 
+fn json_escape(input: &str) -> String {
+  let mut out = String::with_capacity(input.len());
+  for c in input.chars() {
+    match c {
+      '"' => out.push_str("\\\""),
+      '\\' => out.push_str("\\\\"),
+      '\n' => out.push_str("\\n"),
+      '\r' => out.push_str("\\r"),
+      '\t' => out.push_str("\\t"),
+      '<' => out.push_str("\\u003c"),
+      '>' => out.push_str("\\u003e"),
+      '&' => out.push_str("\\u0026"),
+      c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+      c => out.push(c),
+    }
+  }
+  out
+}
+
 fn push_update(app: &tauri::AppHandle, detail_json: String) {
-    let js = format!(
-        "window.dispatchEvent(new CustomEvent('whispernet-update',{{detail:{}}}))",
-        detail_json
-    );
-    evaluate(app, js);
+  let safe = json_escape(&detail_json);
+  let js = format!(
+    "window.dispatchEvent(new CustomEvent('whispernet-update',{{detail:{}}}))",
+    safe
+  );
+  evaluate(app, js);
 }
 
 fn fetch_release(app: &tauri::AppHandle) -> Result<Release, String> {

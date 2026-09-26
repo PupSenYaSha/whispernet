@@ -17,12 +17,13 @@ Short usage: `npm start` — installs deps if needed, builds the client, then se
 - **Disappearing messages** — 24h / 7d / 30d auto-delete
 - **Media sharing** — images & videos encrypted, in-app lightbox
 - **Reactions, editing, deletion, quoted replies**
+- **Profiles & avatars** — click any avatar to open a profile: avatar, nickname, online status, registration date, safety number; own photo upload (auto-cropped, WebP)
 - **Multi-device** — up to 3 sessions (named devices, list & revoke); a 4th device is rejected
 - **Key protection** — private keys encrypted at rest (PBKDF2 600K + AES-256-GCM); encrypted key backup / restore; safety numbers
 - **Screenshot protection** toggle
-- **Moderation** — admin ban & reports, user blocking, rate limiting
+- **Moderation** — admin ban & reports (grouped by user, with profile links), user blocking, rate limiting
 - **RU / EN** localization
-- **Cross-platform** — Web (PWA), Desktop (Windows / Linux), Android
+- **Cross-platform** — Web (PWA), Desktop (Windows / Linux, Tauri v2), Android
 
 ## Security
 
