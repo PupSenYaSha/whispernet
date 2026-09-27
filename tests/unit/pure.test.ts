@@ -4,6 +4,7 @@ import { getAvatarText, getAvatarGradient, avatarUrl, formatProfileDate, transla
 import { pushEscapeLayer, topEscapeLayer, escapeStackSize, clearEscapeStack, isTypingTarget, runTopEscapeLayer, hasEscapeLayerAtLeast } from '../../src/escapeStack';
 import { resolveBackAction } from '../../src/backNavigation';
 import { newClientMessageId, isValidClientMessageId, rememberOwnMessageText, recallOwnMessageText, forgetOwnMessages } from '../../src/ownMessageCache';
+import { MediaError, mediaErrorKey } from '../../src/upload';
 
 const b64 = (seed: number, len = 32) => Buffer.from(Array.from({ length: len }, (_, i) => (i * 7 + seed * 13 + 11) % 256)).toString('base64');
 
@@ -278,5 +279,27 @@ describe('own dm message cache', () => {
     expect(recallOwnMessageText(newClientMessageId(), storage)).toBeNull();
     rememberOwnMessageText(newClientMessageId(), 'ok', storage);
     expect(recallOwnMessageText(newClientMessageId(), storage)).toBeNull();
+  });
+});
+
+describe('media error reporting', () => {
+  it('maps every reason to its own message', () => {
+    expect(mediaErrorKey(new MediaError('offline'))).toBe('upload_offline');
+    expect(mediaErrorKey(new MediaError('keys'))).toBe('upload_keys_missing');
+    expect(mediaErrorKey(new MediaError('upload'))).toBe('upload_failed');
+    expect(mediaErrorKey(new MediaError('encrypt'))).toBe('upload_encrypt_failed');
+  });
+
+  it('falls back to the upload message for anything unknown', () => {
+    expect(mediaErrorKey(new Error('boom'))).toBe('upload_failed');
+    expect(mediaErrorKey('boom')).toBe('upload_failed');
+    expect(mediaErrorKey(undefined)).toBe('upload_failed');
+  });
+
+  it('translates every media error key in both languages', () => {
+    for (const key of ['upload_offline', 'upload_keys_missing', 'upload_failed', 'upload_encrypt_failed']) {
+      expect(translations.en[key as keyof typeof translations.en]).toBeTruthy();
+      expect(translations.ru[key as keyof typeof translations.ru]).toBeTruthy();
+    }
   });
 });

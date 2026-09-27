@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import { useConnection } from '../context';
+import { mediaErrorKey } from '../upload';
 
 export function MessageInput() {
   const { state, sendMessage, sendDm, sendImage, sendDmImage, blockedUsers, unblockUser, setReply, editingTarget, setEditing, editMessage, t } = useConnection();
@@ -45,7 +46,18 @@ export function MessageInput() {
     if (ta) { ta.value = ''; ta.style.height = 'auto'; }
     setHasText(false);
     setSealedMode(false);
+    setError(null);
   };
+
+  // the composer is an uncontrolled textarea, so React reuses the same node when the channel
+  // changes: without this a half typed message would follow the user into the next chat
+  const channelRef = useRef(dmTarget || 'general');
+  useEffect(() => {
+    const next = dmTarget || 'general';
+    if (channelRef.current === next) return;
+    channelRef.current = next;
+    clearComposer();
+  }, [dmTarget]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -92,8 +104,8 @@ export function MessageInput() {
       } else {
         await sendImage(file);
       }
-    } catch {
-      setError(t('upload_failed'));
+    } catch (e) {
+      setError(t(mediaErrorKey(e)));
     }
     setUploading(false);
   };

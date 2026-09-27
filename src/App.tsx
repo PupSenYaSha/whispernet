@@ -4,7 +4,7 @@ import type { User, AppSettings, Message, Session, BannedUser, AvatarUpdate, Pro
 import { generateKeyPair, encryptMessage, decryptMessage } from './crypto';
 import { encryptPrivateKey, decryptPrivateKey, isEncryptedBundle, isKeyBackup } from './crypto-keys';
 import { encryptPassword, decryptPassword } from './device-crypto';
-import { uploadFile } from './upload';
+import { uploadFile, MediaError } from './upload';
 import { encryptFile, buildFileKeyMap, unwrapAndDecrypt, unwrapAndDecryptChannel, wrapForMedia } from './media-crypto';
 import { newClientMessageId, rememberOwnMessageText, recallOwnMessageText } from './ownMessageCache';
 import { ConnectionContext, useConnection, type ConnectionState, type ConnectionAction, type ReplyTarget, type AdminReport } from './context';
@@ -1144,14 +1144,37 @@ useEffect(() => { stateRef.current = state; }, [state]);
   
   
   
+  const keyWaitersRef = useRef<Record<string, Promise<JsonWebKey | null>>>({});
+
+  /** The recipient key can be missing right after a reconnect; ask for it once and wait briefly. */
+  const requestRecipientKey = useCallback((to: string): Promise<JsonWebKey | null> => {
+    const pending = keyWaitersRef.current[to];
+    if (pending) return pending;
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.resolve(null);
+    const wait = (async () => {
+      ws.send(JSON.stringify({ type: 'dm_history', payload: { with: to } }));
+      const deadline = Date.now() + 3000;
+      while (Date.now() < deadline) {
+        const key = publicKeysRef.current[to];
+        if (key) return key;
+        await new Promise((r) => setTimeout(r, 150));
+      }
+      return null;
+    })().finally(() => { delete keyWaitersRef.current[to]; });
+    keyWaitersRef.current[to] = wait;
+    return wait;
+  }, []);
+
   const sendDmPackage = useCallback(async (
     to: string,
     options: { text: string; fileKey?: Record<string, string>; sealed?: boolean; quoted?: ReplyTarget }
   ) => {
     const ws = wsRef.current;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    const recipientKey = publicKeysRef.current[to];
-    if (!privateKeyRef.current || !recipientKey) { console.error('Encryption keys not available'); return; }
+    if (!ws || ws.readyState !== WebSocket.OPEN) throw new MediaError('offline');
+    let recipientKey: JsonWebKey | undefined = publicKeysRef.current[to];
+    if (!recipientKey) recipientKey = (await requestRecipientKey(to)) ?? undefined;
+    if (!privateKeyRef.current || !recipientKey) throw new MediaError('keys');
     const content = options.text.trim();
     if (!content && !options.fileKey) return;
     const clientId = newClientMessageId();
@@ -1160,7 +1183,12 @@ useEffect(() => { stateRef.current = state; }, [state]);
     if (options.sealed) payload.sealed = true;
     if (options.quoted) payload.quoted = { id: options.quoted.id, text: options.quoted.text, sender: options.quoted.senderNickname };
     if (signalInitializedRef.current && hasSession(userIdRef.current || '', to)) {
-      payload.signalEncrypted = await encryptWithSignal(getSessionId(userIdRef.current || '', to), content);
+      try {
+        payload.signalEncrypted = await encryptWithSignal(getSessionId(userIdRef.current || '', to), content);
+      } catch {
+        healSignalSession(to);
+        throw new MediaError('encrypt');
+      }
     } else {
       payload.encrypted = await encryptMessage(content, buildEncryptKeys({ [to]: recipientKey }));
     }
@@ -1168,7 +1196,7 @@ useEffect(() => { stateRef.current = state; }, [state]);
     ws.send(JSON.stringify({ type: 'dm_send', payload }));
     // the ratchet only travels one way, so keep the plaintext to render our own message later
     rememberOwnMessageText(clientId, content);
-  }, [buildEncryptKeys, ttlSeconds]);
+  }, [buildEncryptKeys, ttlSeconds, requestRecipientKey, healSignalSession]);
 
   const sendDm = useCallback(async (to: string, text: string, sealed: boolean = false, quoted?: ReplyTarget) => {
     if (!text.trim()) return;
@@ -1198,18 +1226,38 @@ useEffect(() => { stateRef.current = state; }, [state]);
   }, []);
 
   const sendImage = useCallback(async (file: File) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new MediaError('offline');
     const tag = file.type.startsWith('video/') ? 'video' : 'image';
-    const url = await uploadFile(file, file.name || 'media.png');
+    let url: string;
+    try {
+      url = await uploadFile(file, file.name || 'media.png');
+    } catch (e) {
+      if (e instanceof MediaError) throw e;
+      throw new MediaError('upload');
+    }
     wsRef.current.send(JSON.stringify({ type: 'chat_message', payload: { text: `[${tag}]${url}[/${tag}]`, ttl: ttlSeconds() } }));
   }, [ttlSeconds]);
 
   const sendDmImage = useCallback(async (to: string, file: File) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
-    if (!publicKeysRef.current[to] || !privateKeyRef.current) throw new Error('no keys');
-    const { text, fileKey } = await prepareEncryptedMedia(file, [to]);
-    await sendDmPackage(to, { text, fileKey });
-  }, [prepareEncryptedMedia, sendDmPackage]);
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new MediaError('offline');
+    if (!publicKeysRef.current[to] || !privateKeyRef.current) throw new MediaError('keys');
+    let text: string;
+    let fileKey: Record<string, string> | undefined;
+    try {
+      ({ text, fileKey } = await prepareEncryptedMedia(file, [to]));
+    } catch {
+      throw new MediaError('upload');
+    }
+    try {
+      await sendDmPackage(to, { text, fileKey });
+    } catch (e) {
+      if (e instanceof MediaError) throw e;
+      // a ratchet that stopped matching means the session is stale, for example after the other
+      // side reinstalled the app: reset it once and let the handshake run again
+      healSignalSession(to);
+      throw new MediaError('encrypt');
+    }
+  }, [prepareEncryptedMedia, sendDmPackage, healSignalSession]);
 
   useEffect(() => {
     const saved = localStorage.getItem('wn_auth');
