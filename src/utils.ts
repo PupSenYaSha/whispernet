@@ -106,11 +106,11 @@ export function formatTime(timestamp: number): string {
 }
 
 export function getAvatarText(nickname: string): string {
-  const words = nickname.split(/[_\-\s]+/).filter(Boolean);
+  const words = (nickname || '').split(/[_\-\s]+/).filter(Boolean);
   if (words.length >= 2) {
     return (words[0][0] + words[1][0]).toUpperCase();
   }
-  return nickname.charAt(0).toUpperCase();
+  return (words[0]?.charAt(0) || '?').toUpperCase();
 }
 
 const AVATAR_GRADIENTS = [

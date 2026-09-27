@@ -34,5 +34,8 @@ jobs:
       - name: Build client
         run: npm run build:client
 
+      - name: Tests
+        run: npm test
+
       - name: Audit dependencies
         run: npm audit --audit-level=high

@@ -1,20 +1,13 @@
 import { useEffect, useRef } from 'react';
+import { pushEscapeLayer, topEscapeLayer, isTypingTarget } from './escapeStack';
 
-type Entry = { layer: number; order: number; handleWhileTyping: boolean; run: () => void };
-
-const stack: Entry[] = [];
-let seq = 0;
 let bound = false;
 
 function onKeyDown(e: KeyboardEvent): void {
-  if (e.key !== 'Escape' || stack.length === 0) return;
-  const target = e.target as HTMLElement | null;
-  const typing = !!target && (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable);
-  let top = stack[0];
-  for (const entry of stack) {
-    if (entry.layer >= top.layer) top = entry;
-  }
-  if (typing && !top.handleWhileTyping) return;
+  if (e.key !== 'Escape') return;
+  const top = topEscapeLayer();
+  if (!top) return;
+  if (isTypingTarget(e.target) && !top.handleWhileTyping) return;
   e.preventDefault();
   e.stopPropagation();
   top.run();
@@ -36,11 +29,6 @@ export function useEscapeKey(onEscape: () => void, active = true, layer = 0, han
   useEffect(() => {
     if (!active) return;
     ensureBound();
-    const entry: Entry = { layer, order: seq++, handleWhileTyping, run: () => ref.current() };
-    stack.push(entry);
-    return () => {
-      const i = stack.indexOf(entry);
-      if (i !== -1) stack.splice(i, 1);
-    };
+    return pushEscapeLayer({ layer, handleWhileTyping, run: () => ref.current() });
   }, [active, layer, handleWhileTyping]);
 }
