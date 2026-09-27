@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { generateX3dhSafetyNumber } from '../../src/crypto';
 import { getAvatarText, getAvatarGradient, avatarUrl, formatProfileDate, translations } from '../../src/utils';
-import { pushEscapeLayer, topEscapeLayer, escapeStackSize, clearEscapeStack, isTypingTarget } from '../../src/escapeStack';
+import { pushEscapeLayer, topEscapeLayer, escapeStackSize, clearEscapeStack, isTypingTarget, runTopEscapeLayer } from '../../src/escapeStack';
 
 const b64 = (seed: number, len = 32) => Buffer.from(Array.from({ length: len }, (_, i) => (i * 7 + seed * 13 + 11) % 256)).toString('base64');
 
@@ -129,5 +129,40 @@ describe('escape layer stack', () => {
     expect(isTypingTarget({ tagName: 'TEXTAREA' } as unknown as EventTarget)).toBe(true);
     expect(isTypingTarget({ tagName: 'DIV' } as unknown as EventTarget)).toBe(false);
     expect(isTypingTarget(null)).toBe(false);
+  });
+
+  it('runTopEscapeLayer runs the topmost layer at or above the minimum', () => {
+    clearEscapeStack();
+    const calls: string[] = [];
+    const offBase = pushEscapeLayer({ layer: 30, handleWhileTyping: true, run: () => calls.push('base') });
+    const offModal = pushEscapeLayer({ layer: 86, handleWhileTyping: true, run: () => calls.push('profile') });
+    const offReport = pushEscapeLayer({ layer: 91, handleWhileTyping: true, run: () => calls.push('report') });
+
+    // the report modal is on top, so the back gesture closes it
+    expect(runTopEscapeLayer(40)).toBe(true);
+    expect(calls).toEqual(['report']);
+    offReport();
+
+    // then the profile underneath
+    expect(runTopEscapeLayer(40)).toBe(true);
+    expect(calls).toEqual(['report', 'profile']);
+    offModal();
+
+    // only the base layer is left and it is below the minimum: the back gesture
+    // has to fall through to navigation instead of closing it
+    expect(runTopEscapeLayer(40)).toBe(false);
+    expect(calls).toEqual(['report', 'profile']);
+
+    // with no minimum it still runs the base layer
+    expect(runTopEscapeLayer()).toBe(true);
+    expect(calls).toEqual(['report', 'profile', 'base']);
+    offBase();
+    expect(runTopEscapeLayer(0)).toBe(false);
+  });
+
+  it('runTopEscapeLayer reports false on an empty stack', () => {
+    clearEscapeStack();
+    expect(runTopEscapeLayer(40)).toBe(false);
+    expect(runTopEscapeLayer()).toBe(false);
   });
 });

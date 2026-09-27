@@ -38,6 +38,7 @@ import { ProfileModal } from './components/ProfileModal';
 import { ReportModal } from './components/ReportModal';
 import { Avatar } from './components/Avatar';
 import { useEscapeKey } from './useEscapeKey';
+import { runTopEscapeLayer } from './escapeStack';
 
 const WS_URL = import.meta.env.VITE_WS_URL || (() => {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1414,22 +1415,30 @@ function AppInner() {
   mobileChatOpenRef.current = mobileChatOpen;
   const mobileTabRef = useRef(mobileTab);
   mobileTabRef.current = mobileTab;
-
+  const openGeneralRef = useRef(openGeneral);
+  openGeneralRef.current = openGeneral;
+  const inDmRef = useRef(state.activeChannel !== 'general');
+  inDmRef.current = state.activeChannel !== 'general';
   useEffect(() => {
     if (typeof window === 'undefined' || !window.Capacitor?.Plugins?.App?.addListener) return;
     const handleBackButton = () => {
       if (document.activeElement instanceof HTMLTextAreaElement || document.activeElement instanceof HTMLInputElement) { (document.activeElement as HTMLElement).blur(); return; }
-      if (mobileChatOpenRef.current) { setMobileChatOpen(false); return; }
-      if (mobileTabRef.current === 'settings') { setMobileTab('home'); return; }
+      // 1) верхнее модальное окно: профиль, репорт, safety number, подтверждения, lightbox
+      if (runTopEscapeLayer(40)) return;
+      // 2) открытый чат на мобильном -> список чатов
+      if (mobileChatOpenRef.current) { setMobileChatOpen(false); setSearchQuery(''); return; }
+      // 3) настройки -> главный экран
+      if (mobileTabRef.current === 'settings') { setMobileTab('home'); setSearchQuery(''); return; }
+      // 4) открыт диалог с собеседником -> общий чат
+      if (inDmRef.current) { openGeneralRef.current(); return; }
+      // 5) главный экран -> выход из приложения
       try { window.Capacitor?.Plugins?.App?.exitApp?.(); } catch {}
     };
     let backHandler: any = null;
     window.Capacitor.Plugins.App.addListener('backButton', handleBackButton).then((h: any) => { backHandler = h; });
-    return () => { try { backHandler?.remove?.(); } catch {} };
+    return () => { try { backHandler?.remove(); } catch {} };
   }, []);
 
-  
-  
   const pushView = useCallback((kind: 'chat' | 'settings') => {
     try { window.history.pushState({ wn: kind }, ''); } catch {}
   }, []);
@@ -1440,8 +1449,10 @@ function AppInner() {
 
   useEffect(() => {
     const onBackNav = () => {
+      if (runTopEscapeLayer(40)) return;
       if (mobileChatOpenRef.current) { setMobileChatOpen(false); setSearchQuery(''); return; }
-      if (mobileTabRef.current === 'settings') { setMobileTab('home'); setSearchQuery(''); }
+      if (mobileTabRef.current === 'settings') { setMobileTab('home'); setSearchQuery(''); return; }
+      if (inDmRef.current) { openGeneralRef.current(); return; }
     };
     window.addEventListener('popstate', onBackNav);
     return () => window.removeEventListener('popstate', onBackNav);
@@ -1545,24 +1556,20 @@ function AppInner() {
                         {mobileContacts.map(contact => {
                           const userOnline = state.users.some(u => u.id === contact.id);
                           return (
-                            <div key={contact.id} role="button" tabIndex={0}
+                            <button key={contact.id}
                               onClick={() => { openDm(contact.id, contact.nickname); setMobileChatOpen(true); pushView('chat'); }}
-                              onKeyDown={(e) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.stopPropagation(); if (true) { e.preventDefault(); openDm(contact.id, contact.nickname); setMobileChatOpen(true); pushView('chat'); } }}
-                              className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all cursor-pointer hover:bg-bg-tertiary text-fg-primary">
-                              <button onKeyDown={(e) => { e.stopPropagation(); }}
-                          onClick={(e) => { e.stopPropagation(); openProfile(contact.id); }}
-                                className="relative flex-shrink-0 p-0 border-0 bg-transparent rounded-2xl appearance-none"
-                                aria-label={t('profile')}>
+                              className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left cursor-pointer hover:bg-bg-tertiary text-fg-primary">
+                              <div className="relative flex-shrink-0">
                                 <Avatar userId={contact.id} nickname={contact.nickname} avatar={state.avatars[contact.id]} className="w-12 h-12 rounded-2xl" textClassName="text-[13px]" />
                                 {userOnline && (
                                   <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-status-success border-[2.5px] border-bg-secondary" />
                                 )}
-                              </button>
+                              </div>
                               <div className="min-w-0 flex-1">
                                 <span className="text-[15px] font-semibold block truncate">@{contact.nickname}</span>
                                 <span className="text-[12px] text-fg-muted mt-0.5 block">{formatTime(contact.lastMessage)}</span>
                               </div>
-                            </div>
+                            </button>
                           );
                         })}
                       </div>
@@ -1576,26 +1583,22 @@ function AppInner() {
                       <span className="text-[11px] font-semibold text-fg-muted uppercase tracking-wider">{t('search_results')}</span>
                     </div>
                     {state.searchResults.map(user => (
-                      <div key={user.id} role="button" tabIndex={0}
+                      <button key={user.id}
                         onClick={() => { openDm(user.id, user.nickname); setMobileChatOpen(true); setSearchQuery(''); pushView('chat'); }}
-                        onKeyDown={(e) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.stopPropagation(); if (true) { e.preventDefault(); openDm(user.id, user.nickname); setMobileChatOpen(true); setSearchQuery(''); pushView('chat'); } }}
-                        className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all cursor-pointer hover:bg-bg-tertiary text-fg-primary">
-                        <button onKeyDown={(e) => { e.stopPropagation(); }}
-                          onClick={(e) => { e.stopPropagation(); openProfile(user.id); }}
-                          className="relative flex-shrink-0 p-0 border-0 bg-transparent rounded-2xl appearance-none"
-                          aria-label={t('profile')}>
+                        className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left cursor-pointer hover:bg-bg-tertiary text-fg-primary">
+                        <div className="relative flex-shrink-0">
                           <Avatar userId={user.id} nickname={user.nickname} avatar={state.avatars[user.id]} className="w-12 h-12 rounded-2xl" textClassName="text-[13px]" />
                           {user.online && (
                             <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-status-success border-[2.5px] border-bg-secondary" />
                           )}
-                        </button>
+                        </div>
                         <div>
                           <span className="text-[15px] font-semibold">@{user.nickname}</span>
                           <span className={cn('block text-[12px] mt-0.5', user.online ? 'text-status-success' : 'text-fg-muted')}>
                             {user.online ? t('online') : t('offline')}
                           </span>
                         </div>
-                      </div>
+                      </button>
                     ))}
                   </div>
                 )}

@@ -65,28 +65,24 @@ export function ContactsPanel({ onSelect }: { onSelect: () => void }) {
             </div>
             <div className="p-2 space-y-0.5">
               {state.searchResults.map(user => (
-                <div
-                  key={user.id} role="button" tabIndex={0}
+                <button
+                  key={user.id}
                   onClick={() => { openDm(user.id, user.nickname); setQuery(''); onSelect(); }}
-                  onKeyDown={(e) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.stopPropagation(); if (true) { e.preventDefault(); openDm(user.id, user.nickname); setQuery(''); onSelect(); } }}
-                  className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all cursor-pointer hover:bg-bg-tertiary text-fg-primary"
+                  className="w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left cursor-pointer hover:bg-bg-tertiary text-fg-primary"
                 >
-                  <button onKeyDown={(e) => { e.stopPropagation(); }}
-                          onClick={(e) => { e.stopPropagation(); openProfile(user.id); }}
-                    className="relative flex-shrink-0 p-0 border-0 bg-transparent rounded-2xl appearance-none"
-                    aria-label={t('profile')}>
+                  <div className="relative flex-shrink-0">
                     <Avatar userId={user.id} nickname={user.nickname} avatar={state.avatars[user.id]} className="w-12 h-12 rounded-2xl" textClassName="text-[13px]" />
                     {user.online && (
                       <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-status-success border-[2.5px] border-bg-secondary" />
                     )}
-                  </button>
+                  </div>
                   <div>
                     <span className="text-[15px] font-semibold">@{user.nickname}</span>
                     <span className={cn('block text-[12px] mt-0.5', user.online ? 'text-status-success' : 'text-fg-muted')}>
                       {user.online ? t('online') : t('offline')}
                     </span>
                   </div>
-                </div>
+                </button>
               ))}
             </div>
           </>
@@ -109,29 +105,25 @@ export function ContactsPanel({ onSelect }: { onSelect: () => void }) {
                   const isActive = state.activeChannel === contact.id;
                   const userOnline = state.users.some(u => u.id === contact.id);
                   return (
-                    <div
-                      key={contact.id} role="button" tabIndex={0}
+                    <button
+                      key={contact.id}
                       onClick={() => { openDm(contact.id, contact.nickname); onSelect(); }}
-                      onKeyDown={(e) => { if (e.key !== 'Enter' && e.key !== ' ') return; e.stopPropagation(); if (true) { e.preventDefault(); openDm(contact.id, contact.nickname); onSelect(); } }}
                       className={cn(
-                        'w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all cursor-pointer',
+                        'w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left cursor-pointer',
                         isActive ? 'bg-accent-primary/10 text-accent-primary' : 'hover:bg-bg-tertiary text-fg-primary'
                       )}
                     >
-                      <button onKeyDown={(e) => { e.stopPropagation(); }}
-                          onClick={(e) => { e.stopPropagation(); openProfile(contact.id); }}
-                        className="relative flex-shrink-0 p-0 border-0 bg-transparent rounded-2xl appearance-none"
-                        aria-label={t('profile')}>
+                      <div className="relative flex-shrink-0">
                         <Avatar userId={contact.id} nickname={contact.nickname} avatar={state.avatars[contact.id]} className="w-12 h-12 rounded-2xl" textClassName="text-[13px]" />
                         {userOnline && (
                           <div className="absolute -bottom-0.5 -right-0.5 w-3 h-3 rounded-full bg-status-success border-[2.5px] border-bg-secondary" />
                         )}
-                      </button>
+                      </div>
                       <div className="min-w-0 flex-1">
                         <span className="text-[15px] font-semibold block truncate">@{contact.nickname}</span>
                         <span className="text-[12px] text-fg-muted mt-0.5 block">{formatTime(contact.lastMessage)}</span>
                       </div>
-                    </div>
+                    </button>
                   );
                 })}
               </div>

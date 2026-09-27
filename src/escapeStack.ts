@@ -29,6 +29,18 @@ export function escapeStackSize(): number {
   return stack.length;
 }
 
+/** Выполняет обработчик самого верхнего слоя с layer >= minLayer. Возвращает true, если слой был. */
+export function runTopEscapeLayer(minLayer = 0): boolean {
+  const candidates = stack.filter((e) => e.layer >= minLayer);
+  if (candidates.length === 0) return false;
+  let top = candidates[0];
+  for (const entry of candidates) {
+    if (entry.layer >= top.layer) top = entry;
+  }
+  top.run();
+  return true;
+}
+
 export function clearEscapeStack(): void {
   stack.length = 0;
 }
