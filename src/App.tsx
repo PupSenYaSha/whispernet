@@ -1339,7 +1339,7 @@ function PasswordModalInline({ title, cancelLabel, onConfirm, onCancel }: { titl
   useEscapeKey(onCancel, true, 61);
   return (
     <div className="fixed inset-0 z-[61] flex items-center justify-center p-4" onClick={onCancel}>
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
+      <div className="absolute inset-0 bg-black/60" />
         <div className="relative bg-bg-secondary border border-border-default rounded-2xl shadow-2xl max-w-sm w-full p-6"
           onClick={(e) => e.stopPropagation()}>
           <div className="w-14 h-14 rounded-2xl bg-accent-primary/15 flex items-center justify-center mx-auto mb-5">
@@ -1367,6 +1367,14 @@ function AppInner() {
   const [mobileTab, setMobileTab] = useState<'home' | 'settings'>('home');
   const [mobileChatOpen, setMobileChatOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+
+  const inDm = state.activeChannel !== 'general';
+  useEscapeKey(() => {
+    if (inDm) {
+      openGeneral();
+      if (isMobile) setMobileChatOpen(false);
+    }
+  }, inDm, 30, false);
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {

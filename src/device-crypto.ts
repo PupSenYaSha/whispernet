@@ -41,8 +41,45 @@ async function getDeviceFingerprint(): Promise<string> {
   } catch {}
   try {
     parts.push(screen.pixelDepth.toString());
-    parts.push(String(navigator.hardwareConcurrency || 0));
-    parts.push(String(navigator.language || ''));
+  } catch {}
+  const raw = parts.join('|||');
+  const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw));
+  return bufToBase64(hash);
+}
+
+/** Старый вариант отпечатка (до правки): в конце учитывал размеры окна. */
+async function getLegacyDeviceFingerprint(): Promise<string> {
+  const parts: string[] = [];
+  parts.push(navigator.userAgent);
+  parts.push(screen.colorDepth.toString());
+  parts.push(`${screen.width}x${screen.height}`);
+  parts.push(Intl.DateTimeFormat().resolvedOptions().timeZone);
+  parts.push(navigator.language);
+  parts.push(navigator.hardwareConcurrency?.toString() || '0');
+  parts.push((navigator as any).deviceMemory?.toString() || '0');
+  parts.push(navigator.platform);
+  parts.push(navigator.maxTouchPoints?.toString() || '0');
+  try {
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    if (ctx) {
+      ctx.textBaseline = 'top';
+      ctx.font = '14px Arial';
+      ctx.fillText('wn', 2, 2);
+      parts.push(canvas.toDataURL().slice(0, 100));
+    }
+  } catch {}
+  try {
+    const gl = document.createElement('canvas').getContext('webgl');
+    if (gl) {
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      if (dbg) parts.push(gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL));
+    }
+  } catch {}
+  try {
+    parts.push(window.outerWidth.toString());
+    parts.push(window.outerHeight.toString());
+    parts.push(screen.pixelDepth.toString());
   } catch {}
   const raw = parts.join('|||');
   const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw));
@@ -79,12 +116,17 @@ export async function decryptPassword(encrypted: string): Promise<string | null>
   try {
     const { v, salt, iv, data } = JSON.parse(encrypted);
     if (v !== 1) return null;
-    const fingerprint = await getDeviceFingerprint();
-    const key = await deriveDeviceKey(fingerprint, new Uint8Array(base64ToBuf(salt)));
-    const plaintext = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: new Uint8Array(base64ToBuf(iv)) }, key, base64ToBuf(data)
-    );
-    return new TextDecoder().decode(plaintext);
+    const saltBytes = new Uint8Array(base64ToBuf(salt));
+    const ivBytes = new Uint8Array(base64ToBuf(iv));
+    const dataBytes = base64ToBuf(data);
+    for (const getFp of [getDeviceFingerprint, getLegacyDeviceFingerprint]) {
+      try {
+        const key = await deriveDeviceKey(await getFp(), saltBytes);
+        const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: ivBytes }, key, dataBytes);
+        return new TextDecoder().decode(plaintext);
+      } catch {}
+    }
+    return null;
   } catch {
     return null;
   }

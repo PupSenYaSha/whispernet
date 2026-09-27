@@ -1,4 +1,4 @@
-﻿import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import type { AccentColor } from '../types';
 import { useConnection } from '../context';
 import { cn } from '../utils';
@@ -86,7 +86,7 @@ function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, onCon
   useEscapeKey(onCancel, true, 61);
   return (
     <div className="fixed inset-0 z-[61] flex items-center justify-center p-4" onClick={onCancel}>
-      <div className="absolute inset-0 bg-black/50 backdrop-blur-sm" />
+      <div className="absolute inset-0 bg-black/60" />
         <div className="relative bg-bg-secondary border border-border-default rounded-2xl shadow-2xl max-w-sm w-full p-6" style={{ animation: 'scaleIn 0.2s cubic-bezier(0.22, 1, 0.36, 1)' }}
           onClick={(e) => e.stopPropagation()}>
           <div className={cn('w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-5',
@@ -265,12 +265,12 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 min-w-0">
                     <span className={cn('w-2 h-2 rounded-full flex-shrink-0', s.online === false ? 'bg-fg-muted/50' : 'bg-status-success')} />
-                    <span className="text-[13px] text-fg-primary truncate">{s.name || `вЂ¦${s.id.slice(-6)}`}</span>
+                    <span className="text-[13px] text-fg-primary truncate">{s.name || `…${s.id.slice(-6)}`}</span>
                     {s.current && (
                       <span className="flex-shrink-0 px-2 py-0.5 rounded-full bg-accent-primary/15 text-accent-primary text-[10px] font-bold">{t('current_session')}</span>
                     )}
                   </div>
-                  <span className="text-[11px] text-fg-muted block mt-0.5">{new Date(s.lastActive).toLocaleString()}{s.online === false ? ` В· ${t('offline')}` : ''}</span>
+                  <span className="text-[11px] text-fg-muted block mt-0.5">{new Date(s.lastActive).toLocaleString()}{s.online === false ? ` · ${t('offline')}` : ''}</span>
                 </div>
                 {!s.current && (
                   <button onClick={() => revoke(s.id)}
@@ -290,7 +290,7 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
             {adminError && (
               <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-status-error/10 border border-status-error/30 text-status-error text-[12px]">
                 <span className="min-w-0 leading-relaxed">{adminError}</span>
-                <button onClick={dismissAdminError} className="flex-shrink-0 text-status-error/70 hover:text-status-error text-[16px] leading-none px-1" aria-label="Dismiss">вњ•</button>
+                <button onClick={dismissAdminError} className="flex-shrink-0 text-status-error/70 hover:text-status-error text-[16px] leading-none px-1" aria-label="Dismiss">✕</button>
               </div>
             )}
 
@@ -376,7 +376,7 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
                         </button>
                         {g.count > 1 && (
                           <span className="ml-auto flex-shrink-0 px-2 py-0.5 rounded-full bg-status-error/15 text-status-error text-[10.5px] font-bold">
-                            Г—{g.count}
+                            ×{g.count}
                           </span>
                         )}
                       </div>
