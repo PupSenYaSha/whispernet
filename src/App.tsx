@@ -4,7 +4,7 @@ import type { User, AppSettings, Message, Session, BannedUser, AvatarUpdate, Pro
 import { generateKeyPair, encryptMessage, decryptMessage } from './crypto';
 import { encryptPrivateKey, decryptPrivateKey, isEncryptedBundle, isKeyBackup } from './crypto-keys';
 import { encryptPassword, decryptPassword } from './device-crypto';
-import { uploadFile, MediaError } from './upload';
+import { uploadFile, MediaError, setUploadToken } from './upload';
 import { encryptFile, buildFileKeyMap, unwrapAndDecrypt, unwrapAndDecryptChannel, wrapForMedia } from './media-crypto';
 import { newClientMessageId, rememberOwnMessageText, recallOwnMessageText } from './ownMessageCache';
 import { ConnectionContext, useConnection, type ConnectionState, type ConnectionAction, type ReplyTarget, type AdminReport } from './context';
@@ -88,6 +88,8 @@ const initialState: ConnectionState = {
   contacts: [],
   dmNames: {},
   dmMessages: {},
+  generalHistory: { hasMore: true, oldest: null },
+  dmHistory: {},
   searchResults: [],
   messageSearchResults: [],
   replyTo: null,
@@ -157,10 +159,18 @@ function connectionReducer(state: ConnectionState, action: ConnectionAction): Co
       return { ...state, messages: [...state.messages, action.message] };
     case 'SET_MESSAGES':
       return { ...state, messages: action.messages };
+    case 'PREPEND_MESSAGES':
+      return { ...state, messages: [...action.messages, ...state.messages] };
+    case 'SET_HISTORY_STATE':
+      return { ...state, generalHistory: { hasMore: action.hasMore, oldest: action.oldest } };
     case 'CLEAR_GENERAL':
-      return { ...state, messages: [] };
+      return { ...state, messages: [], generalHistory: { hasMore: true, oldest: null } };
     case 'SET_DM_MESSAGES':
       return { ...state, dmMessages: { ...state.dmMessages, [action.channel]: action.messages } };
+    case 'PREPEND_DM_MESSAGES':
+      return { ...state, dmMessages: { ...state.dmMessages, [action.channel]: [...action.messages, ...(state.dmMessages[action.channel] || [])] } };
+    case 'SET_DM_HISTORY_STATE':
+      return { ...state, dmHistory: { ...state.dmHistory, [action.channel]: { hasMore: action.hasMore, oldest: action.oldest } } };
     case 'ADD_DM_MESSAGE':
       return { ...state, dmMessages: { ...state.dmMessages, [action.channel]: [...(state.dmMessages[action.channel] || []), action.message] } };
     case 'SET_USERS':
@@ -264,6 +274,8 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   const credentialsRef = useRef<{ nickname: string; password: string; isRegister: boolean } | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const userIdRef = useRef<string | null>(null);
+const uploadTokenRef = useRef<string>('');
+try { uploadTokenRef.current = localStorage.getItem('wn_upload_token') || ''; } catch { uploadTokenRef.current = ''; }
   const privateKeyRef = useRef<JsonWebKey | null>(null);
   const publicKeyRef = useRef<JsonWebKey | null>(null);
   const publicKeysRef = useRef<Record<string, JsonWebKey>>({});
@@ -660,6 +672,11 @@ useEffect(() => { stateRef.current = state; }, [state]);
           switch (message.type) {
             case 'auth_success':
               if (message.payload.deviceId) localStorage.setItem('wn_device_id', message.payload.deviceId);
+    if (message.payload.uploadToken) {
+      uploadTokenRef.current = message.payload.uploadToken;
+      setUploadToken(message.payload.uploadToken);
+      try { localStorage.setItem('wn_upload_token', message.payload.uploadToken); } catch { /* private mode */ }
+    }
               setIsAdmin(message.payload.role === 'admin');
               dispatch({ type: 'SET_USER', userId: message.payload.userId, nickname: message.payload.nickname });
               dispatch({ type: 'SET_STATUS', status: 'connected' });
@@ -738,7 +755,15 @@ useEffect(() => { stateRef.current = state; }, [state]);
             case 'chat_history':
               dispatch({ type: 'SET_MESSAGES', messages: message.payload.messages.map((m: any) => ({ id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text: m.text || '', timestamp: m.timestamp, isOwn: m.isOwn, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined, reactions: normalizeReactions(m.reactions) })) });
               dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromMessages(message.payload.messages) });
+              dispatch({ type: 'SET_HISTORY_STATE', hasMore: message.payload.hasMore !== false, oldest: message.payload.messages.length ? message.payload.messages[0].timestamp : null });
               break;
+            case 'chat_history_page': {
+              const older = message.payload.messages.map((m: any) => ({ id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text: m.text || '', timestamp: m.timestamp, isOwn: m.isOwn, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined, reactions: normalizeReactions(m.reactions) }));
+              dispatch({ type: 'PREPEND_MESSAGES', messages: older });
+              dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromMessages(message.payload.messages) });
+              dispatch({ type: 'SET_HISTORY_STATE', hasMore: message.payload.hasMore !== false, oldest: older.length ? older[0].timestamp : null });
+              break;
+            }
             case 'dm_history': {
               mergePublicKeys(message.payload.publicKeys);
               const ch = message.payload.channel;
@@ -764,10 +789,40 @@ useEffect(() => { stateRef.current = state; }, [state]);
                 if (m.isOwn && text === '[encrypted]') text = recallOwnMessageText(m.clientId) || text;
                 return { id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text, timestamp: m.timestamp, isOwn: m.senderId === userIdRef.current, channel: otherId, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined, reactions: normalizeReactions(m.reactions) };
               }));
-              dispatch({ type: 'SET_DM_MESSAGES', channel: otherId, messages: msgs });
-              dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromMessages(message.payload.messages) });
-              break;
-            }
+               dispatch({ type: 'SET_DM_MESSAGES', channel: otherId, messages: msgs });
+               dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromMessages(message.payload.messages) });
+               dispatch({ type: 'SET_DM_HISTORY_STATE', channel: otherId, hasMore: message.payload.hasMore !== false, oldest: msgs.length ? msgs[0].timestamp : null });
+               break;
+             }
+             case 'dm_history_page': {
+               const ch = message.payload.channel;
+               const parts = ch.split(':');
+               const otherId = parts[0] === userIdRef.current ? parts[1] : parts[0];
+               const older = await Promise.all(message.payload.messages.map(async (m: any) => {
+                 let text = m.text || '';
+                 if (m.signalEncrypted && signalInitializedRef.current && userIdRef.current) {
+                   try {
+                     if (m.x3dhMessage && m.ratchetPublicKey && !hasSession(userIdRef.current, otherId)) {
+                       createResponderSession(userIdRef.current, otherId, m.x3dhMessage, new Uint8Array(m.ratchetPublicKey));
+                     }
+                     const sessionId = getSessionId(userIdRef.current, otherId);
+                     const { ciphertext, ratchetPublicKey, messageNumber } = m.signalEncrypted;
+                     text = await decryptWithSignal(sessionId, ciphertext, ratchetPublicKey, messageNumber);
+                   } catch {
+                     if (m.isOwn) text = recallOwnMessageText(m.clientId) || '[encrypted]';
+                     else text = '[encrypted]';
+                   }
+                 } else if (m.encrypted && privateKeyRef.current && userIdRef.current) {
+                   try { text = await decryptMessage(m.encrypted, userIdRef.current, privateKeyRef.current); } catch { if (!text) text = '[encrypted]'; }
+                 }
+                 if (m.isOwn && text === '[encrypted]') text = recallOwnMessageText(m.clientId) || text;
+                 return { id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text, timestamp: m.timestamp, isOwn: m.senderId === userIdRef.current, channel: otherId, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined, reactions: normalizeReactions(m.reactions) };
+               }));
+               dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
+               dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromMessages(message.payload.messages) });
+               dispatch({ type: 'SET_DM_HISTORY_STATE', channel: otherId, hasMore: message.payload.hasMore !== false, oldest: older.length ? older[0].timestamp : null });
+               break;
+             }
             case 'dm_message': {
               let msgText = message.payload.text || '';
               const ch = message.payload.channel || '';
@@ -1124,6 +1179,23 @@ useEffect(() => { stateRef.current = state; }, [state]);
     }
   }, []);
 
+  /** Asks the server for the page of messages older than the oldest one we hold. */
+  const loadOlderMessages = useCallback(async (channel: string | null, before: number | null) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (channel) {
+      const existing = stateRef.current.dmMessages[channel] || [];
+      const oldest = before ?? (existing.length ? existing[0].timestamp : null);
+      if (!oldest) return;
+      ws.send(JSON.stringify({ type: 'dm_history', payload: { with: channel, before: oldest, limit: 50 } }));
+      return;
+    }
+    const existing = stateRef.current.messages;
+    const oldest = before ?? (existing.length ? existing[0].timestamp : null);
+    if (!oldest) return;
+    ws.send(JSON.stringify({ type: 'chat_history', payload: { before: oldest, limit: 50 } }));
+  }, []);
+
   const sendMessage = useCallback(async (text: string, quoted?: ReplyTarget) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN || !text.trim()) return;
     const payload: any = { text: text.trim(), ttl: ttlSeconds() };
@@ -1336,7 +1408,7 @@ useEffect(() => { stateRef.current = state; }, [state]);
           (reply) => dispatch({ type: 'SET_REPLY', reply }),
         editingTarget, setEditing: setEditingTarget,
         isAdmin, reports, adminReports, adminBan, adminUnban,
-        t, updateSettings, getMyPublicKey, getPublicKey, decryptMedia,
+        t, updateSettings, getMyPublicKey, getPublicKey, decryptMedia, loadOlderMessages,
         getMyIdentityKeyB64, getPeerIdentityKeyB64, identityWarning, dismissIdentityWarning,
         sessions, requestSessions, revokeSession,
         bannedUsers, adminGetBanned, adminError, dismissAdminError,

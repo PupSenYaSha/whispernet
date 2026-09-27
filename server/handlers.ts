@@ -1,4 +1,5 @@
 import { WebSocket } from 'ws';
+import { issueUploadToken } from './uploadTokens.js';
 import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, getIdentityKeyB64, setUserAvatar, removeUserAvatar, getAvatarDir, getDataDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, type StoredSession, getChannelMediaKey } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
@@ -9,9 +10,11 @@ import { nextMondayMidnightMSK } from './time.js';
 import {
   RATE_LIMIT_WINDOW,
   MAX_AUTH_ATTEMPTS,
+  MAX_MESSAGE_CHARS,
   MIN_MESSAGE_INTERVAL,
   MAX_SESSIONS_PER_USER,
   MAX_CONNECTIONS_PER_IP,
+  MAX_CONNECTIONS_PER_USER,
   MAX_FAILED_LOGINS,
   ACCOUNT_LOCKOUT_DURATION,
   FAILED_LOGIN_RETENTION_MS,
@@ -287,16 +290,20 @@ function getClientIp(ws: WebSocket, upgradeRequest?: any): string {
   return socketIp;
 }
 
-function checkMessageRateLimit(ip: string): boolean {
-  if (RATE_LIMITS_DISABLED) return true;
+function checkMessageRateLimit(key: string): boolean {
+  if (rateLimitsDisabled()) return true;
   const now = Date.now();
-  const last = lastMessageTime.get(ip) || 0;
+  const last = lastMessageTime.get(key) || 0;
   if (now - last < MIN_MESSAGE_INTERVAL) return false;
-  lastMessageTime.set(ip, now);
+  lastMessageTime.set(key, now);
   return true;
 }
 
-const RATE_LIMITS_DISABLED = process.env.DISABLE_RATE_LIMITS === '1';
+// read at call time: the flag is process state, and capturing it at import made behaviour depend on
+// which test file happened to load the module first
+function rateLimitsDisabled(): boolean {
+  return process.env.DISABLE_RATE_LIMITS === '1';
+}
 
 /** Milliseconds left before the auth limit for this ip expires, 0 when there is no active limit. */
 function authRateRemainingMs(ip: string): number {
@@ -306,14 +313,14 @@ function authRateRemainingMs(ip: string): number {
 }
 
 function checkAuthRateLimit(ip: string): boolean {
-  if (RATE_LIMITS_DISABLED) return true;
+  if (rateLimitsDisabled()) return true;
   if (authRateRemainingMs(ip) === 0) return true;
   return (authAttempts.get(ip)?.count ?? 0) < MAX_AUTH_ATTEMPTS;
 }
 
 /** Only rejected credentials count towards the limit, so reconnects and autologin stay free. */
 function recordAuthFailure(ip: string): void {
-  if (RATE_LIMITS_DISABLED) return;
+  if (rateLimitsDisabled()) return;
   const now = Date.now();
   const entry = authAttempts.get(ip);
   if (!entry || now > entry.resetAt) {
@@ -332,19 +339,28 @@ function authLimitReason(ip: string): string {
   return `Too many attempts. Try again in ${seconds} second(s).`;
 }
 
-function checkConnectionLimit(ip: string): boolean {
-  if (RATE_LIMITS_DISABLED) return true;
-  const count = connectionCounts.get(ip) || 0;
-  if (count >= MAX_CONNECTIONS_PER_IP) return false;
-  connectionCounts.set(ip, count + 1);
+/**
+ * Sockets are counted per address only until they authenticate, because a whole cafe, office or
+ * mobile carrier shares one public address. After the handshake the slot moves to the account, so
+ * the limit tracks the person rather than the network they happen to sit behind.
+ */
+function claimConnection(key: string, cap: number): boolean {
+  if (rateLimitsDisabled()) return true;
+  const count = connectionCounts.get(key) || 0;
+  if (count >= cap) return false;
+  connectionCounts.set(key, count + 1);
   return true;
 }
 
-function releaseConnection(ip: string): void {
-  const count = connectionCounts.get(ip) || 0;
-  if (count <= 1) connectionCounts.delete(ip);
-  else connectionCounts.set(ip, count - 1);
-  totalConnections = Math.max(0, totalConnections - 1);
+function releaseConnectionKey(key: string): void {
+  const count = connectionCounts.get(key) || 0;
+  if (count <= 1) connectionCounts.delete(key);
+  else connectionCounts.set(key, count - 1);
+}
+
+/** Free slot for an authenticated user, without touching the per address counters. */
+function userConnections(userId: string): number {
+  return connectionCounts.get('user:' + userId) || 0;
 }
 
 function sanitize(input: string): string {
@@ -442,11 +458,13 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
    let currentUserId: string | null = null;
    let currentDeviceId: string | null = null;
    const ip = getClientIp(ws, upgradeRequest);
+  const ipKey = 'ip:' + ip;
+  let connectionKey: string = ipKey;
   totalConnections++;
 
-  if (!checkConnectionLimit(ip)) {
-    logSecurity('CONNECTION_LIMIT', { ip });
-    send(ws, { type: 'error', payload: { code: 'CONNECTION_LIMIT', message: 'Too many connections from your IP' }, timestamp: Date.now() });
+  if (!claimConnection(ipKey, MAX_CONNECTIONS_PER_IP)) {
+    logSecurity('CONNECTION_LIMIT', { ip, scope: 'ip' });
+    send(ws, { type: 'error', payload: { code: 'CONNECTION_LIMIT', message: 'Too many connections from your network' }, timestamp: Date.now() });
     ws.close(1008, 'Connection limit');
     totalConnections--;
     return;
@@ -481,7 +499,8 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     if (disposed) return;
     disposed = true;
     handleDisconnect(currentDeviceId, currentUserId);
-    releaseConnection(ip);
+    releaseConnectionKey(connectionKey);
+    totalConnections = Math.max(0, totalConnections - 1);
   };
   ws.on('close', dispose);
   ws.on('error', dispose);
@@ -516,9 +535,12 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       case 'sealed_send':
         if (userId) await handleSealedSend(userId, ws, message.payload);
         break;
-      case 'dm_history':
-        if (userId) await handleDmHistory(userId, ws, message.payload);
-        break;
+    case 'dm_history':
+      if (userId) await handleDmHistory(userId, ws, message.payload);
+      break;
+    case 'chat_history':
+      if (userId) await handleChatHistory(userId, ws, message.payload);
+      break;
       case 'dm_contacts':
         if (userId) await handleDmContacts(userId, ws);
         break;
@@ -678,6 +700,17 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       return;
     }
 
+    if (userConnections(user.id) >= MAX_CONNECTIONS_PER_USER) {
+      logSecurity('CONNECTION_LIMIT', { nickname: cleanNick, ip, scope: 'user' });
+      send(ws, { type: 'auth_failure', payload: { reason: `Too many open clients for this account (${MAX_CONNECTIONS_PER_USER} max). Close some tabs or devices.` }, timestamp: Date.now() });
+      return;
+    }
+
+    // the slot now belongs to the account instead of the shared address behind it
+    releaseConnectionKey(connectionKey);
+    connectionKey = 'user:' + user.id;
+    claimConnection(connectionKey, MAX_CONNECTIONS_PER_USER);
+
     const now = Date.now();
     registerSession({ userId: user.id, deviceId, nickname: user.nickname, deviceInfo: typeof payload?.deviceInfo === 'string' ? payload.deviceInfo.slice(0, 60) : '', firstSeen: now, lastActive: now, revoked: false });
     currentUserId = user.id;
@@ -759,6 +792,9 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     const deviceId = typeof payload.deviceId === 'string' && payload.deviceId.length > 0 && payload.deviceId.length <= 64
       ? payload.deviceId : crypto.randomUUID();
     registerSession({ userId: user.id, deviceId, nickname: user.nickname, deviceInfo: typeof payload?.deviceInfo === 'string' ? payload.deviceInfo.slice(0, 60) : '', firstSeen: Date.now(), lastActive: Date.now(), revoked: false });
+    releaseConnectionKey(connectionKey);
+    connectionKey = 'user:' + user.id;
+    claimConnection(connectionKey, MAX_CONNECTIONS_PER_USER);
     currentUserId = user.id;
     currentDeviceId = deviceId;
     registerDevice(deviceId, { deviceId, ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip, deviceInfo: typeof payload?.deviceInfo === 'string' ? payload.deviceInfo.slice(0, 60) : '' });
@@ -776,7 +812,7 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       if (!seen.has(c.userId)) { seen.add(c.userId); onlineUsers.push({ id: c.userId, nickname: c.nickname, avatar: avatarInfo(userMeta.get(c.userId)) }); }
     }
 
-    send(ws, { type: 'auth_success', payload: { userId, nickname, deviceId, publicKeys, preKeyBundles: {}, onlineUsers, role: await isAdminNickname(nickname) ? 'admin' : 'user', channelMediaKey: await getChannelMediaKey() }, timestamp: Date.now() });
+    send(ws, { type: 'auth_success', payload: { userId, nickname, deviceId, uploadToken: issueUploadToken(userId), publicKeys, preKeyBundles: {}, onlineUsers, role: await isAdminNickname(nickname) ? 'admin' : 'user', channelMediaKey: await getChannelMediaKey() }, timestamp: Date.now() });
 
     const history = await getRecentMessages(100);
     const reactionsById = await getReactionsForMessages(history.map((m) => m.id));
@@ -801,11 +837,39 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       payload: {
         channel: 'general',
         messages,
+        hasMore: history.length === 100,
       },
       timestamp: Date.now(),
     });
 
     broadcast({ type: 'user_joined', payload: { userId, nickname, avatar: avatarInfo(userMeta.get(userId)) }, timestamp: Date.now() }, userId);
+  }
+
+  /** Older pages of the general chat, so the client is not limited to the newest hundred messages. */
+  async function handleChatHistory(userId: string, ws: WebSocket, payload: { before?: number; limit?: number }): Promise<void> {
+    const before = Number.isFinite(payload?.before) ? Number(payload?.before) : undefined;
+    if (before !== undefined && before <= 0) return;
+    const limit = Math.min(Math.max(Number(payload?.limit) || 50, 1), 100);
+    const history = await getRecentMessages(limit, 'general', before);
+    if (history.length === 0) return;
+    const userMeta = await buildAvatarInfoMap();
+    const reactionsById = await getReactionsForMessages(history.map((m) => m.id));
+    const messages = history.map((m) => ({
+      id: m.id,
+      senderId: m.senderId,
+      senderNickname: m.senderNickname,
+      senderAvatar: avatarInfo(userMeta.get(m.senderId)),
+      text: m.text,
+      timestamp: m.timestamp,
+      isOwn: m.senderId === userId,
+      fileKey: m.fileKey || null,
+      expiresAt: m.expiresAt || null,
+      quotedMessageId: m.quotedMessageId ?? null,
+      quotedMessageText: m.quotedMessageText ?? null,
+      quotedMessageSender: m.quotedMessageSender ?? null,
+      reactions: reactionsById.get(m.id) || [],
+    }));
+    send(ws, { type: 'chat_history_page', payload: { channel: 'general', messages, hasMore: history.length === limit }, timestamp: Date.now() });
   }
 
   
@@ -826,7 +890,8 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
   }
 
   async function handleChatMessage(senderId: string, ws: WebSocket, payload: { text: string; fileKey?: Record<string, string>; ttl?: number; quoted?: { id?: string; text?: string; sender?: string } }): Promise<void> {
-    if (!checkMessageRateLimit(ip) || !checkMessageRateLimit(senderId)) {
+    // per account, never per address: a shared network must not throttle unrelated people
+    if (!checkMessageRateLimit(senderId)) {
       logSecurity('RATE_LIMIT_MESSAGE', { ip, senderId });
       send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down. Max 2 messages per second.' }, timestamp: Date.now() });
       return;
@@ -838,8 +903,8 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
 
     const text = typeof payload?.text === 'string' ? sanitizeText(payload.text) : '';
     if (!text) return;
-    if (text.length > 4096) {
-      send(ws, { type: 'error', payload: { code: 'MESSAGE_TOO_LONG', message: 'Message too long (max 4096 chars)' }, timestamp: Date.now() });
+    if (text.length > MAX_MESSAGE_CHARS) {
+      send(ws, { type: 'error', payload: { code: 'MESSAGE_TOO_LONG', message: `Message too long (max ${MAX_MESSAGE_CHARS} chars)` }, timestamp: Date.now() });
       return;
     }
 
@@ -877,7 +942,7 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
   }
 
     async function handleDmSend(senderId: string, ws: WebSocket, payload: { to?: string; toKey?: any; text: string; encrypted?: any; signalEncrypted?: any; x3dhMessage?: any; ratchetPublicKey?: number[]; fileKey?: Record<string, string>; sealed?: string; ttl?: number; clientId?: string; quoted?: { id?: string; text?: string; sender?: string } }): Promise<void> {
-    if (!checkMessageRateLimit(ip)) {
+    if (!checkMessageRateLimit(senderId)) {
       send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down.' }, timestamp: Date.now() });
       return;
     }
@@ -1104,23 +1169,26 @@ async function computeSafetyNumber(viewerId: string, targetId: string): Promise<
     })();
   }
 
-async function handleDmHistory(userId: string, ws: WebSocket, payload: { with: string }): Promise<void> {
-    if (!payload?.with || typeof payload.with !== 'string') return;
-    if (payload.with === userId) return;
-    const channel = getDmChannelId(userId, payload.with);
-    const parts = channel.split(':');
-    if (parts.length !== 2 || (parts[0] !== userId && parts[1] !== userId)) return;
-    const messages = await getDmHistory(userId, payload.with, 100);
-    const publicKeys = await getPublicKeysByIds([userId, payload.with]);
-    const userMeta = await buildAvatarInfoMap();
-    send(ws, {
-      type: 'dm_history',
-      payload: {
-        channel,
-        with: payload.with,
-        publicKeys,
-        messages: await handleDmHistoryMessages(userId, messages, userMeta),
-      },
+  async function handleDmHistory(userId: string, ws: WebSocket, payload: { with: string; before?: number; limit?: number }): Promise<void> {
+  if (!payload?.with || typeof payload.with !== 'string') return;
+  if (payload.with === userId) return;
+  const channel = getDmChannelId(userId, payload.with);
+  const parts = channel.split(':');
+  if (parts.length !== 2 || (parts[0] !== userId && parts[1] !== userId)) return;
+  const before = Number.isFinite(payload.before) ? Number(payload.before) : undefined;
+  const limit = Math.min(Math.max(Number(payload.limit) || 50, 1), 100);
+  const messages = await getDmHistory(userId, payload.with, limit, before);
+  const publicKeys = await getPublicKeysByIds([userId, payload.with]);
+  const userMeta = await buildAvatarInfoMap();
+  send(ws, {
+   type: 'dm_history',
+   payload: {
+   channel,
+   with: payload.with,
+   publicKeys,
+   hasMore: messages.length === limit,
+   messages: await handleDmHistoryMessages(userId, messages, userMeta),
+   },
       timestamp: Date.now(),
     });
   }

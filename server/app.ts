@@ -6,6 +6,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import crypto from 'crypto';
 import fs from 'fs';
+import os from 'os';
+import { resolveUploadTokenUser } from './uploadTokens.js';
 import { existsSync } from 'fs';
 import { handleConnection, startHeartbeatCheck, getTotalConnections } from './handlers.js';
 import { initializeDatabase, getMediaDir, getAvatarDir, getUserProfile } from './database.js';
@@ -52,11 +54,11 @@ setInterval(() => {
   }
 }, 60_000);
 
-function checkUploadRate(ip: string): boolean {
+function checkUploadRate(key: string): boolean {
   const now = Date.now();
-  const entry = uploadRateMap.get(ip);
+  const entry = uploadRateMap.get(key);
   if (!entry || now > entry.resetAt) {
-    uploadRateMap.set(ip, { count: 1, resetAt: now + UPLOAD_RATE_WINDOW });
+    uploadRateMap.set(key, { count: 1, resetAt: now + UPLOAD_RATE_WINDOW });
     return true;
   }
   if (entry.count >= UPLOAD_RATE_LIMIT) return false;
@@ -64,11 +66,11 @@ function checkUploadRate(ip: string): boolean {
   return true;
 }
 
-function checkMediaRate(ip: string): boolean {
+function checkMediaRate(key: string): boolean {
   const now = Date.now();
-  const entry = mediaRateMap.get(ip);
+  const entry = mediaRateMap.get(key);
   if (!entry || now > entry.resetAt) {
-    mediaRateMap.set(ip, { count: 1, resetAt: now + MEDIA_RATE_WINDOW });
+    mediaRateMap.set(key, { count: 1, resetAt: now + MEDIA_RATE_WINDOW });
     return true;
   }
   if (entry.count >= MEDIA_RATE_LIMIT) return false;
@@ -78,6 +80,13 @@ function checkMediaRate(ip: string): boolean {
 
 function sanitizeFilename(name: string): string {
   return name.replace(/[\x00-\x1f\x7f\/\\"]/g, '').slice(0, 128) || 'upload';
+}
+
+function resolveUploadRateKey(req: any): string {
+  const userId = resolveUploadTokenUser(req.headers?.['x-wn-upload-token']);
+  if (userId) return 'user:' + userId;
+  // anonymous callers fall back to the address, which is all we know about them
+  return 'ip:' + (req.ip || 'unknown');
 }
 
 function getMediaBase(): URL {
@@ -169,7 +178,7 @@ export function createApp(clientDir?: string) {
 
   app.get('/api/media', async (req, reply) => {
     const ip = req.ip || 'unknown';
-    if (!checkMediaRate(ip)) {
+    if (!checkMediaRate(resolveUploadRateKey(req))) {
       return reply.code(429).send({ error: 'Rate limit' });
     }
     const url = (req.query as any).url;
@@ -252,123 +261,144 @@ export function createApp(clientDir?: string) {
   });
 
   app.post('/api/upload', async (req, reply) => {
-    const ip = req.ip || 'unknown';
-    if (!checkUploadRate(ip)) {
+    const rateKey = resolveUploadRateKey(req);
+    if (!checkUploadRate(rateKey)) {
       return reply.code(429).send({ error: 'Rate limit' });
     }
 
-    // a request that carries no file part trips a multipart limit, which Fastify would report as
-    // "413 File too large" and confuse the sender; it is a malformed upload, so say so
-    const readUpload = async () => {
-      try {
-        return await req.file();
-      } catch (e: any) {
-        const code = String(e?.code || '');
-        if (code.startsWith('FST_FIELDS_LIMIT') || code.startsWith('FST_FILES_LIMIT') || code.startsWith('FST_PARTS_LIMIT')) {
-          await reply.code(400).send({ error: 'No file' });
-          return null;
-        }
-        throw e;
-      }
-    };
+    const tmpPath = path.join(os.tmpdir(), 'wn-upload-' + crypto.randomBytes(8).toString('hex'));
+    const cleanup = () => { try { fs.unlinkSync(tmpPath); } catch { /* already gone */ } };
 
-    if ((process.env.MEDIA_STORAGE || 'remote') === 'local') {
-      const data = await readUpload();
-      if (!data) return;
-      if (!MIME_RE.test(data.mimetype)) {
-        return reply.code(400).send({ error: 'Invalid file type' });
+    let part: any;
+    try {
+      part = await req.file();
+    } catch (e: any) {
+      const code = String(e?.code || '');
+      if (code.startsWith('FST_FIELDS_LIMIT') || code.startsWith('FST_FILES_LIMIT') || code.startsWith('FST_PARTS_LIMIT')) {
+        return reply.code(400).send({ error: 'No file' });
       }
-      const buf = await data.toBuffer();
-      if (buf.length > MAX_UPLOAD_SIZE) return reply.code(413).send({ error: 'File too large' });
-      const id = crypto.randomBytes(16).toString('hex');
-      await fs.promises.writeFile(path.join(getMediaDir(), id), buf);
-      return reply.send({ url: '/media/' + id });
+      if (code.startsWith('FST_REQ_FILE_TOO_LARGE')) {
+        return reply.code(413).send({ error: 'File too large' });
+      }
+      throw e;
     }
-
-    const data = await readUpload();
-    if (!data) return;
-
-    if (!MIME_RE.test(data.mimetype)) {
+    if (!part) return reply.code(400).send({ error: 'No file' });
+    if (!MIME_RE.test(part.mimetype)) {
+      part.file.resume();
       return reply.code(400).send({ error: 'Invalid file type' });
     }
 
-    const fileBuffer = await data.toBuffer();
-    if (fileBuffer.length > MAX_UPLOAD_SIZE) {
+    // the file may be a gigabyte, so it never sits in memory: it lands in a temp file and every
+    // later step streams from there
+    const size = await new Promise<number>((resolve, reject) => {
+      const out = fs.createWriteStream(tmpPath);
+      let bytes = 0;
+      part.file.on('data', (c: Buffer) => { bytes += c.length; });
+      part.file.on('error', reject);
+      out.on('error', reject);
+      out.on('finish', () => resolve(bytes));
+      part.file.pipe(out);
+    }).catch(() => -1);
+
+    if (size < 0) {
+      cleanup();
+      return reply.code(413).send({ error: 'File too large' });
+    }
+    if (size > MAX_UPLOAD_SIZE) {
+      cleanup();
       return reply.code(413).send({ error: 'File too large' });
     }
 
+    if ((process.env.MEDIA_STORAGE || 'remote') === 'local') {
+      const id = crypto.randomBytes(16).toString('hex');
+      try {
+        await fs.promises.copyFile(tmpPath, path.join(getMediaDir(), id));
+        return reply.send({ url: '/media/' + id });
+      } finally {
+        cleanup();
+      }
+    }
+
     const boundary = '----FormBoundary' + crypto.randomUUID();
-    const fileName = sanitizeFilename((data.filename || 'upload').replace(/\.[a-z0-9]{1,5}$/i, '')) + '.bin';
-    const parts: Buffer[] = [];
-    parts.push(Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${data.mimetype}\r\n\r\n`));
-    parts.push(fileBuffer);
-    parts.push(Buffer.from(`\r\n--${boundary}--\r\n`));
-    const body = Buffer.concat(parts);
+    const fileName = sanitizeFilename((part.filename || 'upload').replace(/\.[a-z0-9]{1,5}$/i, '')) + '.bin';
+    const head = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${part.mimetype}\r\n\r\n`);
+    const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+    const contentLength = head.length + size + tail.length;
 
-    return new Promise<void>((resolve) => {
-      const uploadUrl = new URL('/upload', getMediaBase());
-      const lib = uploadUrl.protocol === 'https:' ? https : http;
-      // the file is already fully buffered at this point, so the upload must not be tied to the
-      // lifetime of the incoming request: reading the multipart body to the end makes req.raw emit
-      // "close", and destroying the upstream request there aborted every single upload
-      const respond = (code: number, body: Record<string, unknown>) => {
-        try { reply.code(code).send(body); } catch { /* the client is already gone */ }
-        resolve();
-      };
-      const req2 = lib.request(uploadUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': `multipart/form-data; boundary=${boundary}`,
-          'Content-Length': body.length,
-          'User-Agent': 'WhisperNet',
-        },
-        timeout: 120000,
-      }, (res) => {
-        let resBody = '';
-        let resBytes = 0;
-        const MAX_UPLOAD_RESPONSE = 64 * 1024;
-        res.on('data', (c: Buffer) => {
-          resBytes += c.length;
-          if (resBytes > MAX_UPLOAD_RESPONSE) {
-            req2.destroy();
-            respond(502, { error: 'Upstream response too large' });
-            return;
-          }
-          resBody += c;
-        });
-        res.on('end', () => {
-          for (const line of resBody.split('\n')) {
-            if (line.startsWith('data: ')) {
-              try {
-                const d = JSON.parse(line.substring(6));
-                if (d.status === 'ready' && d.url) {
-                  respond(200, { url: d.url });
-                  return;
-                }
-                if (d.status === 'failed') {
-                  respond(500, { error: d.error || 'Upload failed' });
-                  return;
-                }
-              } catch {  }
+    try {
+      await new Promise<void>((resolve) => {
+        const uploadUrl = new URL('/upload', getMediaBase());
+        const lib = uploadUrl.protocol === 'https:' ? https : http;
+        let answered = false;
+        const respond = (code: number, body: Record<string, unknown>) => {
+          if (answered) return;
+          answered = true;
+          try { reply.code(code).send(body); } catch { /* the client is already gone */ }
+          resolve();
+        };
+        const req2 = lib.request(uploadUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': `multipart/form-data; boundary=${boundary}`,
+            'Content-Length': contentLength,
+            'User-Agent': 'WhisperNet',
+          },
+          timeout: 15 * 60 * 1000,
+        }, (res) => {
+          let resBody = '';
+          let resBytes = 0;
+          const MAX_UPLOAD_RESPONSE = 64 * 1024;
+          res.on('data', (c: Buffer) => {
+            resBytes += c.length;
+            if (resBytes > MAX_UPLOAD_RESPONSE) {
+              req2.destroy();
+              respond(502, { error: 'Upstream response too large' });
+              return;
             }
-          }
-          respond(500, { error: 'Upload failed' });
+            resBody += c;
+          });
+          res.on('end', () => {
+            for (const line of resBody.split('\n')) {
+              if (line.startsWith('data: ')) {
+                try {
+                  const d = JSON.parse(line.substring(6));
+                  if (d.status === 'ready' && d.url) {
+                    respond(200, { url: d.url });
+                    return;
+                  }
+                  if (d.status === 'failed') {
+                    respond(500, { error: d.error || 'Upload failed' });
+                    return;
+                  }
+                } catch { /* not a json line */ }
+              }
+            }
+            respond(500, { error: 'Upload failed' });
+          });
         });
-      });
 
-      req2.on('error', (e) => {
-        console.error('Upload proxy error:', e.message);
-        respond(502, { error: 'Network error' });
-      });
+        req2.on('error', (e) => {
+          console.error('Upload proxy error:', e.message);
+          respond(502, { error: 'Network error' });
+        });
 
-      req2.on('timeout', () => {
-        req2.destroy();
-        respond(504, { error: 'Timeout' });
-      });
+        req2.on('timeout', () => {
+          req2.destroy();
+          respond(504, { error: 'Timeout' });
+        });
 
-      req2.write(body);
-      req2.end();
-    });
+        const readStream = fs.createReadStream(tmpPath);
+        readStream.on('error', () => {
+          req2.destroy();
+          respond(500, { error: 'Storage error' });
+        });
+        readStream.on('end', () => { req2.end(tail); });
+        req2.write(head);
+        readStream.pipe(req2, { end: false });
+      });
+    } finally {
+      cleanup();
+    }
   });
 
   app.register(async (fastify) => {

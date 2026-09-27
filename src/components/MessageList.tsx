@@ -2,7 +2,7 @@ import { useRef, useEffect, memo } from 'react';
 import type { Message } from '../types';
 import { MessageItem } from './MessageItem';
 
-function MessageListImpl({ messages, fontSizeClass, t }: { messages: Message[]; fontSizeClass: string; t: (key: string) => string }) {
+function MessageListImpl({ messages, fontSizeClass, t, hasMore, loadingOlder, onLoadMore }: { messages: Message[]; fontSizeClass: string; t: (key: string) => string; hasMore?: boolean; loadingOlder?: boolean; onLoadMore?: () => void }) {
   const endRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
@@ -92,6 +92,18 @@ function MessageListImpl({ messages, fontSizeClass, t }: { messages: Message[]; 
 
   return (
     <div ref={containerRef} className="flex-1 overflow-y-auto overflow-x-hidden px-2 py-3 space-y-2 animate-fade-slide" role="log" aria-live="polite">
+      {onLoadMore && hasMore && (
+        <div className="flex justify-center py-2">
+          <button
+            type="button"
+            onClick={onLoadMore}
+            disabled={loadingOlder}
+            className="px-3 py-1.5 rounded-full bg-bg-tertiary/70 text-[12px] font-medium text-fg-muted hover:text-fg-primary hover:bg-bg-tertiary transition-colors disabled:opacity-50"
+          >
+            {loadingOlder ? t('load_earlier') + '…' : t('load_earlier')}
+          </button>
+        </div>
+      )}
       {groupedMessages.map((group, i) => {
         const prevGroup = groupedMessages[i - 1];
         const newDay = !prevGroup || new Date(prevGroup[0].timestamp).toDateString() !== new Date(group[0].timestamp).toDateString();

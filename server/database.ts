@@ -632,8 +632,12 @@ export async function updateMessageText(messageId: string, senderId: string, new
   return (res as any).changes > 0;
 }
 
-export async function getRecentMessages(limit: number = 100, channel: string = 'general'): Promise<any[]> {
-  const rows = getDb().prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? ORDER BY timestamp DESC LIMIT ?`).all(channel, limit) as any[];
+export async function getRecentMessages(limit: number = 100, channel: string = 'general', before?: number): Promise<any[]> {
+  // `before` walks backwards through history so the client can page in older messages instead of
+  // being stuck with the newest hundred
+  const rows = (before
+    ? getDb().prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT ?`).all(channel, before, limit)
+    : getDb().prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? ORDER BY timestamp DESC LIMIT ?`).all(channel, limit)) as any[];
   return rows.map((row) => rowToMessage(row)).reverse();
 }
 
@@ -642,9 +646,11 @@ export async function getMessageById(messageId: string): Promise<any | null> {
   return row ? rowToMessage(row) : null;
 }
 
-export async function getDmHistory(userId1: string, userId2: string, limit: number = 100): Promise<any[]> {
+export async function getDmHistory(userId1: string, userId2: string, limit: number = 100, before?: number): Promise<any[]> {
   const channelId = getDmChannelId(userId1, userId2);
-  const rows = getDb().prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? ORDER BY timestamp DESC LIMIT ?`).all(channelId, limit) as any[];
+  const rows = (before
+    ? getDb().prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT ?`).all(channelId, before, limit)
+    : getDb().prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? ORDER BY timestamp DESC LIMIT ?`).all(channelId, limit)) as any[];
   return rows.map((row) => rowToMessage(row)).reverse();
 }
 

@@ -33,6 +33,8 @@ export interface ConnectionState {
   contacts: Contact[];
   dmNames: Record<string, string>;
   dmMessages: Record<string, Message[]>;
+  generalHistory: HistoryWindow;
+  dmHistory: Record<string, HistoryWindow>;
   searchResults: { id: string; nickname: string; online: boolean }[];
   messageSearchResults: Message[];
   replyTo: ReplyTarget;
@@ -42,11 +44,20 @@ export interface ConnectionState {
   reportStatus: 'idle' | 'pending' | 'sent' | 'failed';
 }
 
+export interface HistoryWindow {
+  hasMore: boolean;
+  oldest: number | null;
+}
+
 export type ConnectionAction =
   | { type: 'SET_STATUS'; status: ConnectionStatus }
   | { type: 'ADD_MESSAGE'; message: Message }
   | { type: 'SET_MESSAGES'; messages: Message[] }
+  | { type: 'PREPEND_MESSAGES'; messages: Message[] }
+  | { type: 'SET_HISTORY_STATE'; hasMore: boolean; oldest: number | null }
   | { type: 'SET_DM_MESSAGES'; channel: string; messages: Message[] }
+  | { type: 'PREPEND_DM_MESSAGES'; channel: string; messages: Message[] }
+  | { type: 'SET_DM_HISTORY_STATE'; channel: string; hasMore: boolean; oldest: number | null }
   | { type: 'ADD_DM_MESSAGE'; channel: string; message: Message }
   | { type: 'SET_USERS'; users: User[] }
   | { type: 'ADD_USER'; user: User }
@@ -112,6 +123,7 @@ export interface ConnectionContextType {
   identityWarning: { userId: string; nickname?: string } | null;
   dismissIdentityWarning: () => void;
   decryptMedia: (message: { id: string; text: string; fileKey?: Record<string, string> }) => Promise<string | null>;
+  loadOlderMessages: (channel: string | null, before: number | null) => Promise<void>;
   sessions: Session[];
   requestSessions: () => void;
   revokeSession: (sessionId: string) => void;

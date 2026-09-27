@@ -6,14 +6,26 @@ import { MessageInput } from './MessageInput';
 import { SettingsPanel } from './SettingsPanel';
 
 export function ChatArea({ showContacts: _showContacts, isMobile, onBack }: { showContacts: boolean; isMobile?: boolean; onBack?: () => void }) {
-  const { state, t, identityWarning, dismissIdentityWarning } = useConnection();
+  const { state, t, identityWarning, dismissIdentityWarning, loadOlderMessages } = useConnection();
   const [showSettings, setShowSettings] = useState(false);
   const [settingsClosing, setSettingsClosing] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const isDm = state.activeChannel !== 'general';
   const currentMessages = isDm ? (state.dmMessages[state.activeChannel] || []) : state.messages;
+  const window_ = isDm ? (state.dmHistory[state.activeChannel] || null) : state.generalHistory;
   const fontSizeClass = state.settings.fontSize === 'small' ? 'text-[13px]'
     : state.settings.fontSize === 'large' ? 'text-[17px]'
     : 'text-[15px]';
+
+  const handleLoadOlder = async () => {
+    if (loadingOlder) return;
+    setLoadingOlder(true);
+    try {
+      await loadOlderMessages(isDm ? state.activeChannel : null, window_?.oldest ?? null);
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
 
   const warningForCurrent = identityWarning && (isDm && identityWarning.userId === state.activeChannel)
     ? identityWarning : null;
@@ -33,7 +45,8 @@ export function ChatArea({ showContacts: _showContacts, isMobile, onBack }: { sh
           {t('identity_warning').replace('{nick}', warningForCurrent.nickname || '')}
         </button>
       )}
-      <MessageList key={state.activeChannel} messages={currentMessages} fontSizeClass={fontSizeClass} t={t} />
+      <MessageList key={state.activeChannel} messages={currentMessages} fontSizeClass={fontSizeClass} t={t}
+        hasMore={window_?.hasMore !== false} loadingOlder={loadingOlder} onLoadMore={handleLoadOlder} />
       <div className="border-t border-border-default">
         <MessageInput />
       </div>

@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useConnection } from '../context';
-import { mediaErrorKey } from '../upload';
+import { mediaErrorKey, MAX_UPLOAD_BYTES, MAX_ENCRYPTED_UPLOAD_BYTES } from '../upload';
+import { MAX_MESSAGE_CHARS } from '../limits';
 
 export function MessageInput() {
   const { state, sendMessage, sendDm, sendImage, sendDmImage, blockedUsers, unblockUser, setReply, editingTarget, setEditing, editMessage, t } = useConnection();
@@ -64,6 +65,7 @@ export function MessageInput() {
     const ta = textareaRef.current;
     const val = ta?.value?.trim();
     if (!val || !isConnected) return;
+    if (val.length > MAX_MESSAGE_CHARS) { setError(t('message_too_long')); return; }
     if (isEditing && editingTarget) {
       if (val !== editingTarget.text) editMessage(editingTarget.id, val);
       clearComposer();
@@ -94,8 +96,11 @@ export function MessageInput() {
 
   const handleFile = async (file: File) => {
     if (!file.type.startsWith('image/') && !file.type.startsWith('video/')) { setError(t('upload_unsupported')); return; }
-    if (file.size > 1000 * 1024 * 1024) { setError(t('upload_too_large')); return; }
+    if (file.size > MAX_UPLOAD_BYTES) { setError(t('upload_too_large')); return; }
     if (file.size === 0) { setError(t('upload_failed')); return; }
+    // encrypted media is held in memory while it is ciphered, so a phone cannot take a gigabyte
+    const limit = isDm && dmTarget ? MAX_ENCRYPTED_UPLOAD_BYTES : MAX_UPLOAD_BYTES;
+    if (file.size > limit) { setError(t('upload_too_large_dm')); return; }
     setError(null);
     setUploading(true);
     try {

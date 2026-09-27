@@ -8,6 +8,16 @@ export class MediaError extends Error {
   }
 }
 
+export const MAX_UPLOAD_BYTES = 1000 * 1024 * 1024;
+/** Dm media is ciphered in memory, so it needs a ceiling a phone can survive. */
+export const MAX_ENCRYPTED_UPLOAD_BYTES = 100 * 1024 * 1024;
+
+/** Token from the auth payload, so the server counts uploads per account instead of per address. */
+let uploadToken = '';
+export function setUploadToken(token: string): void {
+  uploadToken = typeof token === 'string' ? token : '';
+}
+
 export async function uploadFile(
   blob: Blob,
   filename: string = 'encrypted.bin',
@@ -25,6 +35,7 @@ export async function uploadFile(
   const res = await fetch('/api/upload', {
     method: 'POST',
     body: form,
+    headers: uploadToken ? { 'X-WN-Upload-Token': uploadToken } : undefined,
   });
 
   if (onProgress) onProgress(90);
