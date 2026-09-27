@@ -26,8 +26,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: 'Package Windows installers (Tauri nsis + msi)'
-        run: npm run tauri build -- --bundles nsis,msi
+      - name: 'Package the Windows installer (Tauri nsis)'
+        run: npm run tauri build -- --bundles nsis
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
       - name: Collect assets
@@ -35,10 +35,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist\build | Out-Null
           Get-ChildItem "src-tauri\target\release\bundle\nsis\*.exe" | Copy-Item -Destination dist\build -Force
-          Get-ChildItem "src-tauri\target\release\bundle\msi\*.msi" | Copy-Item -Destination dist\build -Force
-          Compress-Archive -Path "src-tauri\target\release\whispernet.exe" -DestinationPath "dist\build\whispernet.exe.zip" -Force
-          $hash = (Get-FileHash "dist\build\whispernet.exe.zip" -Algorithm SHA256).Hash.ToLower()
-          "$hash  whispernet.exe.zip" | Set-Content -Encoding ascii "dist\build\whispernet.exe.zip.sha256"
           Get-ChildItem dist\build | Select-Object Name, Length
       - name: Upload assets
         shell: bash
@@ -46,7 +42,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           TAG="${{ github.event.inputs.tag }}"
-          gh release upload "$TAG" dist/build/*.exe dist/build/*.msi dist/build/*.zip dist/build/*.sha256 --clobber
+          gh release upload "$TAG" dist/build/*.exe --clobber
 
   linux:
     runs-on: ubuntu-latest
