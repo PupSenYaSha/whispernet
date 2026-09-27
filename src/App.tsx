@@ -1193,21 +1193,17 @@ useEffect(() => { stateRef.current = state; }, [state]);
   }, []);
 
   const sendImage = useCallback(async (file: File) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    try {
-      const tag = file.type.startsWith('video/') ? 'video' : 'image';
-      const url = await uploadFile(file, file.name || 'media.png');
-      wsRef.current.send(JSON.stringify({ type: 'chat_message', payload: { text: `[${tag}]${url}[/${tag}]`, ttl: ttlSeconds() } }));
-    } catch (e) { console.error('Image send failed:', e); }
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    const tag = file.type.startsWith('video/') ? 'video' : 'image';
+    const url = await uploadFile(file, file.name || 'media.png');
+    wsRef.current.send(JSON.stringify({ type: 'chat_message', payload: { text: `[${tag}]${url}[/${tag}]`, ttl: ttlSeconds() } }));
   }, [ttlSeconds]);
 
   const sendDmImage = useCallback(async (to: string, file: File) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
-    if (!publicKeysRef.current[to] || !privateKeyRef.current) { console.error('Encryption keys not available'); return; }
-    try {
-      const { text, fileKey } = await prepareEncryptedMedia(file, [to]);
-      await sendDmPackage(to, { text, fileKey });
-    } catch (e) { console.error('Image encryption failed:', e); }
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    if (!publicKeysRef.current[to] || !privateKeyRef.current) throw new Error('no keys');
+    const { text, fileKey } = await prepareEncryptedMedia(file, [to]);
+    await sendDmPackage(to, { text, fileKey });
   }, [prepareEncryptedMedia, sendDmPackage]);
 
   useEffect(() => {

@@ -16,11 +16,12 @@ export interface StartedServer {
   stop: () => Promise<void>;
 }
 
-export async function startTestServer(): Promise<StartedServer> {
+export async function startTestServer(env: Record<string, string> = {}): Promise<StartedServer> {
   const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wn-test-'));
   process.env.DATA_DIR = dataDir;
   process.env.DISABLE_RATE_LIMITS = '1';
   process.env.ADMIN_KEY = 'test-admin-key';
+  for (const [k, v] of Object.entries(env)) process.env[k] = v;
   const distDir = path.resolve('dist/client');
   const { setDataDir, initializeDatabase } = await import('../server/database');
   setDataDir(dataDir);
@@ -145,3 +146,82 @@ export function pngDataUrlOfSize(bytes: number): string {
 
 export const ADMIN_KEY = 'test-admin-key';
 export const uniqueNick = (prefix: string): string => prefix + UNIQ + crypto.randomBytes(2).toString('hex');
+
+export interface StartedMediaHost {
+  url: string;
+  port: number;
+  requests: Array<{ contentType: string; length: number }>;
+  stop: () => Promise<void>;
+}
+
+/**
+ * Stands in for the external image host so the upload proxy can be tested without the internet.
+ * It mimics the newline separated "data: {...}" stream the real host answers with.
+ */
+export function startMediaHost(): Promise<StartedMediaHost> {
+  const requests: Array<{ contentType: string; length: number }> = [];
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (c: Buffer) => chunks.push(c));
+    req.on('end', () => {
+      requests.push({ contentType: req.headers['content-type'] || '', length: Buffer.concat(chunks).length });
+      const id = crypto.randomBytes(8).toString('hex');
+      res.writeHead(200, { 'Content-Type': 'text/plain' });
+      res.write('data: {"status":"processing","id":"' + id + '"}\n\n');
+      setTimeout(() => {
+        res.write('data: {"status":"ready","url":"https://img.test/' + id + '.bin"}\n\n');
+        res.end();
+      }, 10);
+    });
+  });
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = typeof address === 'object' && address ? address.port : 0;
+      resolve({
+        port,
+        url: `http://127.0.0.1:${port}`,
+        requests,
+        stop: () => new Promise<void>((r) => { server.close(() => r()); }),
+      });
+    });
+  });
+}
+
+export function postMultipart(
+  port: number,
+  urlPath: string,
+  parts: Array<{ name: string; filename?: string; contentType?: string; body: Buffer | string }>,
+): Promise<{ status: number; body: any }> {
+  const boundary = '----TestBoundary' + crypto.randomBytes(6).toString('hex');
+  const chunks: Buffer[] = [];
+  for (const p of parts) {
+    let head = `--${boundary}\r\nContent-Disposition: form-data; name="${p.name}"`;
+    if (p.filename) head += `; filename="${p.filename}"`;
+    head += '\r\n';
+    if (p.contentType) head += `Content-Type: ${p.contentType}\r\n`;
+    chunks.push(Buffer.from(head + '\r\n'));
+    chunks.push(Buffer.isBuffer(p.body) ? p.body : Buffer.from(p.body));
+    chunks.push(Buffer.from('\r\n'));
+  }
+  chunks.push(Buffer.from(`--${boundary}--\r\n`));
+  const body = Buffer.concat(chunks);
+  return new Promise((resolve) => {
+    const req = http.request(
+      { host: '127.0.0.1', port, path: urlPath, method: 'POST', headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length } },
+      (res) => {
+        const out: Buffer[] = [];
+        res.on('data', (c) => out.push(c));
+        res.on('end', () => {
+          const text = Buffer.concat(out).toString('utf8');
+          let parsed: any = text;
+          try { parsed = JSON.parse(text); } catch { /* not json */ }
+          resolve({ status: res.statusCode || 0, body: parsed });
+        });
+      },
+    );
+    req.on('error', (e: any) => resolve({ status: -1, body: { error: e.message } }));
+    req.write(body);
+    req.end();
+  });
+}

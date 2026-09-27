@@ -5,6 +5,7 @@ export function MessageInput() {
   const { state, sendMessage, sendDm, sendImage, sendDmImage, blockedUsers, unblockUser, setReply, editingTarget, setEditing, editMessage, t } = useConnection();
   const [hasText, setHasText] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const [sealedMode, setSealedMode] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
@@ -80,8 +81,10 @@ export function MessageInput() {
   };
 
   const handleFile = async (file: File) => {
-    if (!file.type.startsWith('image/') && !file.type.startsWith('video/')) return;
-    if (file.size > 1000 * 1024 * 1024) return;
+    if (!file.type.startsWith('image/') && !file.type.startsWith('video/')) { setError(t('upload_unsupported')); return; }
+    if (file.size > 1000 * 1024 * 1024) { setError(t('upload_too_large')); return; }
+    if (file.size === 0) { setError(t('upload_failed')); return; }
+    setError(null);
     setUploading(true);
     try {
       if (isDm && dmTarget) {
@@ -89,7 +92,9 @@ export function MessageInput() {
       } else {
         await sendImage(file);
       }
-    } catch (e) { console.error('Upload failed:', e); }
+    } catch {
+      setError(t('upload_failed'));
+    }
     setUploading(false);
   };
 
@@ -129,6 +134,18 @@ export function MessageInput() {
           </div>
           <button type="button" onClick={() => setEditing(null)} aria-label={t('cancel')}
             className="flex-shrink-0 p-1 rounded-full text-fg-muted hover:text-fg-primary hover:bg-bg-hover transition-colors">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+          </button>
+        </div>
+      )}
+      {error && (
+        <div className="flex items-center gap-2 mb-2 px-3 py-2 rounded-xl bg-status-error/10 border border-status-error/30 animate-step-in">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-status-error))" strokeWidth="2" strokeLinecap="round" className="flex-shrink-0">
+            <circle cx="12" cy="12" r="10" /><path d="M12 8v4M12 16h.01" />
+          </svg>
+          <span className="text-[12px] text-status-error flex-1">{error}</span>
+          <button type="button" onClick={() => setError(null)} aria-label={t('cancel')}
+            className="flex-shrink-0 p-1 rounded-full text-status-error hover:bg-bg-hover transition-colors">
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
           </button>
         </div>

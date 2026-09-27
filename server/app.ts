@@ -257,9 +257,24 @@ export function createApp(clientDir?: string) {
       return reply.code(429).send({ error: 'Rate limit' });
     }
 
+    // a request that carries no file part trips a multipart limit, which Fastify would report as
+    // "413 File too large" and confuse the sender; it is a malformed upload, so say so
+    const readUpload = async () => {
+      try {
+        return await req.file();
+      } catch (e: any) {
+        const code = String(e?.code || '');
+        if (code.startsWith('FST_FIELDS_LIMIT') || code.startsWith('FST_FILES_LIMIT') || code.startsWith('FST_PARTS_LIMIT')) {
+          await reply.code(400).send({ error: 'No file' });
+          return null;
+        }
+        throw e;
+      }
+    };
+
     if ((process.env.MEDIA_STORAGE || 'remote') === 'local') {
-      const data = await req.file();
-      if (!data) return reply.code(400).send({ error: 'No file' });
+      const data = await readUpload();
+      if (!data) return;
       if (!MIME_RE.test(data.mimetype)) {
         return reply.code(400).send({ error: 'Invalid file type' });
       }
@@ -270,8 +285,8 @@ export function createApp(clientDir?: string) {
       return reply.send({ url: '/media/' + id });
     }
 
-    const data = await req.file();
-    if (!data) return reply.code(400).send({ error: 'No file' });
+    const data = await readUpload();
+    if (!data) return;
 
     if (!MIME_RE.test(data.mimetype)) {
       return reply.code(400).send({ error: 'Invalid file type' });
@@ -293,7 +308,13 @@ export function createApp(clientDir?: string) {
     return new Promise<void>((resolve) => {
       const uploadUrl = new URL('/upload', getMediaBase());
       const lib = uploadUrl.protocol === 'https:' ? https : http;
-      req.raw.on('close', () => { try { req2.destroy(); } catch {} });
+      // the file is already fully buffered at this point, so the upload must not be tied to the
+      // lifetime of the incoming request: reading the multipart body to the end makes req.raw emit
+      // "close", and destroying the upstream request there aborted every single upload
+      const respond = (code: number, body: Record<string, unknown>) => {
+        try { reply.code(code).send(body); } catch { /* the client is already gone */ }
+        resolve();
+      };
       const req2 = lib.request(uploadUrl, {
         method: 'POST',
         headers: {
@@ -310,8 +331,7 @@ export function createApp(clientDir?: string) {
           resBytes += c.length;
           if (resBytes > MAX_UPLOAD_RESPONSE) {
             req2.destroy();
-            try { reply.code(502).send({ error: 'Upstream response too large' }); } catch {}
-            resolve();
+            respond(502, { error: 'Upstream response too large' });
             return;
           }
           resBody += c;
@@ -322,33 +342,28 @@ export function createApp(clientDir?: string) {
               try {
                 const d = JSON.parse(line.substring(6));
                 if (d.status === 'ready' && d.url) {
-                  reply.send({ url: d.url });
-                  resolve();
+                  respond(200, { url: d.url });
                   return;
                 }
                 if (d.status === 'failed') {
-                  reply.code(500).send({ error: d.error || 'Upload failed' });
-                  resolve();
+                  respond(500, { error: d.error || 'Upload failed' });
                   return;
                 }
               } catch {  }
             }
           }
-          reply.code(500).send({ error: 'Upload failed' });
-          resolve();
+          respond(500, { error: 'Upload failed' });
         });
       });
 
       req2.on('error', (e) => {
         console.error('Upload proxy error:', e.message);
-        try { reply.code(502).send({ error: 'Network error' }); } catch {}
-        resolve();
+        respond(502, { error: 'Network error' });
       });
 
       req2.on('timeout', () => {
         req2.destroy();
-        try { reply.code(504).send({ error: 'Timeout' }); } catch {}
-        resolve();
+        respond(504, { error: 'Timeout' });
       });
 
       req2.write(body);
