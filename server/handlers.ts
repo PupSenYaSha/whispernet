@@ -323,14 +323,18 @@ function isValidPreKeyBundle(bundle: any): boolean {
   const str = JSON.stringify(bundle);
   if (str.length > MAX_BUNDLE_SIZE) return false;
   if (hasUnsafeOwnKeys(bundle)) return false;
-  if (typeof bundle.identityKey !== 'string') return false;
+  if (typeof bundle.identityKey !== 'string' || bundle.identityKey.length === 0) return false;
   if (typeof bundle.ed25519PublicKey !== 'string') return false;
   if (typeof bundle.signedPreKey !== 'object' || bundle.signedPreKey === null) return false;
   if (hasUnsafeOwnKeys(bundle.signedPreKey)) return false;
   if (typeof bundle.signedPreKey.publicKey !== 'string') return false;
   if (!Array.isArray(bundle.signedPreKey.signature)) return false;
   if (bundle.oneTimePreKey && typeof bundle.oneTimePreKey !== 'object') return false;
-  if (typeof bundle.bundleVersion !== 'number' || bundle.bundleVersion < 1) return false;
+  // клиент шлёт "version", legacy-формат использовал "bundleVersion"
+  const version = typeof bundle.bundleVersion === 'number' ? bundle.bundleVersion
+    : typeof bundle.version === 'number' ? bundle.version
+      : 0;
+  if (version < 1) return false;
   return true;
 }
 

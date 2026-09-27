@@ -658,6 +658,10 @@ useEffect(() => { stateRef.current = state; }, [state]);
               if (wsRef.current?.readyState === WebSocket.OPEN) {
                 wsRef.current.send(JSON.stringify({ type: 'get_blocked', payload: {} }));
                 wsRef.current.send(JSON.stringify({ type: 'get_sessions', payload: {} }));
+                try {
+                  const bundle = signalInitializedRef.current ? getPreKeyBundleForServer() : null;
+                  if (bundle) wsRef.current.send(JSON.stringify({ type: 'prekey_upload', payload: { bundle } }));
+                } catch {}
               }
               publicKeysRef.current = message.payload.publicKeys || {};
               channelMediaKeyRef.current = typeof message.payload.channelMediaKey === 'string' ? message.payload.channelMediaKey : null;
