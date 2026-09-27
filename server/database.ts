@@ -151,7 +151,7 @@ function ensureSchema(): void {
     d.exec(`ALTER TABLE reports ADD COLUMN source TEXT NOT NULL DEFAULT 'message'`);
   } catch {}
 
-  for (const col of ['signal_encrypted TEXT', 'x3dh_message TEXT', 'ratchet_public_key TEXT']) {
+  for (const col of ['signal_encrypted TEXT', 'x3dh_message TEXT', 'ratchet_public_key TEXT', 'client_id TEXT']) {
     try {
       d.exec(`ALTER TABLE messages ADD COLUMN ${col}`);
     } catch {}
@@ -569,8 +569,9 @@ export function getDmChannelId(userId1: string, userId2: string): string {
 const MESSAGE_COLUMNS = `id, sender_id AS senderId, sender_nickname AS senderNickname, text, timestamp, channel,
    encrypted, file_key AS fileKey, sealed, quoted_message_id AS quotedMessageId,
    quoted_message_text AS quotedMessageText, quoted_message_sender AS quotedMessageSender,
-   signal_encrypted AS signalEncrypted, x3dh_message AS x3dhMessage, ratchet_public_key AS ratchetPublicKey,
-   edited_at AS editedAt, expires_at AS expiresAt`;
+      signal_encrypted AS signalEncrypted, x3dh_message AS x3dhMessage, ratchet_public_key AS ratchetPublicKey,
+      client_id AS clientId,
+      edited_at AS editedAt, expires_at AS expiresAt`;
 
 function rowToMessage(row: any, includeText: boolean = true): any {
   return {
@@ -588,7 +589,8 @@ function rowToMessage(row: any, includeText: boolean = true): any {
     quotedMessageSender: row.quotedMessageSender || undefined,
     signalEncrypted: parseJson(row.signalEncrypted, null),
     x3dhMessage: parseJson(row.x3dhMessage, null),
-    ratchetPublicKey: parseJson(row.ratchetPublicKey, null),
+      ratchetPublicKey: parseJson(row.ratchetPublicKey, null),
+      clientId: row.clientId || undefined,
     editedAt: row.editedAt || undefined,
     expiresAt: row.expiresAt || undefined,
   };
@@ -609,16 +611,17 @@ export async function saveMessage(
   expiresAt?: number,
    quotedMessageText?: string,
    quotedMessageSender?: string,
-   signalEncrypted?: any,
-   x3dhMessage?: any,
-   ratchetPublicKey?: any
-): Promise<void> {
-  const d = getDb();
-  const res = d.prepare(`INSERT INTO messages (id, sender_id, sender_nickname, text, timestamp, channel, encrypted, file_key, sealed, quoted_message_id, quoted_message_text, quoted_message_sender, signal_encrypted, x3dh_message, ratchet_public_key, edited_at, expires_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-    .run(id, senderId, senderNickname, text, timestamp, channel, json(encrypted), json(fileKey), sealed ?? null, quotedMessageId ?? null, quotedMessageText ?? null, quotedMessageSender ?? null, json(signalEncrypted), json(x3dhMessage), json(ratchetPublicKey), editedAt ?? null, expiresAt ?? null);
-  syncFtsInsert(Number((res as any).lastInsertRowid), text);
-}
+      signalEncrypted?: any,
+      x3dhMessage?: any,
+      ratchetPublicKey?: any,
+      clientId?: string
+   ): Promise<void> {
+     const d = getDb();
+     const res = d.prepare(`INSERT INTO messages (id, sender_id, sender_nickname, text, timestamp, channel, encrypted, file_key, sealed, quoted_message_id, quoted_message_text, quoted_message_sender, signal_encrypted, x3dh_message, ratchet_public_key, edited_at, expires_at, client_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+       .run(id, senderId, senderNickname, text, timestamp, channel, json(encrypted), json(fileKey), sealed ?? null, quotedMessageId ?? null, quotedMessageText ?? null, quotedMessageSender ?? null, json(signalEncrypted), json(x3dhMessage), json(ratchetPublicKey), editedAt ?? null, expiresAt ?? null, clientId ?? null);
+     syncFtsInsert(Number((res as any).lastInsertRowid), text);
+   }
 
 export async function updateMessageText(messageId: string, senderId: string, newText: string): Promise<boolean> {
   const d = getDb();

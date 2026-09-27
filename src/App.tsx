@@ -6,6 +6,7 @@ import { encryptPrivateKey, decryptPrivateKey, isEncryptedBundle, isKeyBackup } 
 import { encryptPassword, decryptPassword } from './device-crypto';
 import { uploadFile } from './upload';
 import { encryptFile, buildFileKeyMap, unwrapAndDecrypt, unwrapAndDecryptChannel, wrapForMedia } from './media-crypto';
+import { newClientMessageId, rememberOwnMessageText, recallOwnMessageText } from './ownMessageCache';
 import { ConnectionContext, useConnection, type ConnectionState, type ConnectionAction, type ReplyTarget, type AdminReport } from './context';
 import { loadSettings, defaultSettings, translations, cn, formatTime, getDeviceLabel } from './utils';
 
@@ -754,12 +755,13 @@ useEffect(() => { stateRef.current = state; }, [state]);
                     const { ciphertext, ratchetPublicKey, messageNumber } = m.signalEncrypted;
                     text = await decryptWithSignal(sessionId, ciphertext, ratchetPublicKey, messageNumber);
                   } catch {
-                    text = '[encrypted]';
-                    if (!m.isOwn) healSignalSession(otherId);
+                    if (m.isOwn) text = recallOwnMessageText(m.clientId) || '[encrypted]';
+                    else { text = '[encrypted]'; healSignalSession(otherId); }
                   }
                 } else if (m.encrypted && privateKeyRef.current && userIdRef.current) {
                   try { text = await decryptMessage(m.encrypted, userIdRef.current, privateKeyRef.current); } catch { if (!text) text = '[encrypted]'; }
                 }
+                if (m.isOwn && text === '[encrypted]') text = recallOwnMessageText(m.clientId) || text;
                 return { id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text, timestamp: m.timestamp, isOwn: m.senderId === userIdRef.current, channel: otherId, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined, reactions: normalizeReactions(m.reactions) };
               }));
               dispatch({ type: 'SET_DM_MESSAGES', channel: otherId, messages: msgs });
@@ -786,12 +788,12 @@ useEffect(() => { stateRef.current = state; }, [state]);
                   msgText = await decryptWithSignal(sessionId, ciphertext, ratchetPublicKey, messageNumber);
                 } catch {
                     console.error('Decryption failed');
-                    msgText = '[encrypted]';
-                    if (!message.payload.isOwn) healSignalSession(otherId);
-                  }
+                    if (!message.payload.isOwn) { msgText = '[encrypted]'; healSignalSession(otherId); }
+                }
               } else if (message.payload.encrypted && privateKeyRef.current && userIdRef.current) {
                 try { msgText = await decryptMessage(message.payload.encrypted, userIdRef.current, privateKeyRef.current); } catch { if (!msgText) msgText = '[encrypted]'; }
               }
+              if (message.payload.isOwn && !msgText) msgText = recallOwnMessageText(message.payload.clientId) || '[encrypted]';
               dispatch({ type: 'ADD_DM_MESSAGE', channel: otherId, message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: msgText, timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, channel: otherId, fileKey: message.payload.fileKey, expiresAt: message.payload.expiresAt || undefined, quotedMessageId: message.payload.quotedMessageId ?? undefined, quotedMessageText: message.payload.quotedMessageText ?? undefined, quotedMessageSender: message.payload.quotedMessageSender ?? undefined, reactions: normalizeReactions(message.payload.reactions) } });
               dispatch({ type: 'SET_AVATARS', avatars: avatarFromSender(message.payload.senderId, message.payload.senderAvatar) });
               dispatch({ type: 'SET_DM_NAME', userId: otherId, nickname: message.payload.senderNickname });
@@ -1152,7 +1154,8 @@ useEffect(() => { stateRef.current = state; }, [state]);
     if (!privateKeyRef.current || !recipientKey) { console.error('Encryption keys not available'); return; }
     const content = options.text.trim();
     if (!content && !options.fileKey) return;
-    const payload: any = { toKey: recipientKey, text: '', ttl: ttlSeconds() };
+    const clientId = newClientMessageId();
+    const payload: any = { toKey: recipientKey, text: '', ttl: ttlSeconds(), clientId };
     if (options.fileKey) payload.fileKey = options.fileKey;
     if (options.sealed) payload.sealed = true;
     if (options.quoted) payload.quoted = { id: options.quoted.id, text: options.quoted.text, sender: options.quoted.senderNickname };
@@ -1163,6 +1166,8 @@ useEffect(() => { stateRef.current = state; }, [state]);
     }
     stampPendingX3dh(payload, to);
     ws.send(JSON.stringify({ type: 'dm_send', payload }));
+    // the ratchet only travels one way, so keep the plaintext to render our own message later
+    rememberOwnMessageText(clientId, content);
   }, [buildEncryptKeys, ttlSeconds]);
 
   const sendDm = useCallback(async (to: string, text: string, sealed: boolean = false, quoted?: ReplyTarget) => {

@@ -876,7 +876,7 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     }
   }
 
-    async function handleDmSend(senderId: string, ws: WebSocket, payload: { to?: string; toKey?: any; text: string; encrypted?: any; signalEncrypted?: any; x3dhMessage?: any; ratchetPublicKey?: number[]; fileKey?: Record<string, string>; sealed?: string; ttl?: number; quoted?: { id?: string; text?: string; sender?: string } }): Promise<void> {
+    async function handleDmSend(senderId: string, ws: WebSocket, payload: { to?: string; toKey?: any; text: string; encrypted?: any; signalEncrypted?: any; x3dhMessage?: any; ratchetPublicKey?: number[]; fileKey?: Record<string, string>; sealed?: string; ttl?: number; clientId?: string; quoted?: { id?: string; text?: string; sender?: string } }): Promise<void> {
     if (!checkMessageRateLimit(ip)) {
       send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down.' }, timestamp: Date.now() });
       return;
@@ -942,13 +942,16 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
 
     const x3dhMessage = payload?.x3dhMessage && typeof payload.x3dhMessage === 'object' ? payload.x3dhMessage : null;
     const ratchetPublicKey = Array.isArray(payload?.ratchetPublicKey) ? payload.ratchetPublicKey : null;
+    // the sender cannot decrypt its own ratchet ciphertext, so the client tags the message with an
+    // id of its own and recognises the echo and the history entry by it
+    const clientId = typeof payload?.clientId === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(payload.clientId) ? payload.clientId : undefined;
 
     if (isSignalEncrypted) {
-      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey, undefined, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined, payload.signalEncrypted, x3dhMessage, ratchetPublicKey);
+      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey, undefined, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined, payload.signalEncrypted, x3dhMessage, ratchetPublicKey, clientId);
     } else if (isSealed) {
-      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey, payload.sealed, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined);
+      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey, payload.sealed, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined, undefined, undefined, undefined, clientId);
     } else if (isEncrypted) {
-      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, payload.encrypted, channelId, fileKey, undefined, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined);
+      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, payload.encrypted, channelId, fileKey, undefined, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined, undefined, undefined, undefined, clientId);
     } else {
       send(ws, { type: 'error', payload: { code: 'ENCRYPTION_REQUIRED', message: 'Direct messages must be encrypted' }, timestamp: Date.now() });
       logSecurity('PLAINTEXT_DM_REJECTED', { from: senderId, to: recipientUser.id });
@@ -973,6 +976,7 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       quotedMessageId: quoted?.id,
       quotedMessageText: quoted?.text,
       quotedMessageSender: quoted?.sender,
+      clientId,
       reactions: await getReactionsForMessage(messageId),
     };
     for (const dev of recipientDevices) {
@@ -1142,6 +1146,7 @@ async function handleDmHistory(userId: string, ws: WebSocket, payload: { with: s
       quotedMessageId: m.quotedMessageId ?? null,
       quotedMessageText: m.quotedMessageText ?? null,
       quotedMessageSender: m.quotedMessageSender ?? null,
+      clientId: m.clientId ?? null,
       reactions: reactionsById.get(m.id) || [],
     }));
   }

@@ -164,4 +164,38 @@ describe('direct messages keep their ciphertext', () => {
     const err = await a.waitFor('error');
     expect(err.payload.code).toBe('ENCRYPTION_REQUIRED');
   });
+
+  it('carries the client message id back to the sender and into the history', async () => {
+    const clientId = 'a1b2c3d4e5f6a7b8';
+    a.clear();
+    a.send('dm_send', {
+      to: bId,
+      clientId,
+      signalEncrypted: { ciphertext: 'CCCC', ratchetPublicKey: 'DDDD', messageNumber: 4 },
+      ratchetPublicKey: [1, 2, 3, 4],
+    });
+
+    const echo = await a.waitFor('dm_message');
+    expect(echo.payload.isOwn).toBe(true);
+    expect(echo.payload.clientId).toBe(clientId);
+
+    b.clear();
+    b.send('dm_history', { with: aId });
+    const hist = await b.waitFor('dm_history');
+    const mine = hist.payload.messages.find((m: any) => m.clientId === clientId);
+    expect(mine).toBeTruthy();
+    expect(mine.signalEncrypted.ciphertext).toBe('CCCC');
+  });
+
+  it('drops a client message id that does not look like one', async () => {
+    a.clear();
+    a.send('dm_send', {
+      to: bId,
+      clientId: 'no spaces allowed here',
+      signalEncrypted: { ciphertext: 'EEEE', ratchetPublicKey: 'FFFF', messageNumber: 5 },
+      ratchetPublicKey: [1, 2, 3, 4],
+    });
+    const echo = await a.waitFor('dm_message');
+    expect(echo.payload.clientId ?? null).toBeNull();
+  });
 });

@@ -3,6 +3,7 @@ import { generateX3dhSafetyNumber } from '../../src/crypto';
 import { getAvatarText, getAvatarGradient, avatarUrl, formatProfileDate, translations } from '../../src/utils';
 import { pushEscapeLayer, topEscapeLayer, escapeStackSize, clearEscapeStack, isTypingTarget, runTopEscapeLayer, hasEscapeLayerAtLeast } from '../../src/escapeStack';
 import { resolveBackAction } from '../../src/backNavigation';
+import { newClientMessageId, isValidClientMessageId, rememberOwnMessageText, recallOwnMessageText, forgetOwnMessages } from '../../src/ownMessageCache';
 
 const b64 = (seed: number, len = 32) => Buffer.from(Array.from({ length: len }, (_, i) => (i * 7 + seed * 13 + 11) % 256)).toString('base64');
 
@@ -206,5 +207,76 @@ describe('back navigation', () => {
 
   it('prefers the chat over settings and the dm', () => {
     expect(resolveBackAction({ ...home, chatOpen: true, settingsOpen: true, inDm: true })).toBe('close-chat');
+  });
+});
+
+describe('own dm message cache', () => {
+  const makeStorage = () => {
+    const map = new Map<string, string>();
+    return {
+      getItem: (k: string) => map.get(k) ?? null,
+      setItem: (k: string, v: string) => { map.set(k, v); },
+      removeItem: (k: string) => { map.delete(k); },
+    };
+  };
+
+  it('generates ids the server accepts', () => {
+    for (let i = 0; i < 20; i++) {
+      const id = newClientMessageId();
+      expect(isValidClientMessageId(id)).toBe(true);
+      expect(id).toMatch(/^[0-9a-f]{24}$/);
+    }
+  });
+
+  it('rejects ids the server would drop', () => {
+    expect(isValidClientMessageId('short')).toBe(false);
+    expect(isValidClientMessageId('has spaces in the middle')).toBe(false);
+    expect(isValidClientMessageId('quote"injection;drop'.repeat(4))).toBe(false);
+    expect(isValidClientMessageId(42)).toBe(false);
+    expect(isValidClientMessageId(undefined)).toBe(false);
+  });
+
+  it('remembers and recalls the plaintext of a sent message', () => {
+    const storage = makeStorage();
+    const id = newClientMessageId();
+    rememberOwnMessageText(id, '[image]https://img.test/a.bin[/image]', storage);
+    expect(recallOwnMessageText(id, storage)).toBe('[image]https://img.test/a.bin[/image]');
+    expect(recallOwnMessageText(newClientMessageId(), storage)).toBeNull();
+    expect(recallOwnMessageText(undefined, storage)).toBeNull();
+  });
+
+  it('ignores empty text and invalid ids', () => {
+    const storage = makeStorage();
+    rememberOwnMessageText(newClientMessageId(), '', storage);
+    rememberOwnMessageText('bad', 'text', storage);
+    expect(recallOwnMessageText('bad', storage)).toBeNull();
+  });
+
+  it('survives a reload and can be cleared', () => {
+    const first = makeStorage();
+    const id = newClientMessageId();
+    rememberOwnMessageText(id, 'hello', first);
+
+    const second = makeStorage();
+    second.setItem('wn_own_dm_text', first.getItem('wn_own_dm_text') as string);
+    expect(recallOwnMessageText(id, second)).toBe('hello');
+
+    forgetOwnMessages(second);
+    expect(recallOwnMessageText(id, second)).toBeNull();
+  });
+
+  it('caps the number of stored messages', () => {
+    const storage = makeStorage();
+    for (let i = 0; i < 320; i++) rememberOwnMessageText(newClientMessageId(), 'm' + i, storage);
+    const stored = JSON.parse(storage.getItem('wn_own_dm_text') as string) as Record<string, string>;
+    expect(Object.keys(stored).length).toBeLessThanOrEqual(300);
+  });
+
+  it('ignores corrupted storage', () => {
+    const storage = makeStorage();
+    storage.setItem('wn_own_dm_text', 'not json at all');
+    expect(recallOwnMessageText(newClientMessageId(), storage)).toBeNull();
+    rememberOwnMessageText(newClientMessageId(), 'ok', storage);
+    expect(recallOwnMessageText(newClientMessageId(), storage)).toBeNull();
   });
 });
