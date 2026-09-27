@@ -317,6 +317,27 @@ function hasUnsafeOwnKeys(obj: any): boolean {
   return Object.keys(obj).some(k => k === '__proto__' || k === 'constructor' || k === 'prototype');
 }
 
+function preKeyBundleDiagnostics(bundle: any): Record<string, any> {
+  if (!bundle || typeof bundle !== 'object') return { present: false };
+  const spk = bundle.signedPreKey;
+  return {
+    present: true,
+    keys: Object.keys(bundle).join(','),
+    jsonLen: (() => { try { return JSON.stringify(bundle).length; } catch { return -1; } })(),
+    identityKeyType: typeof bundle.identityKey,
+    identityKeyLen: typeof bundle.identityKey === 'string' ? bundle.identityKey.length : -1,
+    ed25519Type: typeof bundle.ed25519PublicKey,
+    ed25519Len: typeof bundle.ed25519PublicKey === 'string' ? bundle.ed25519PublicKey.length : -1,
+    spkType: spk === null ? 'null' : typeof spk,
+    spkPublicKeyType: spk && typeof spk === 'object' ? typeof spk.publicKey : 'n/a',
+    signatureIsArray: Array.isArray(spk && spk.signature),
+    signatureLen: Array.isArray(spk && spk.signature) ? spk.signature.length : -1,
+    oneTimePreKeyType: bundle.oneTimePreKey === undefined ? 'undefined' : typeof bundle.oneTimePreKey,
+    version: typeof bundle.version,
+    bundleVersion: typeof bundle.bundleVersion,
+  };
+}
+
 function isValidPreKeyBundle(bundle: any): boolean {
   if (typeof bundle !== 'object' || bundle === null) return false;
   const MAX_BUNDLE_SIZE = 10000;
@@ -1157,6 +1178,8 @@ async function handleDmHistory(userId: string, ws: WebSocket, payload: { with: s
     if (payload?.bundle && isValidPreKeyBundle(payload.bundle)) {
       await setPreKeyBundle(userId, payload.bundle);
       send(ws, { type: 'prekey_uploaded', payload: {}, timestamp: Date.now() });
+    } else {
+      logSecurity('PREKEY_REJECTED', { userId, ...preKeyBundleDiagnostics(payload?.bundle) });
     }
   }
 
@@ -1188,6 +1211,9 @@ async function handleDmHistory(userId: string, ws: WebSocket, payload: { with: s
     const isBlockedByMe = !isMe && (await getBlockedUserIds(userId)).includes(targetId);
     const isBanned = await getUserBanned(targetId);
     const safetyNumber = await computeSafetyNumber(userId, targetId);
+    if (!safetyNumber && !isMe) {
+      logSecurity('SAFETY_NUMBER_UNAVAILABLE', { viewer: userId, target: targetId, selfBundle: !!(await getIdentityKeyB64(userId)), peerBundle: !!(await getIdentityKeyB64(targetId)) });
+    }
     send(ws, {
       type: 'profile',
       payload: {

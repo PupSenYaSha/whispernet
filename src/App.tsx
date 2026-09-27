@@ -511,6 +511,12 @@ useEffect(() => { stateRef.current = state; }, [state]);
     dispatch({ type: 'SET_PROFILE', profile: null });
   }, []);
 
+  const fetchPeerPreKey = useCallback((userId: string) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'prekey_fetch', payload: { userIds: [userId] } }));
+    }
+  }, []);
+
   const openReport = useCallback((target: ProfileInfo) => {
     dispatch({ type: 'SET_REPORT_TARGET', target });
     dispatch({ type: 'SET_PROFILE', profile: null });
@@ -605,7 +611,7 @@ useEffect(() => { stateRef.current = state; }, [state]);
               await initPreKeyManager(auth.password);
               signalInitializedRef.current = true;
             }
-            const preKeyBundle = getPreKeyBundleForServer();
+            const preKeyBundle = await getPreKeyBundleForServer();
             ws.send(JSON.stringify({ type: 'auth_register', payload: { nickname: auth.nickname, password: auth.password, publicKey: keys.publicKey, preKeyBundle, deviceId: getDeviceId(), deviceInfo } }));
           } else {
             let savedKey = localStorage.getItem(`wn_pk_${nick}`);
@@ -638,7 +644,7 @@ useEffect(() => { stateRef.current = state; }, [state]);
               await initPreKeyManager(auth.password);
               signalInitializedRef.current = true;
             }
-            const preKeyBundle = getPreKeyBundleForServer();
+            const preKeyBundle = await getPreKeyBundleForServer();
             ws.send(JSON.stringify({ type: 'auth_login', payload: { nickname: auth.nickname, password: auth.password, preKeyBundle, deviceId: getDeviceId(), deviceInfo } }));
           }
         }
@@ -659,7 +665,7 @@ useEffect(() => { stateRef.current = state; }, [state]);
                 wsRef.current.send(JSON.stringify({ type: 'get_blocked', payload: {} }));
                 wsRef.current.send(JSON.stringify({ type: 'get_sessions', payload: {} }));
                 try {
-                  const bundle = signalInitializedRef.current ? getPreKeyBundleForServer() : null;
+                  const bundle = signalInitializedRef.current ? await getPreKeyBundleForServer() : null;
                   if (bundle) wsRef.current.send(JSON.stringify({ type: 'prekey_upload', payload: { bundle } }));
                 } catch {}
               }
@@ -1284,7 +1290,7 @@ useEffect(() => { stateRef.current = state; }, [state]);
         bannedUsers, adminGetBanned, adminError, dismissAdminError,
         blockedUsers, refreshBlocked, blockUser, unblockUser, reportUser,
         showImportModal: (data: any, mode: 'setup' | 'settings') => setImportModal({ data, mode }),
-        openProfile, closeProfile, openReport, closeReport, backToProfile, setMyAvatar, removeMyAvatar,
+        openProfile, closeProfile, fetchPeerPreKey, openReport, closeReport, backToProfile, setMyAvatar, removeMyAvatar,
       }}>
         {children}
         <ProfileOverlay />

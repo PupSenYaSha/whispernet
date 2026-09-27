@@ -159,7 +159,7 @@ function arrOf(v: any): number[] | undefined {
   return Array.from(toBytes(v) || new Uint8Array(0));
 }
 
-export function getPreKeyBundleForServer() {
+export async function getPreKeyBundleForServer() {
   return preKeyManager.getPublicKeyForServer();
 }
 

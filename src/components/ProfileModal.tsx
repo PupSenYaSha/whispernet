@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import type { ProfileInfo } from '../types';
 import { useConnection } from '../context';
@@ -6,17 +6,56 @@ import { Avatar } from './Avatar';
 import { cn, formatProfileDate } from '../utils';
 import { fileToAvatarDataUrl } from '../avatar';
 import { useEscapeKey } from '../useEscapeKey';
+import { generateX3dhSafetyNumber } from '../crypto';
 
 export function ProfileModal({ profile }: { profile: ProfileInfo }) {
-  const { state, t, openDm, blockUser, unblockUser, openReport, closeProfile, setMyAvatar, removeMyAvatar, blockedUsers } = useConnection();
+  const { state, t, openDm, blockUser, unblockUser, openReport, closeProfile, setMyAvatar, removeMyAvatar, blockedUsers, getMyIdentityKeyB64, getPeerIdentityKeyB64, fetchPeerPreKey } = useConnection();
   const fileRef = useRef<HTMLInputElement>(null);
   const [savingAvatar, setSavingAvatar] = useState(false);
   const [safetyCopied, setSafetyCopied] = useState(false);
+  const [clientSafety, setClientSafety] = useState<string | null>(null);
+  const [safetyPending, setSafetyPending] = useState(false);
+  const retryRef = useRef(0);
 
   useEscapeKey(closeProfile, true, 86);
 
   const avatar = state.avatars[profile.id] ?? profile.avatar;
   const isBlocked = profile.isMe ? false : (blockedUsers.some((b: { id: string }) => b.id === profile.id) || !!profile.isBlockedByMe);
+  const safetyNumber = profile.safetyNumber || clientSafety;
+
+  const computeClientSafety = useCallback(async () => {
+    if (profile.safetyNumber || profile.isMe) { setClientSafety(null); setSafetyPending(false); return; }
+    const my = getMyIdentityKeyB64();
+    if (!my) { setSafetyPending(false); return; }
+    let peer = getPeerIdentityKeyB64(profile.id);
+    if (!peer) {
+      setSafetyPending(true);
+      fetchPeerPreKey(profile.id);
+      await new Promise((r) => setTimeout(r, 700));
+      peer = getPeerIdentityKeyB64(profile.id);
+      setSafetyPending(false);
+      if (!peer) return;
+    }
+    try {
+      const n = await generateX3dhSafetyNumber(my, peer);
+      setClientSafety(n);
+    } catch {
+      setClientSafety(null);
+    }
+  }, [profile.id, profile.isMe, profile.safetyNumber, getMyIdentityKeyB64, getPeerIdentityKeyB64, fetchPeerPreKey]);
+
+  useEffect(() => {
+    retryRef.current = 0;
+    setClientSafety(null);
+    void computeClientSafety();
+  }, [computeClientSafety]);
+
+  useEffect(() => {
+    if (profile.safetyNumber || clientSafety || safetyPending || profile.isMe) return;
+    if (retryRef.current >= 3) return;
+    const t = setTimeout(() => { retryRef.current += 1; void computeClientSafety(); }, 1200);
+    return () => clearTimeout(t);
+  }, [profile.safetyNumber, clientSafety, safetyPending, profile.isMe, computeClientSafety]);
 
   const pickAvatar = async (file: File | null) => {
     if (!file) return;
@@ -30,9 +69,9 @@ export function ProfileModal({ profile }: { profile: ProfileInfo }) {
   };
 
   const copySafety = async () => {
-    if (!profile.safetyNumber) return;
+    if (!safetyNumber) return;
     try {
-      await navigator.clipboard.writeText(profile.safetyNumber);
+      await navigator.clipboard.writeText(safetyNumber);
       setSafetyCopied(true);
       setTimeout(() => setSafetyCopied(false), 1500);
     } catch {}
@@ -76,15 +115,25 @@ export function ProfileModal({ profile }: { profile: ProfileInfo }) {
             <span className="text-[14px] font-semibold text-fg-primary">{formatProfileDate(profile.createdAt)}</span>
           </div>
 
-          {profile.safetyNumber && (
+          {safetyNumber && (
             <button onClick={copySafety}
               className="w-full flex items-center justify-between gap-3 px-4 py-3 rounded-2xl bg-bg-tertiary border border-border-default text-left hover:bg-bg-tertiary/70 transition-colors">
               <div className="min-w-0">
                 <div className="text-[11px] font-medium text-fg-muted uppercase tracking-wider">{t('safety_number_profile')}</div>
-                <div className="text-[13px] font-mono text-fg-primary leading-relaxed break-all">{profile.safetyNumber}</div>
+                <div className="text-[13px] font-mono text-fg-primary leading-relaxed break-all">{safetyNumber}</div>
               </div>
               <span className="text-[12px] text-fg-muted flex-shrink-0">{safetyCopied ? t('done') : t('copy')}</span>
             </button>
+          )}
+          {!safetyNumber && safetyPending && (
+            <div className="px-4 py-3 rounded-2xl bg-bg-tertiary border border-border-default text-[12px] text-fg-muted text-center animate-pulse">
+              {t('safety_number_loading')}
+            </div>
+          )}
+          {!safetyNumber && !safetyPending && !profile.isMe && (
+            <div className="px-4 py-3 rounded-2xl bg-bg-tertiary border border-border-default text-[12px] text-fg-muted text-center">
+              {t('safety_number_unavailable')}
+            </div>
           )}
 
           {profile.isMe ? (

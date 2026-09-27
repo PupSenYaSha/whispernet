@@ -127,6 +127,7 @@ export interface ConnectionContextType {
   showImportModal: (data: any, mode: 'setup' | 'settings') => void;
   openProfile: (userId: string) => void;
   closeProfile: () => void;
+  fetchPeerPreKey: (userId: string) => void;
   openReport: (target: ProfileInfo) => void;
   closeReport: () => void;
   backToProfile: () => void;
