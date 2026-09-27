@@ -49,9 +49,9 @@ export class TestClient {
 
   constructor(private url: string, public label = 'client') { }
 
-  connect(): Promise<this> {
+  connect(headers?: Record<string, string>): Promise<this> {
     return new Promise((resolve, reject) => {
-      this.ws = new WebSocket(this.url);
+      this.ws = headers ? new WebSocket(this.url, { headers }) : new WebSocket(this.url);
       this.ws.on('open', () => resolve(this));
       this.ws.on('error', reject);
       this.ws.on('message', (data) => {

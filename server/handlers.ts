@@ -249,11 +249,42 @@ interface ClientMessage {
   payload: any;
 }
 
-function getClientIp(ws: WebSocket): string {
-  const req = (ws as any).req;
-  const socketIp = req?.socket?.remoteAddress || (ws as any)._socket?.remoteAddress;
-  if (!socketIp) return 'unknown';
-  return socketIp.replace(/^::ffff:/, '');
+function normalizeIp(raw: unknown): string {
+  if (typeof raw !== 'string') return 'unknown';
+  let ip = raw.trim().toLowerCase();
+  if (!ip) return 'unknown';
+  if (ip.startsWith('[')) {
+    const end = ip.indexOf(']');
+    if (end > 0) ip = ip.slice(1, end);
+  }
+  return ip.replace(/^::ffff:/, '');
+}
+
+function isPrivatePeer(ip: string): boolean {
+  if (ip === 'unknown' || ip === '::1' || ip === '127.0.0.1') return true;
+  if (ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('169.254.')) return true;
+  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
+  if (/^(fc|fd|fe80)/.test(ip)) return true;
+  return false;
+}
+
+function getClientIp(ws: WebSocket, upgradeRequest?: any): string {
+  // @fastify/websocket hands the upgrade request to the route handler as the second argument, and
+  // the ws socket itself does not keep it, so the forwarded headers are only reachable from here
+  const req = upgradeRequest || (ws as any).req || (ws as any)._req;
+  const socketIp = normalizeIp(req?.socket?.remoteAddress || (ws as any)._socket?.remoteAddress);
+  const headers = req?.headers || {};
+  const forwarded = headers['x-forwarded-for'];
+  const first = Array.isArray(forwarded) ? forwarded[0] : typeof forwarded === 'string' ? forwarded.split(',')[0] : '';
+  const realIp = typeof headers['x-real-ip'] === 'string' ? headers['x-real-ip'] : '';
+  // behind a tunnel or reverse proxy every socket arrives from the proxy itself, so the address
+  // was identical for all users and they shared one rate limit bucket. Trust the forwarding
+  // header only when the direct peer is private, otherwise anyone could spoof their way past it.
+  if ((first || realIp) && isPrivatePeer(socketIp)) {
+    const candidate = normalizeIp(first || realIp);
+    if (candidate !== 'unknown') return candidate;
+  }
+  return socketIp;
 }
 
 function checkMessageRateLimit(ip: string): boolean {
@@ -267,17 +298,38 @@ function checkMessageRateLimit(ip: string): boolean {
 
 const RATE_LIMITS_DISABLED = process.env.DISABLE_RATE_LIMITS === '1';
 
+/** Milliseconds left before the auth limit for this ip expires, 0 when there is no active limit. */
+function authRateRemainingMs(ip: string): number {
+  const entry = authAttempts.get(ip);
+  if (!entry) return 0;
+  return Math.max(0, entry.resetAt - Date.now());
+}
+
 function checkAuthRateLimit(ip: string): boolean {
   if (RATE_LIMITS_DISABLED) return true;
+  if (authRateRemainingMs(ip) === 0) return true;
+  return (authAttempts.get(ip)?.count ?? 0) < MAX_AUTH_ATTEMPTS;
+}
+
+/** Only rejected credentials count towards the limit, so reconnects and autologin stay free. */
+function recordAuthFailure(ip: string): void {
+  if (RATE_LIMITS_DISABLED) return;
   const now = Date.now();
   const entry = authAttempts.get(ip);
   if (!entry || now > entry.resetAt) {
     authAttempts.set(ip, { count: 1, resetAt: now + RATE_LIMIT_WINDOW });
-    return true;
+    return;
   }
-  if (entry.count >= MAX_AUTH_ATTEMPTS) return false;
   entry.count++;
-  return true;
+}
+
+function clearAuthRateLimit(ip: string): void {
+  authAttempts.delete(ip);
+}
+
+function authLimitReason(ip: string): string {
+  const seconds = Math.max(1, Math.ceil(authRateRemainingMs(ip) / 1000));
+  return `Too many attempts. Try again in ${seconds} second(s).`;
 }
 
 function checkConnectionLimit(ip: string): boolean {
@@ -386,10 +438,10 @@ function broadcast(message: ServerMessage, excludeUserId?: string): void {
   }
 }
 
-export function handleConnection(ws: WebSocket): void {
-  let currentUserId: string | null = null;
-  let currentDeviceId: string | null = null;
-  const ip = getClientIp(ws);
+export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
+   let currentUserId: string | null = null;
+   let currentDeviceId: string | null = null;
+   const ip = getClientIp(ws, upgradeRequest);
   totalConnections++;
 
   if (!checkConnectionLimit(ip)) {
@@ -551,8 +603,8 @@ export function handleConnection(ws: WebSocket): void {
 
   async function handleAuthLogin(ws: WebSocket, payload: { nickname: string; password: string; preKeyBundle?: any; deviceId?: string; deviceInfo?: string }): Promise<void> {
     if (!checkAuthRateLimit(ip)) {
-      logSecurity('RATE_LIMIT_AUTH', { ip });
-      send(ws, { type: 'auth_failure', payload: { reason: 'Too many attempts. Try again in 1 minute.' }, timestamp: Date.now() });
+      logSecurity('RATE_LIMIT_AUTH', { ip, nickname: typeof payload?.nickname === 'string' ? payload.nickname.slice(0, 32) : '' });
+      send(ws, { type: 'auth_failure', payload: { reason: authLimitReason(ip) }, timestamp: Date.now() });
       return;
     }
 
@@ -592,6 +644,7 @@ export function handleConnection(ws: WebSocket): void {
       const newCount = lockEntry ? lockEntry.count + 1 : 1;
       const lockedUntil = newCount >= MAX_FAILED_LOGINS ? Date.now() + ACCOUNT_LOCKOUT_DURATION : 0;
       recordFailedLogin(lockKey, newCount, lockedUntil);
+      recordAuthFailure(ip);
       logSecurity('LOGIN_FAILED', { nickname: cleanNick, ip, attempts: newCount, locked: lockedUntil > 0 });
       send(ws, { type: 'auth_failure', payload: { reason: 'Invalid nickname or password' }, timestamp: Date.now() });
       return;
@@ -600,6 +653,7 @@ export function handleConnection(ws: WebSocket): void {
       const newCount = lockEntry ? lockEntry.count + 1 : 1;
       const lockedUntil = newCount >= MAX_FAILED_LOGINS ? Date.now() + ACCOUNT_LOCKOUT_DURATION : 0;
       recordFailedLogin(lockKey, newCount, lockedUntil);
+      recordAuthFailure(ip);
       logSecurity('LOGIN_FAILED', { nickname: cleanNick, ip, attempts: newCount, locked: lockedUntil > 0 });
       send(ws, { type: 'auth_failure', payload: { reason: 'Invalid nickname or password' }, timestamp: Date.now() });
       return;
@@ -607,6 +661,7 @@ export function handleConnection(ws: WebSocket): void {
 
     logSecurity('LOGIN_SUCCESS', { nickname: cleanNick, ip });
     failedLogins.delete(lockKey);
+    clearAuthRateLimit(ip);
 
     if (await getUserBanned(user.id)) {
       logSecurity('LOGIN_BANNED', { nickname: cleanNick, ip });
@@ -638,7 +693,7 @@ export function handleConnection(ws: WebSocket): void {
 
   async function handleAuthRegister(ws: WebSocket, payload: { nickname: string; password: string; publicKey?: any; preKeyBundle?: any; deviceId?: string; deviceInfo?: string }): Promise<void> {
     if (!checkAuthRateLimit(ip)) {
-      send(ws, { type: 'auth_failure', payload: { reason: 'Too many attempts. Try again in 1 minute.' }, timestamp: Date.now() });
+      send(ws, { type: 'auth_failure', payload: { reason: authLimitReason(ip) }, timestamp: Date.now() });
       return;
     }
 
@@ -694,6 +749,8 @@ export function handleConnection(ws: WebSocket): void {
       send(ws, { type: 'auth_failure', payload: { reason: 'Nickname already taken' }, timestamp: Date.now() });
       return;
     }
+
+    clearAuthRateLimit(ip);
 
     if (payload.preKeyBundle && isValidPreKeyBundle(payload.preKeyBundle)) {
       await setPreKeyBundle(user.id, payload.preKeyBundle);

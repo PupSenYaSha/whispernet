@@ -1,5 +1,5 @@
 export const RATE_LIMIT_WINDOW = 60_000;
-export const MAX_AUTH_ATTEMPTS = 5;
+export const MAX_AUTH_ATTEMPTS = 10;
 export const MIN_MESSAGE_INTERVAL = 500;
 export const MAX_SESSIONS_PER_USER = 3;
 export const MAX_CONNECTIONS_PER_IP = 10;

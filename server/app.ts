@@ -415,7 +415,7 @@ export function createApp(clientDir?: string) {
         return;
       }
 
-      handleConnection(ws);
+      handleConnection(ws, req);
     });
   });
 
