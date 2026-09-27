@@ -26,7 +26,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-      - name: Package Windows installers (Tauri: nsis + msi)
+      - name: 'Package Windows installers (Tauri nsis + msi)'
         run: npm run tauri build -- --bundles nsis,msi
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
