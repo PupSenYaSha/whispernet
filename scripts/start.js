@@ -29,6 +29,9 @@ const MIME = {
   '.tar': 'application/x-tar',
 };
 
+const RELEASE_TAG = process.env.RELEASE_TAG || 'v1.0.0';
+const RELEASE_BASE = `https://github.com/PupSenYaSha/whispernet/releases/download/${RELEASE_TAG}`;
+
 function serveStatic(req, res) {
   let url = (req.url || '/').split('?')[0];
   if (url === '/') url = '/index.html';
@@ -42,6 +45,14 @@ function serveStatic(req, res) {
   }
 
   if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+    // a download that was never copied into site/downloads must not be a dead link: send the
+    // visitor to the release asset instead, so the button keeps working on a fresh clone
+    const download = /^\/downloads\/([A-Za-z0-9._-]+)$/.exec(url);
+    if (download) {
+      res.writeHead(302, { Location: `${RELEASE_BASE}/${download[1]}` });
+      res.end();
+      return;
+    }
     res.writeHead(404);
     res.end('Not Found');
     return;
