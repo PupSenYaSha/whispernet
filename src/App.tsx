@@ -38,7 +38,9 @@ import { ProfileModal } from './components/ProfileModal';
 import { ReportModal } from './components/ReportModal';
 import { Avatar } from './components/Avatar';
 import { useEscapeKey } from './useEscapeKey';
-import { runTopEscapeLayer } from './escapeStack';
+import { runTopEscapeLayer, hasEscapeLayerAtLeast, isTypingTarget } from './escapeStack';
+import { resolveBackAction } from './backNavigation';
+import { App as CapacitorApp } from '@capacitor/app';
 
 const WS_URL = import.meta.env.VITE_WS_URL || (() => {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1420,23 +1422,34 @@ function AppInner() {
   const inDmRef = useRef(state.activeChannel !== 'general');
   inDmRef.current = state.activeChannel !== 'general';
   useEffect(() => {
-    if (typeof window === 'undefined' || !window.Capacitor?.Plugins?.App?.addListener) return;
-    const handleBackButton = () => {
-      if (document.activeElement instanceof HTMLTextAreaElement || document.activeElement instanceof HTMLInputElement) { (document.activeElement as HTMLElement).blur(); return; }
-      // 1) верхнее модальное окно: профиль, репорт, safety number, подтверждения, lightbox
-      if (runTopEscapeLayer(40)) return;
-      // 2) открытый чат на мобильном -> список чатов
-      if (mobileChatOpenRef.current) { setMobileChatOpen(false); setSearchQuery(''); return; }
-      // 3) настройки -> главный экран
-      if (mobileTabRef.current === 'settings') { setMobileTab('home'); setSearchQuery(''); return; }
-      // 4) открыт диалог с собеседником -> общий чат
-      if (inDmRef.current) { openGeneralRef.current(); return; }
-      // 5) главный экран -> выход из приложения
-      try { window.Capacitor?.Plugins?.App?.exitApp?.(); } catch {}
+    const applyBack = (exitOnRoot: boolean) => {
+      const action = resolveBackAction({
+        typing: isTypingTarget(document.activeElement),
+        modalOpen: hasEscapeLayerAtLeast(40),
+        chatOpen: mobileChatOpenRef.current,
+        settingsOpen: mobileTabRef.current === 'settings',
+        inDm: inDmRef.current,
+      });
+      if (action === 'blur-input') { (document.activeElement as HTMLElement).blur(); return; }
+      if (action === 'dismiss-modal') { runTopEscapeLayer(40); return; }
+      if (action === 'close-chat') { setMobileChatOpen(false); setSearchQuery(''); return; }
+      if (action === 'close-settings') { setMobileTab('home'); setSearchQuery(''); return; }
+      if (action === 'open-general') { openGeneralRef.current(); return; }
+      // only the home screen is left, and there the gesture may leave the app
+      if (!exitOnRoot) return;
+      try { CapacitorApp.exitApp(); } catch {}
     };
-    let backHandler: any = null;
-    window.Capacitor.Plugins.App.addListener('backButton', handleBackButton).then((h: any) => { backHandler = h; });
-    return () => { try { backHandler?.remove(); } catch {} };
+
+    // without the App plugin Capacitor closes the activity on back whenever the WebView has
+    // no history to pop, so the listener has to be registered through the plugin itself
+    let handler: { remove: () => Promise<void> } | undefined;
+    CapacitorApp.addListener('backButton', () => applyBack(true)).then((h) => { handler = h; }).catch(() => {});
+    const onPopstate = () => applyBack(false);
+    window.addEventListener('popstate', onPopstate);
+    return () => {
+      window.removeEventListener('popstate', onPopstate);
+      try { handler?.remove(); } catch {}
+    };
   }, []);
 
   const pushView = useCallback((kind: 'chat' | 'settings') => {
@@ -1445,17 +1458,6 @@ function AppInner() {
 
   const popView = useCallback(() => {
     try { window.history.back(); } catch {}
-  }, []);
-
-  useEffect(() => {
-    const onBackNav = () => {
-      if (runTopEscapeLayer(40)) return;
-      if (mobileChatOpenRef.current) { setMobileChatOpen(false); setSearchQuery(''); return; }
-      if (mobileTabRef.current === 'settings') { setMobileTab('home'); setSearchQuery(''); return; }
-      if (inDmRef.current) { openGeneralRef.current(); return; }
-    };
-    window.addEventListener('popstate', onBackNav);
-    return () => window.removeEventListener('popstate', onBackNav);
   }, []);
 
   if (state.status !== 'connected' && state.userId) {

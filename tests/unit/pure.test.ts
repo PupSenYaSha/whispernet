@@ -1,7 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import { generateX3dhSafetyNumber } from '../../src/crypto';
 import { getAvatarText, getAvatarGradient, avatarUrl, formatProfileDate, translations } from '../../src/utils';
-import { pushEscapeLayer, topEscapeLayer, escapeStackSize, clearEscapeStack, isTypingTarget, runTopEscapeLayer } from '../../src/escapeStack';
+import { pushEscapeLayer, topEscapeLayer, escapeStackSize, clearEscapeStack, isTypingTarget, runTopEscapeLayer, hasEscapeLayerAtLeast } from '../../src/escapeStack';
+import { resolveBackAction } from '../../src/backNavigation';
 
 const b64 = (seed: number, len = 32) => Buffer.from(Array.from({ length: len }, (_, i) => (i * 7 + seed * 13 + 11) % 256)).toString('base64');
 
@@ -164,5 +165,46 @@ describe('escape layer stack', () => {
     clearEscapeStack();
     expect(runTopEscapeLayer(40)).toBe(false);
     expect(runTopEscapeLayer()).toBe(false);
+  });
+
+  it('hasEscapeLayerAtLeast looks for a layer without running it', () => {
+    clearEscapeStack();
+    let ran = false;
+    const off1 = pushEscapeLayer({ layer: 30, handleWhileTyping: true, run: () => { ran = true; } });
+    const off2 = pushEscapeLayer({ layer: 86, handleWhileTyping: true, run: () => { ran = true; } });
+    expect(hasEscapeLayerAtLeast(40)).toBe(true);
+    expect(hasEscapeLayerAtLeast(91)).toBe(false);
+    expect(ran).toBe(false);
+    off2();
+    expect(hasEscapeLayerAtLeast(40)).toBe(false);
+    expect(hasEscapeLayerAtLeast(0)).toBe(true);
+    off1();
+    expect(hasEscapeLayerAtLeast(0)).toBe(false);
+  });
+});
+
+describe('back navigation', () => {
+  const home = { typing: false, modalOpen: false, chatOpen: false, settingsOpen: false, inDm: false };
+
+  it('exits the app from the home screen only', () => {
+    expect(resolveBackAction(home)).toBe('exit');
+  });
+
+  it('unfocuses a text field before anything else', () => {
+    expect(resolveBackAction({ ...home, typing: true, modalOpen: true })).toBe('blur-input');
+  });
+
+  it('closes a modal before navigating anywhere', () => {
+    expect(resolveBackAction({ ...home, modalOpen: true, chatOpen: true, settingsOpen: true, inDm: true })).toBe('dismiss-modal');
+  });
+
+  it('walks chat -> settings -> dm -> home', () => {
+    expect(resolveBackAction({ ...home, chatOpen: true })).toBe('close-chat');
+    expect(resolveBackAction({ ...home, settingsOpen: true })).toBe('close-settings');
+    expect(resolveBackAction({ ...home, inDm: true })).toBe('open-general');
+  });
+
+  it('prefers the chat over settings and the dm', () => {
+    expect(resolveBackAction({ ...home, chatOpen: true, settingsOpen: true, inDm: true })).toBe('close-chat');
   });
 });

@@ -29,6 +29,11 @@ export function escapeStackSize(): number {
   return stack.length;
 }
 
+/** Есть ли активный слой с layer >= minLayer. Без побочных эффектов. */
+export function hasEscapeLayerAtLeast(minLayer = 0): boolean {
+  return stack.some((e) => e.layer >= minLayer);
+}
+
 /** Выполняет обработчик самого верхнего слоя с layer >= minLayer. Возвращает true, если слой был. */
 export function runTopEscapeLayer(minLayer = 0): boolean {
   const candidates = stack.filter((e) => e.layer >= minLayer);
