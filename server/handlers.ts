@@ -294,7 +294,7 @@ function recordFailedLogin(pairKey: string, nicknameKey: string): { count: numbe
 /** Forgets a nickname's failures once the right password came through. */
 function clearFailedLogins(nicknameKey: string): void {
   nicknameFailures.delete(nicknameKey);
-  for (const [key, entry] of failedLogins) {
+  for (const key of [...failedLogins.keys()]) {
     if (key.endsWith('|' + nicknameKey)) failedLogins.delete(key);
   }
 }
@@ -1101,15 +1101,6 @@ function canonicalJwk(jwk: any): string {
   return JSON.stringify(sorted);
 }
 
-function b64ToBytes(b64: string): Buffer | null {
-  try {
-    const buf = Buffer.from(b64, 'base64');
-    return buf.length > 0 ? buf : null;
-  } catch {
-    return null;
-  }
-}
-
 async function handleAddReaction(userId: string, ws: WebSocket, payload: { messageId: string; emoji: string }): Promise<void> {
     if (!payload?.messageId || typeof payload.messageId !== 'string') return;
     if (!isValidEmoji(payload.emoji)) return;
@@ -1172,22 +1163,21 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
   const channel = getDmChannelId(userId, payload.with);
   const parts = channel.split(':');
   if (parts.length !== 2 || (parts[0] !== userId && parts[1] !== userId)) return;
-  const before = Number.isFinite(payload.before) ? Number(payload.before) : undefined;
-  const limit = Math.min(Math.max(Number(payload.limit) || 50, 1), 100);
-  const messages = await getDmHistory(userId, payload.with, limit, before);
-  const publicKeys = await getPublicKeysByIds([userId, payload.with]);
-  const userMeta = await buildAvatarInfoMap();
-  send(ws, {
-   type: 'dm_history',
-   payload: {
+const before = Number.isFinite(payload.before) ? Number(payload.before) : undefined;
+    const limit = Math.min(Math.max(Number(payload.limit) || 50, 1), 100);
+    const messages = await getDmHistory(userId, payload.with, limit, before);
+    const publicKeys = await getPublicKeysByIds([userId, payload.with]);
+    const userMeta = await buildAvatarInfoMap();
+    const page = {
    channel,
    with: payload.with,
    publicKeys,
    hasMore: messages.length === limit,
    messages: await handleDmHistoryMessages(userId, messages, userMeta),
-   },
-      timestamp: Date.now(),
-    });
+   };
+    // An older slice has to be announced as a page. Answering it with the plain type made the client
+    // replace the whole conversation with this slice, and an empty page blanked the chat entirely.
+    send(ws, { type: before === undefined ? 'dm_history' : 'dm_history_page', payload: page, timestamp: Date.now() });
   }
 
   
@@ -1270,8 +1260,8 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
       return;
     }
     const text = sanitizeText(payload.text);
-    if (!text || text.length > 4096) {
-      send(ws, { type: 'error', payload: { code: 'MESSAGE_TOO_LONG', message: 'Message too long (max 4096 chars)' }, timestamp: Date.now() });
+    if (!text || text.length > MAX_MESSAGE_CHARS) {
+      send(ws, { type: 'error', payload: { code: 'MESSAGE_TOO_LONG', message: `Message too long (max ${MAX_MESSAGE_CHARS} chars)` }, timestamp: Date.now() });
       return;
     }
     const target = await getMessageById(payload.messageId);
@@ -1282,8 +1272,7 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
     const updated = await updateMessageText(payload.messageId, userId, text);
     if (updated) {
       const timestamp = Date.now();
-      send(ws, { type: 'message_edited', payload: { messageId: payload.messageId, text, editedAt: timestamp }, timestamp });
-      broadcast({ type: 'message_edited', payload: { messageId: payload.messageId, text, editedAt: timestamp }, timestamp: Date.now() }, userId);
+      broadcast({ type: 'message_edited', payload: { messageId: payload.messageId, text, editedAt: timestamp }, timestamp }, userId);
     } else {
       send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
     }
