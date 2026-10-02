@@ -6,6 +6,118 @@ export interface EncryptedFile {
   rawKey: ArrayBuffer;
 }
 
+/**
+ * A large attachment used to be encrypted in one piece, which meant the plaintext, the ciphertext and
+ * a third copy of the ciphertext behind a PNG wrapper all had to exist at the same time. That is three
+ * times the file size in memory at once, and it is why a private chat was capped at a hundred
+ * megabytes: a phone cannot be asked to hold three copies of a film.
+ *
+ * So the ciphertext is written a chunk at a time instead, and handed to the network as a stream. Only
+ * one chunk is ever resident, which lifts the limit to the same one gigabyte the global chat allows.
+ */
+const CHUNK_BYTES = 4 * 1024 * 1024;
+const MEDIA_FORMAT_V2 = 2;
+
+export interface EncryptedFileStream {
+  stream: ReadableStream<Uint8Array>;
+  /** The whole plaintext length, so a reader can allocate before it starts. */
+  size: number;
+  rawKey: ArrayBuffer;
+  /**
+   * Carried in the file key entry alongside the wrapped key, which is where every reader looks for
+   * it. The chunked format uses a nonce per chunk instead, but the entry still has the shape readers
+   * expect, and it is what a reader falls back to if it ever meets an older body.
+   */
+  ivB64: string;
+}
+
+function u32(value: number): Uint8Array {
+  const b = new Uint8Array(4);
+  new DataView(b.buffer).setUint32(0, value, false);
+  return b;
+}
+
+/** Reads exact byte counts out of a response stream, keeping at most one chunk buffered. */
+class ByteReader {
+  private reader: ReadableStreamDefaultReader<Uint8Array>;
+  private buf: Uint8Array<ArrayBuffer> = new Uint8Array(0);
+  private done = false;
+
+  constructor(stream: ReadableStream<Uint8Array>) {
+    this.reader = stream.getReader();
+  }
+
+  private async fill(min: number): Promise<boolean> {
+    while (this.buf.length < min && !this.done) {
+      const { value, done } = await this.reader.read();
+      if (done) { this.done = true; break; }
+      if (!value || !value.length) continue;
+      const next = new Uint8Array(this.buf.length + value.length);
+      next.set(this.buf, 0);
+      next.set(value, this.buf.length);
+      this.buf = next;
+    }
+    return this.buf.length >= min;
+  }
+
+  /** Exactly n bytes, or null if the stream ended first. */
+  async tryTake(n: number): Promise<Uint8Array<ArrayBuffer> | null> {
+    if (!(await this.fill(n))) return null;
+    const out = this.buf.subarray(0, n);
+    this.buf = this.buf.subarray(n);
+    return out;
+  }
+
+  /** Whatever is left, which for a chunked body means everything that has not been read yet. */
+  async takeAll(): Promise<Uint8Array<ArrayBuffer>> {
+    while (!this.done) await this.fill(this.buf.length + 1);
+    const out = this.buf;
+    this.buf = new Uint8Array(0);
+    return out;
+  }
+
+  cancel(): void { try { this.reader.cancel(); } catch { /* the stream is already gone */ } }
+}
+
+export async function encryptFileStream(file: Blob): Promise<EncryptedFileStream> {
+  const key = await crypto.subtle.generateKey(ALGO_AES, true, ['encrypt', 'decrypt']);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const rawKey = await crypto.subtle.exportKey('raw', key);
+
+  let offset = 0;
+  let headerSent = false;
+
+  const stream = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (!headerSent) {
+        headerSent = true;
+        const header = new TextEncoder().encode(JSON.stringify({
+          v: MEDIA_FORMAT_V2,
+          iv: bufToBase64(iv.buffer),
+          size: file.size,
+          chunk: CHUNK_BYTES,
+        }));
+        controller.enqueue(new Uint8Array(PNG_PREFIX));
+        controller.enqueue(u32(header.length));
+        controller.enqueue(header);
+      }
+      if (offset >= file.size) { controller.close(); return; }
+      const end = Math.min(offset + CHUNK_BYTES, file.size);
+      const plain = new Uint8Array(await file.slice(offset, end).arrayBuffer());
+      offset = end;
+      // a fresh nonce per chunk, carried in front of it, so a truncated body is detected rather than
+      // silently decrypted into a file with a hole in the middle
+      const chunkIv = crypto.getRandomValues(new Uint8Array(12));
+      const ct = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv: chunkIv }, key, plain));
+      controller.enqueue(u32(ct.length));
+      controller.enqueue(chunkIv);
+      controller.enqueue(ct);
+    },
+  });
+
+  return { stream, size: file.size, rawKey, ivB64: bufToBase64(iv.buffer) };
+}
+
 export function bufToBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);
   let bin = '';
@@ -60,11 +172,136 @@ export function wrapForMedia(ciphertext: ArrayBuffer): Blob {
   return new Blob([out], { type: 'image/png' });
 }
 
-export function stripMediaWrap(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+function stripMediaWrap(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
   const buf = bytes.buffer as ArrayBuffer;
   const i = indexOfSeq(bytes, IEND);
   if (i < 0) return new Uint8Array(buf.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength));
   return new Uint8Array(buf.slice(bytes.byteOffset + i + 8, bytes.byteOffset + bytes.byteLength)); 
+}
+
+/**
+ * Pulls bytes off a response stream until the wrapper PNG has been consumed, so the ciphertext that
+ * follows can be read as a chunk stream. The wrapper is located the same way the in-memory path
+ * locates it, which is why a host that re-encoded the image still works.
+ */
+/**
+ * Steps over the wrapper PNG so the ciphertext that follows can be read as a stream.
+ *
+ * The wrapper is located by its IEND marker rather than by length, so a host that touched the bytes
+ * does not break the read. When there is no wrapper at all — an attachment stored without one — the
+ * bytes that were scanned are handed back, because they are the start of the ciphertext and dropping
+ * them would corrupt the file in a way that only shows up as a decryption failure much later.
+ */
+async function readThroughWrap(reader: ByteReader): Promise<{ found: boolean; scanned: Uint8Array<ArrayBuffer> }> {
+  const LIMIT = PNG_PREFIX.length + 4096;
+  const seen = new Uint8Array(LIMIT);
+  let filled = 0;
+  for (;;) {
+    if (filled >= 4 && seen[filled - 4] === 0x49 && seen[filled - 3] === 0x45 && seen[filled - 2] === 0x4e && seen[filled - 1] === 0x44) {
+      // the marker itself is already spent, since the scan consumed it; only the crc after it still
+      // has to be stepped over before the ciphertext begins
+      await reader.tryTake(4);
+      return { found: true, scanned: seen.subarray(0, filled) };
+    }
+    if (filled >= LIMIT) return { found: false, scanned: seen };
+    const byte = await reader.tryTake(1);
+    if (!byte) return { found: false, scanned: seen.subarray(0, filled) };
+    seen[filled++] = byte[0];
+  }
+}
+
+interface MediaHeader { v: number; size: number }
+
+/** A header is a short json blob, so a length that could not be one means this is not a header. */
+const MAX_HEADER_BYTES = 4096;
+
+/**
+ * Tries to read a version header without committing to it. A body in the old format begins with
+ * ciphertext, whose first four bytes read as an enormous length, so the length check is what tells
+ * the two apart before anything is treated as a header. Anything already read is handed back as the
+ * start of the ciphertext for the old path.
+ */
+async function tryReadHeader(
+  reader: ByteReader
+): Promise<{ header: MediaHeader } | { legacyStart: Uint8Array<ArrayBuffer> }> {
+  const lenBytes = await reader.tryTake(4);
+  if (!lenBytes) return { legacyStart: new Uint8Array(0) };
+  const len = new DataView(lenBytes.buffer, lenBytes.byteOffset, 4).getUint32(0, false);
+  if (len === 0 || len > MAX_HEADER_BYTES) return { legacyStart: lenBytes };
+  const body = await reader.tryTake(len);
+  if (!body) return { legacyStart: lenBytes };
+  try {
+    const parsed = JSON.parse(new TextDecoder().decode(body)) as MediaHeader;
+    if (parsed && parsed.v === MEDIA_FORMAT_V2 && typeof parsed.size === 'number') {
+      return { header: parsed };
+    }
+  } catch { /* not json, so it is ciphertext that happens to start with a plausible length */ }
+  const joined = new Uint8Array(lenBytes.length + body.length);
+  joined.set(lenBytes, 0);
+  joined.set(body, lenBytes.length);
+  return { legacyStart: joined };
+}
+
+/**
+ * Reads a chunked attachment a chunk at a time. The plaintext parts are handed to a Blob as they are
+ * produced rather than being concatenated into one buffer, so the file never occupies the heap.
+ */
+async function decryptChunkedBody(reader: ByteReader, aesKey: CryptoKey, header: MediaHeader): Promise<Blob> {
+  const parts: BlobPart[] = [];
+  let produced = 0;
+  for (;;) {
+    const b = await reader.tryTake(4);
+    if (!b) break; // end of the body
+    const len = new DataView(b.buffer, b.byteOffset, 4).getUint32(0, false);
+    if (len === 0) break;
+    const chunkIv = await reader.tryTake(12);
+    const ct = await reader.tryTake(len);
+    if (!chunkIv || !ct) throw new Error('Attachment truncated');
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: chunkIv }, aesKey, ct);
+    parts.push(new Uint8Array(plain));
+    produced += plain.byteLength;
+  }
+  // a body that stopped early produces a shorter file, which the length catches. The length itself
+  // is not authenticated, but every chunk is, so the worst a dishonest server can do is refuse to
+  // hand over the file at all.
+  if (produced !== header.size) throw new Error('Attachment truncated');
+  return new Blob(parts);
+}
+
+/**
+ * Opens an attachment, whatever format it was written in.
+ *
+ * Anything sent before the chunked format existed is one AES-GCM message over the whole file, so it
+ * has to be read into memory to be opened — which is fine, because it was written under a ceiling
+ * that made that necessary. New attachments stream: only one chunk is ever resident, which is what
+ * lifted the private-chat limit to the same gigabyte the global chat allows.
+ */
+export async function openStreamedAttachment(
+  res: Response,
+  rawKey: ArrayBuffer,
+  legacyIvB64: string
+): Promise<Blob> {
+  if (!res.body) throw new Error('Empty response');
+  const aesKey = await crypto.subtle.importKey('raw', rawKey, ALGO_AES, false, ['decrypt']);
+  const reader = new ByteReader(res.body as ReadableStream<Uint8Array>);
+
+  // an attachment with no wrapper is one that was stored without one, and the scan window is the
+  // start of its ciphertext
+  const wrap = await readThroughWrap(reader);
+  let legacyStart: Uint8Array<ArrayBuffer> = wrap.found ? new Uint8Array(0) : wrap.scanned;
+
+  if (wrap.found) {
+    const attempt = await tryReadHeader(reader);
+    if ('header' in attempt) return decryptChunkedBody(reader, aesKey, attempt.header);
+    legacyStart = attempt.legacyStart;
+  }
+
+  const rest = await reader.takeAll();
+  const whole = new Uint8Array(legacyStart.length + rest.length);
+  whole.set(legacyStart, 0);
+  whole.set(rest, legacyStart.length);
+  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: base64ToBuf(legacyIvB64) }, aesKey, stripMediaWrap(whole));
+  return new Blob([plaintext]);
 }
 
 export async function wrapFileKeyFor(
@@ -131,14 +368,10 @@ export async function unwrapAndDecrypt(
   if (!ivB64 || !wrappedB64) throw new Error('Malformed file key');
   const priv = await crypto.subtle.importKey('jwk', privateKeyJwk, { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['decrypt']);
   const rawKey = await crypto.subtle.decrypt({ name: 'RSA-OAEP' }, priv, base64ToBuf(wrappedB64));
-  const aesKey = await crypto.subtle.importKey('raw', rawKey, ALGO_AES, false, ['decrypt']);
 
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
-  const raw = new Uint8Array(await res.arrayBuffer());
-  const ciphertext = stripMediaWrap(raw);
-  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: base64ToBuf(ivB64) }, aesKey, ciphertext);
-  return new Blob([plaintext]);
+  return openStreamedAttachment(res, rawKey, ivB64);
 }
 
 export async function unwrapAndDecryptChannelBlob(
@@ -159,12 +392,41 @@ export async function unwrapAndDecryptChannel(
   const [ivB64] = entry.split(':');
   if (!ivB64) throw new Error('Malformed file key');
   const rawKey = await unwrapAndDecryptChannelBlob(entry, channelMediaKeyB64);
-  const aesKey = await crypto.subtle.importKey('raw', rawKey, ALGO_AES, false, ['decrypt']);
 
   const res = await fetch(url);
   if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
-  const raw = new Uint8Array(await res.arrayBuffer());
-  const ciphertext = stripMediaWrap(raw);
-  const plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: base64ToBuf(ivB64) }, aesKey, ciphertext);
-  return new Blob([plaintext]);
+  return openStreamedAttachment(res, rawKey, ivB64);
+}
+
+/**
+ * A media message carries its url inside a `[image]...[/image]` marker. The marker used to be
+ * matched with five separate copies of the regex, two of which disagreed about the capture groups,
+ * so the reader asked for group 2 of a regex that only had one: every attachment was fetched as
+ * `/api/media?url=undefined` and reported "Could not decrypt attachment". One parser, one shape,
+ * no capture indices to get wrong.
+ */
+const MEDIA_TAG_RE = /^\[(image|video)\]([\s\S]*?)\[\/\1\]/;
+
+export type MediaKind = 'image' | 'video';
+
+export interface MediaTag {
+  kind: MediaKind;
+  url: string;
+}
+
+export function parseMediaTag(text: string | null | undefined): MediaTag | null {
+  if (!text) return null;
+  const m = MEDIA_TAG_RE.exec(text);
+  // an empty url would turn into a request for /api/media?url= and then a decryption error, so a
+  // bare marker with nothing in it is not a media message
+  if (!m || !m[2]) return null;
+  return { kind: m[1] as MediaKind, url: m[2] };
+}
+
+export function isMediaMessage(text: string | null | undefined): boolean {
+  return parseMediaTag(text) !== null;
+}
+
+export function buildMediaTag(kind: MediaKind, url: string): string {
+  return `[${kind}]${url}[/${kind}]`;
 }

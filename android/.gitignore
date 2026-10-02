@@ -1,4 +1,4 @@
-# Using Android gitignore template: https://github.com/github/gitignore/blob/HEAD/Android.gitignore
+﻿# Using Android gitignore template: https://github.com/github/gitignore/blob/HEAD/Android.gitignore
 
 # Built application files
 *.apk
@@ -53,9 +53,9 @@ captures/
 .idea/navEditor.xml
 
 # Keystore files
-# Uncomment the following lines if you do not want to check your keystore files in.
-#*.jks
-#*.keystore
+# a signing key must never be committed
+*.jks
+*.keystore
 
 # External native build folder generated in Android Studio 2.2 and later
 .externalNativeBuild

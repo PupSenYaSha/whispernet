@@ -23,12 +23,16 @@ import {
 } from './constants.js';
 import https from 'https';
 import http from 'http';
+import type { Readable } from 'stream';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 
 
 const MIME_RE = /^(image|video)\/[a-z0-9.+-]+$/i;
+
+/** A bare host, optionally with a port - nothing that could smuggle directives into a header. */
+const SAFE_HOST_RE = /^[a-z0-9]([a-z0-9.-]*[a-z0-9])?(:\d{1,5})?$/i;
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -79,14 +83,18 @@ function checkMediaRate(key: string): boolean {
 }
 
 function sanitizeFilename(name: string): string {
-  return name.replace(/[\x00-\x1f\x7f\/\\"]/g, '').slice(0, 128) || 'upload';
+  return name.replace(/[\x00-\x1f\x7f/\\"]/g, '').slice(0, 128) || 'upload';
 }
 
 function resolveUploadRateKey(req: any): string {
-  const userId = resolveUploadTokenUser(req.headers?.['x-wn-upload-token']);
+  // The token arrives in a header for uploads, but media is fetched by <img> and <video>, which cannot
+  // carry one. Without reading it from the query string as well, every media request fell back to the
+  // address, which put a whole family or office on one shared counter.
+  const userId = resolveUploadTokenUser(req.headers?.['x-wn-upload-token'])
+    ?? resolveUploadTokenUser((req.query as any)?.t);
   if (userId) return 'user:' + userId;
   // anonymous callers fall back to the address, which is all we know about them
-  return 'ip:' + (req.ip || 'unknown');
+  return 'ip:' + (req.ip || req.socket?.remoteAddress || 'unknown');
 }
 
 function getMediaBase(): URL {
@@ -121,7 +129,11 @@ export function createApp(clientDir?: string) {
     reply.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
     reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     const host = req.headers.host || 'localhost';
-    reply.header('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://${mediaHost} http://${mediaHost}; media-src 'self' blob: https://${mediaHost} http://${mediaHost}; connect-src 'self' wss://${host} ws://${host}; font-src 'self' https://fonts.gstatic.com`);
+    // the policy is built from a host the client chose, so only a plain host:port may go in -
+    // anything else could carry extra directives into the header
+    const configured = (process.env.PUBLIC_HOST || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+    const cspHost = SAFE_HOST_RE.test(configured) ? configured : (SAFE_HOST_RE.test(host) ? host : 'localhost');
+    reply.header('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://${mediaHost} http://${mediaHost}; media-src 'self' blob: https://${mediaHost} http://${mediaHost}; connect-src 'self' wss://${cspHost} ws://${cspHost}; font-src 'self' https://fonts.gstatic.com`);
     const origin = req.headers.origin;
     if (origin) {
       let allowedHost = '';
@@ -141,6 +153,14 @@ export function createApp(clientDir?: string) {
 
   app.register(fastifyWebsocket, { options: { maxPayload: MAX_WS_PAYLOAD_SIZE } });
   app.register(fastifyMultipart, { limits: { fileSize: MAX_UPLOAD_SIZE, files: 1, fields: 0, parts: 1 } });
+
+  // The streamed upload route posts the encrypted attachment as the request body, which fastify
+  // refuses by default because it has no idea what to do with an unparsed octet stream. Passing the
+  // stream through untouched is the point: anything that read it into memory here would defeat the
+  // reason the route exists.
+  app.addContentTypeParser('application/octet-stream', (_req, payload, done) => {
+    done(null, payload);
+  });
 
   const resolvedClientDir = clientDir || path.join(__dirname, '../dist/client');
   app.register(fastifyStatic, {
@@ -177,7 +197,6 @@ export function createApp(clientDir?: string) {
   });
 
   app.get('/api/media', async (req, reply) => {
-    const ip = req.ip || 'unknown';
     if (!checkMediaRate(resolveUploadRateKey(req))) {
       return reply.code(429).send({ error: 'Rate limit' });
     }
@@ -216,7 +235,7 @@ export function createApp(clientDir?: string) {
       headers: { 'User-Agent': 'WhisperNet' },
       timeout: 15000,
     }, (proxyRes) => {
-      let proxyResCt = proxyRes.headers['content-type'] || 'application/octet-stream';
+      const proxyResCt = proxyRes.headers['content-type'] || 'application/octet-stream';
       const MEDIA_CT_ALLOW_RE = /^(image\/(png|jpeg|jpg|webp|gif)|video\/(mp4|webm|quicktime)|audio\/(mpeg|mp4|ogg|wav|webm)|application\/octet-stream)\b/i;
       if (!MEDIA_CT_ALLOW_RE.test(proxyResCt)) {
         proxyRes.destroy();
@@ -260,72 +279,34 @@ export function createApp(clientDir?: string) {
     return reply;
   });
 
-  app.post('/api/upload', async (req, reply) => {
-    const rateKey = resolveUploadRateKey(req);
-    if (!checkUploadRate(rateKey)) {
-      return reply.code(429).send({ error: 'Rate limit' });
-    }
-
-    const tmpPath = path.join(os.tmpdir(), 'wn-upload-' + crypto.randomBytes(8).toString('hex'));
+  /**
+   * Everything that happens once the bytes are safely on disk: kept locally, or handed to the media
+   * host. Shared by the multipart and the streamed route so a large encrypted attachment and a small
+   * picture are stored in exactly the same way, and neither is ever held in memory to do it.
+   */
+  async function storeTempUpload(
+    reply: any,
+    tmpPath: string,
+    size: number,
+    rawName: string,
+    mimeType: string
+  ): Promise<void> {
     const cleanup = () => { try { fs.unlinkSync(tmpPath); } catch { /* already gone */ } };
 
-    let part: any;
     try {
-      part = await req.file();
-    } catch (e: any) {
-      const code = String(e?.code || '');
-      if (code.startsWith('FST_FIELDS_LIMIT') || code.startsWith('FST_FILES_LIMIT') || code.startsWith('FST_PARTS_LIMIT')) {
-        return reply.code(400).send({ error: 'No file' });
-      }
-      if (code.startsWith('FST_REQ_FILE_TOO_LARGE')) {
-        return reply.code(413).send({ error: 'File too large' });
-      }
-      throw e;
-    }
-    if (!part) return reply.code(400).send({ error: 'No file' });
-    if (!MIME_RE.test(part.mimetype)) {
-      part.file.resume();
-      return reply.code(400).send({ error: 'Invalid file type' });
-    }
-
-    // the file may be a gigabyte, so it never sits in memory: it lands in a temp file and every
-    // later step streams from there
-    const size = await new Promise<number>((resolve, reject) => {
-      const out = fs.createWriteStream(tmpPath);
-      let bytes = 0;
-      part.file.on('data', (c: Buffer) => { bytes += c.length; });
-      part.file.on('error', reject);
-      out.on('error', reject);
-      out.on('finish', () => resolve(bytes));
-      part.file.pipe(out);
-    }).catch(() => -1);
-
-    if (size < 0) {
-      cleanup();
-      return reply.code(413).send({ error: 'File too large' });
-    }
-    if (size > MAX_UPLOAD_SIZE) {
-      cleanup();
-      return reply.code(413).send({ error: 'File too large' });
-    }
-
-    if ((process.env.MEDIA_STORAGE || 'remote') === 'local') {
-      const id = crypto.randomBytes(16).toString('hex');
-      try {
+      if ((process.env.MEDIA_STORAGE || 'remote') === 'local') {
+        const id = crypto.randomBytes(16).toString('hex');
         await fs.promises.copyFile(tmpPath, path.join(getMediaDir(), id));
-        return reply.send({ url: '/media/' + id });
-      } finally {
-        cleanup();
+        reply.send({ url: '/media/' + id });
+        return;
       }
-    }
 
-    const boundary = '----FormBoundary' + crypto.randomUUID();
-    const fileName = sanitizeFilename((part.filename || 'upload').replace(/\.[a-z0-9]{1,5}$/i, '')) + '.bin';
-    const head = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${part.mimetype}\r\n\r\n`);
-    const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
-    const contentLength = head.length + size + tail.length;
+      const boundary = '----FormBoundary' + crypto.randomUUID();
+      const fileName = sanitizeFilename((rawName || 'upload').replace(/\.[a-z0-9]{1,5}$/i, '')) + '.bin';
+      const head = Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${mimeType}\r\n\r\n`);
+      const tail = Buffer.from(`\r\n--${boundary}--\r\n`);
+      const contentLength = head.length + size + tail.length;
 
-    try {
       await new Promise<void>((resolve) => {
         const uploadUrl = new URL('/upload', getMediaBase());
         const lib = uploadUrl.protocol === 'https:' ? https : http;
@@ -399,6 +380,122 @@ export function createApp(clientDir?: string) {
     } finally {
       cleanup();
     }
+  }
+
+  /** Writes a request stream to disk, refusing anything past the ceiling without buffering it. */
+  async function drainToTempFile(source: Readable, tmpPath: string): Promise<number> {
+    return new Promise<number>((resolve) => {
+      const out = fs.createWriteStream(tmpPath);
+      let bytes = 0;
+      let settled = false;
+      const finish = (n: number) => { if (!settled) { settled = true; resolve(n); } };
+
+      source.on('data', (c: Buffer) => {
+        bytes += c.length;
+        if (bytes <= MAX_UPLOAD_SIZE || settled) return;
+        // Past the ceiling the answer is decided. Stopped rather than drained: letting a client keep
+        // sending a gigabyte it has already been refused is the one thing this route must not do, and
+        // waiting for the body to finish before replying would hang it instead.
+        try { source.unpipe(out); } catch { /* already detached */ }
+        out.end();
+        finish(-1);
+        try { source.destroy(); } catch { /* already gone */ }
+      });
+      source.on('error', () => finish(-1));
+      out.on('error', () => finish(-1));
+      out.on('finish', () => finish(bytes));
+      source.pipe(out);
+    });
+  }
+
+  app.post('/api/upload', async (req, reply) => {
+    const rateKey = resolveUploadRateKey(req);
+    if (!checkUploadRate(rateKey)) {
+      return reply.code(429).send({ error: 'Rate limit' });
+    }
+
+    const tmpPath = path.join(os.tmpdir(), 'wn-upload-' + crypto.randomBytes(8).toString('hex'));
+    const cleanup = () => { try { fs.unlinkSync(tmpPath); } catch { /* already gone */ } };
+
+    let part: any;
+    try {
+      part = await req.file();
+    } catch (e: any) {
+      const code = String(e?.code || '');
+      if (code.startsWith('FST_FIELDS_LIMIT') || code.startsWith('FST_FILES_LIMIT') || code.startsWith('FST_PARTS_LIMIT')) {
+        return reply.code(400).send({ error: 'No file' });
+      }
+      if (code.startsWith('FST_REQ_FILE_TOO_LARGE')) {
+        return reply.code(413).send({ error: 'File too large' });
+      }
+      throw e;
+    }
+    if (!part) return reply.code(400).send({ error: 'No file' });
+    if (!MIME_RE.test(part.mimetype)) {
+      part.file.resume();
+      return reply.code(400).send({ error: 'Invalid file type' });
+    }
+
+    // the file may be a gigabyte, so it never sits in memory: it lands in a temp file and every
+    // later step streams from there
+    const size = await new Promise<number>((resolve, reject) => {
+      const out = fs.createWriteStream(tmpPath);
+      let bytes = 0;
+      part.file.on('data', (c: Buffer) => { bytes += c.length; });
+      part.file.on('error', reject);
+      out.on('error', reject);
+      out.on('finish', () => resolve(bytes));
+      part.file.pipe(out);
+    }).catch(() => -1);
+
+    if (size < 0) {
+      cleanup();
+      return reply.code(413).send({ error: 'File too large' });
+    }
+    if (size > MAX_UPLOAD_SIZE) {
+      cleanup();
+      return reply.code(413).send({ error: 'File too large' });
+    }
+
+    await storeTempUpload(reply, tmpPath, size, part.filename || 'upload', part.mimetype);
+    return reply;
+  });
+
+  /**
+   * The same upload, but the body is the encrypted stream itself rather than a multipart form.
+   *
+   * A multipart request has to arrive as one finished Blob, so a client with a large attachment had
+   * to hold it whole before the request could start. Here the request begins with the first chunk and
+   * the bytes are written straight to disk as they arrive, which is what lets a private chat carry
+   * the same gigabyte the global chat already did.
+   */
+  app.post('/api/upload-raw', async (req, reply) => {
+    const rateKey = resolveUploadRateKey(req);
+    if (!checkUploadRate(rateKey)) {
+      return reply.code(429).send({ error: 'Rate limit' });
+    }
+
+    const mimeType = String((req.query as any)?.type || 'application/octet-stream');
+    if (!MIME_RE.test(mimeType)) return reply.code(400).send({ error: 'Invalid file type' });
+    const name = String((req.query as any)?.name || 'media.png').slice(0, 128);
+
+    const declared = Number((req.headers as any)?.['content-length'] || 0);
+    if (Number.isFinite(declared) && declared > MAX_UPLOAD_SIZE) {
+      return reply.code(413).send({ error: 'File too large' });
+    }
+
+    const tmpPath = path.join(os.tmpdir(), 'wn-upload-' + crypto.randomBytes(8).toString('hex'));
+    // the registered parser hands the stream through untouched, so nothing has read it yet
+    const body = (req as any).body;
+    const source = body && typeof body.pipe === 'function' ? body : req.raw;
+    const size = await drainToTempFile(source, tmpPath);
+    if (size < 0) {
+      try { fs.unlinkSync(tmpPath); } catch { /* already gone */ }
+      return reply.code(413).send({ error: 'File too large' });
+    }
+
+    await storeTempUpload(reply, tmpPath, size, name, mimeType);
+    return reply;
   });
 
   app.register(async (fastify) => {

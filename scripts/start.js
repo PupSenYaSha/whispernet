@@ -60,25 +60,30 @@ function serveStatic(req, res) {
 
   const ext = path.extname(filePath).toLowerCase();
   const mime = MIME[ext] || 'application/octet-stream';
+  // release artifacts sit under fixed names, so caching them for a year handed every returning
+  // visitor the same build forever
+  const immutable = /\.(js|mjs|css|woff2?)$/.test(ext);
+  const cacheControl = immutable
+    ? 'public, max-age=31536000, immutable'
+    : 'no-cache';
 
   try {
-    const content = readFileSync(filePath);
     res.writeHead(200, {
       'Content-Type': mime,
-      'Cache-Control': ext === '.html' || ext === '.css' || ext === '.js' ? 'no-cache' : 'public, max-age=31536000',
-      
+      'Cache-Control': cacheControl,
       'X-Content-Type-Options': 'nosniff',
       'X-Frame-Options': 'sameorigin',
       'Referrer-Policy': 'no-referrer',
       'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
       'Content-Security-Policy': "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; script-src 'self'",
     });
-    res.end(content);
+    res.end(readFileSync(filePath));
   } catch {
     res.writeHead(500);
     res.end('Internal Server Error');
   }
 }
+
 
 function startSiteServerIfPresent() {
   return new Promise((resolve) => {
@@ -96,6 +101,15 @@ function startSiteServerIfPresent() {
   });
 }
 
+// held at module scope: startMessenger reports a crash from its own exit handler, which runs
+// outside main()
+let siteServer = null;
+
+function releaseSite() {
+  if (siteServer) siteServer.close();
+  siteServer = null;
+}
+
 function startMessenger(port) {
   return new Promise((resolve, reject) => {
     const tsx = path.join(ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs');
@@ -107,31 +121,43 @@ function startMessenger(port) {
       env: { ...process.env, PORT: String(port) },
     });
 
-    let started = false;
+    let exited = false;
+    let sawBanner = false;
 
     child.stdout.on('data', (data) => {
       const text = data.toString();
       process.stdout.write(text);
-      if (!started && text.includes('Server running')) {
-        started = true;
+      if (!sawBanner && text.includes('Server running')) {
+        sawBanner = true;
         resolve(child);
       }
     });
 
     child.stderr.on('data', (data) => process.stderr.write(data));
     child.on('error', reject);
-    child.on('exit', (code) => {
-      if (!started) reject(new Error(`Messenger exited with code ${code}`));
+    // the exit has to be reported at any time, not only during startup: a server that dies after
+    // the banner used to leave the wrapper printing "Ready!" and hanging on a dead port forever
+    child.on('exit', (code, signal) => {
+      exited = true;
+      const how = signal ? `signal ${signal}` : `code ${code}`;
+      console.error(`  (messenger process exited with ${how})`);
+      if (!sawBanner) reject(new Error(`Messenger exited with ${how}`));
+      else {
+        releaseSite();
+        process.exit(typeof code === 'number' && code !== 0 ? code : 1);
+      }
     });
 
+    // if the banner never arrives the child is stuck or the port is taken; give up rather than hang
     setTimeout(() => {
-      if (!started) {
-        started = true;
-        resolve(child);
+      if (!sawBanner && !exited) {
+        console.error('  (messenger did not report that it started within 10s)');
+        reject(new Error('Messenger did not start within 10s'));
       }
-    }, 5000);
+    }, 10000);
   });
 }
+
 
 async function main() {
   console.log('\n  Starting WhisperNet...\n');
@@ -145,13 +171,13 @@ async function main() {
     process.exit(1);
   }
 
-  const siteServer = await startSiteServerIfPresent();
+  siteServer = await startSiteServerIfPresent();
 
   console.log('\n  Ready! Press Ctrl+C to stop.\n');
 
   const shutdown = () => {
     console.log('\n  Shutting down...\n');
-    if (siteServer) siteServer.close();
+    releaseSite();
     if (messengerProcess && !messengerProcess.killed) {
       messengerProcess.kill('SIGTERM');
     }

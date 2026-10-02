@@ -1,4 +1,15 @@
-apply plugin: 'com.android.application'
+﻿apply plugin: 'com.android.application'
+
+// one source of truth for the version: package.json. Bumping it there is enough, and a frozen
+// versionCode made a rebuilt APK impossible to install over the one already on the phone.
+def appVersion = new groovy.json.JsonSlurper().parseText(file('../../package.json').text).version
+def appVersionCode = {
+    def parts = appVersion.split(/\./)
+    def major = parts[0].replaceAll(/\D/, '')
+    def minor = parts.size() > 1 ? parts[1].replaceAll(/\D/, '') : '0'
+    def patch = parts.size() > 2 ? parts[2].replaceAll(/\D/, '') : '0'
+    (major.toInteger() * 10000) + (minor.toInteger() * 100) + patch.toInteger()
+}()
 
 android {
     namespace = "com.whispernet.app"
@@ -7,8 +18,8 @@ android {
         applicationId "com.whispernet.app"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode project.hasProperty('versionCodeOverride') ? project.versionCodeOverride.toInteger() : appVersionCode
+        versionName appVersion
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,10 +27,26 @@ android {
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        // the release key lives on the build machine or in CI only, so a checkout without it can
+        // still assemble the debug variant instead of failing outright
+        release {
+            def storePath = project.findProperty('WHISPERNET_KEYSTORE') ?: System.getenv('WHISPERNET_KEYSTORE')
+            if (storePath && file(storePath).exists()) {
+                storeFile file(storePath)
+                storePassword project.findProperty('WHISPERNET_KEYSTORE_PASSWORD') ?: System.getenv('WHISPERNET_KEYSTORE_PASSWORD')
+                keyAlias project.findProperty('WHISPERNET_KEY_ALIAS') ?: System.getenv('WHISPERNET_KEY_ALIAS')
+                keyPassword project.findProperty('WHISPERNET_KEY_PASSWORD') ?: System.getenv('WHISPERNET_KEY_PASSWORD')
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            if (signingConfigs.release.storeFile != null) {
+                signingConfig signingConfigs.release
+            }
         }
     }
 }

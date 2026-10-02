@@ -11,8 +11,41 @@ on:
 permissions:
   contents: write
 
+# two dispatches for the same tag would interleave their uploads
+concurrency:
+  group: binaries-${{ github.event.inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  TAG: ${{ github.event.inputs.tag }}
+
 jobs:
+  verify:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Read the version the build will report
+        id: check
+        run: |
+          set -euo pipefail
+          PKG=$(node -p "require('./package.json').version")
+          TAURI=$(node -p "require('./src-tauri/tauri.conf.json').version")
+          CARGO=$(grep -m1 '^version' src-tauri/Cargo.toml | cut -d'"' -f2)
+          echo "package.json=$PKG tauri=$TAURI cargo=$CARGO tag=$TAG"
+          if [ "$TAG" != "v$PKG" ]; then
+            echo "::error::tag $TAG does not match package.json version $PKG"
+            exit 1
+          fi
+          if [ "$PKG" != "$TAURI" ] || [ "$PKG" != "$CARGO" ]; then
+            echo "::error::versions disagree: package.json=$PKG tauri=$TAURI cargo=$CARGO"
+            exit 1
+          fi
+          echo "version=$PKG" >> "$GITHUB_OUTPUT"
+
   windows:
+    needs: verify
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v5
@@ -21,7 +54,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run build:client
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
@@ -35,16 +67,21 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force -Path dist\build | Out-Null
           Get-ChildItem "src-tauri\target\release\bundle\nsis\*.exe" | Copy-Item -Destination dist\build -Force
+          # the desktop updater replaces the running binary in place, so the release also needs a
+          # plain zip holding the executable; without it the update check found nothing to install
+          $ver = "${{ needs.verify.outputs.version }}"
+          Compress-Archive -Path "src-tauri\target\release\whispernet.exe" `
+                            -DestinationPath "dist\build\WhisperNet_${ver}_x64-portable.zip" -Force
           Get-ChildItem dist\build | Select-Object Name, Length
       - name: Upload assets
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.event.inputs.tag }}"
-          gh release upload "$TAG" dist/build/*.exe --clobber
+          gh release upload "$TAG" dist/build/*.exe dist/build/*.zip --clobber
 
   linux:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -53,7 +90,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run build:client
       - name: Install Tauri build dependencies
         run: |
           sudo apt-get update
@@ -68,10 +104,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.event.inputs.tag }}"
           gh release upload "$TAG" src-tauri/target/release/bundle/deb/*.deb --clobber
 
   android:
+    needs: verify
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -80,7 +116,6 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci
-      - run: npm run build:client
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -98,13 +133,29 @@ jobs:
       - name: Sync Capacitor
         run: node node_modules/@capacitor/cli/bin/capacitor sync android
       - uses: gradle/actions/setup-gradle@v4
+      - name: Set up the release signing key
+        # the APK has to be signed with a real key: a debug key is shared, derivable by anyone and
+        # leaves the build debuggable
+        env:
+          KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "${KEYSTORE_B64:-}" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 is not set; refusing to publish a debug-signed APK"
+            exit 1
+          fi
+          printf '%s' "$KEYSTORE_B64" | base64 -d > android/app/whispernet-release.jks
+          echo "WHISPERNET_KEYSTORE=$PWD/android/app/whispernet-release.jks" >> "$GITHUB_ENV"
+          echo "WHISPERNET_KEYSTORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "WHISPERNET_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> "$GITHUB_ENV"
+          echo "WHISPERNET_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}" >> "$GITHUB_ENV"
       - name: Build APK
         working-directory: android
-        run: chmod +x gradlew && ./gradlew assembleDebug -x lint -no-daemon
+        run: chmod +x gradlew && ./gradlew assembleRelease -no-daemon
       - name: Upload asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          TAG="${{ github.event.inputs.tag }}"
-          cp android/app/build/outputs/apk/debug/app-debug.apk WhisperNet.apk
+          set -euo pipefail
+          cp android/app/build/outputs/apk/release/app-release.apk WhisperNet.apk
           gh release upload "$TAG" WhisperNet.apk --clobber

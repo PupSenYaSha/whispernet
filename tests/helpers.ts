@@ -21,7 +21,10 @@ export async function startTestServer(env: Record<string, string> = {}): Promise
   process.env.DATA_DIR = dataDir;
   process.env.DISABLE_RATE_LIMITS = '1';
   process.env.ADMIN_KEY = 'test-admin-key';
-  for (const [k, v] of Object.entries(env)) process.env[k] = v;
+  // Tests that exercise the account creation budget set this themselves. Everything else gets a
+  // generous number, so a test file that happens to create a dozen accounts is not refused partway
+  // through for a reason it is not testing.
+  for (const [k, v] of Object.entries({ MAX_REGISTRATIONS_PER_IP: '1000', ...env })) process.env[k] = v;
   const distDir = path.resolve('dist/client');
   const { setDataDir, initializeDatabase } = await import('../server/database');
   setDataDir(dataDir);
@@ -57,7 +60,7 @@ export class TestClient {
       this.ws.on('message', (data) => {
         const m = JSON.parse(data.toString());
         this.logs.push(m);
-        if ((m.type === 'auth_success' || m.type === 'auth_failure') && this.authResolve) {
+        if ((m.type === 'auth_success' || m.type === 'auth_failure' || m.type === 'twofactor_required') && this.authResolve) {
           this.authResolve(m);
           this.authResolve = null;
         }
@@ -73,14 +76,19 @@ export class TestClient {
     return new Promise((r) => { this.authResolve = r; });
   }
 
-  async register(nickname: string): Promise<any> {
-    await this.connect();
+  private ensureOpen(): Promise<this> {
+    return this.ws && this.ws.readyState === 1 ? Promise.resolve(this) : this.connect();
+  }
+
+  async register(nickname: string, extra: Record<string, any> = {}): Promise<any> {
+    await this.ensureOpen();
     const p = this.waitAuth();
-    this.send('auth_register', { nickname, password: PASSWORD, deviceId: 'd' + nickname + UNIQ, deviceInfo: INFO });
+    this.send('auth_register', { nickname, password: PASSWORD, deviceId: 'd' + nickname + UNIQ, deviceInfo: INFO, ...extra });
     return Promise.race([p, new Promise((_, rj) => setTimeout(() => rj(new Error('auth timeout ' + this.label)), 10000))]);
   }
 
   async login(nickname: string, extra: Record<string, any> = {}): Promise<any> {
+    await this.ensureOpen();
     const p = this.waitAuth();
     this.send('auth_login', { nickname, password: PASSWORD, deviceId: 'd' + nickname + UNIQ, deviceInfo: INFO, ...extra });
     return Promise.race([p, new Promise((_, rj) => setTimeout(() => rj(new Error('auth timeout ' + this.label)), 10000))]);
@@ -145,7 +153,16 @@ export function pngDataUrlOfSize(bytes: number): string {
 }
 
 export const ADMIN_KEY = 'test-admin-key';
-export const uniqueNick = (prefix: string): string => prefix + UNIQ + crypto.randomBytes(2).toString('hex');
+
+/**
+ * The server accepts nicknames of 3 to 16 characters, so the prefix has to make room for a unique
+ * suffix. Without the truncation a nickname like "multi" + suffix came out at 17 characters,
+ * registration failed, and tests passed while measuring nothing.
+ */
+export const uniqueNick = (prefix: string): string => {
+  const suffix = (process.pid % 1000).toString(36) + crypto.randomBytes(3).toString('hex');
+  return (prefix + suffix).slice(0, 16);
+};
 
 export interface StartedMediaHost {
   url: string;

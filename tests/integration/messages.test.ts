@@ -86,3 +86,79 @@ describe('messages: edit, delete and full-text search', () => {
     expect(found.payload.results.length).toBe(0);
   });
 });
+
+describe('message length ceilings', () => {
+  // Editing used to accept 4096 characters while sending accepted 2000, so a correction was a way to
+  // put a longer message on the wire than the composer would ever have allowed. Both are 2000 now,
+  // and a quote is a copy of a message, so it gets the same ceiling rather than twice it.
+  const LIMIT = 2000;
+  let a: TestClient, b: TestClient;
+
+  beforeAll(async () => {
+    a = await client('len-a');
+    b = await client('len-b');
+    await a.register(uniqueNick('la'));
+    await b.register(uniqueNick('lb'));
+  });
+
+  it('accepts a message right at the ceiling', async () => {
+    a.clear(); b.clear();
+    a.send('chat_message', { text: 'x'.repeat(LIMIT) });
+    const got = await b.waitFor('chat_message');
+    expect(got.payload.text).toHaveLength(LIMIT);
+  });
+
+  it('refuses a message past it', async () => {
+    a.clear(); b.clear();
+    a.send('chat_message', { text: 'x'.repeat(LIMIT + 1) });
+    const err = await a.waitFor('error');
+    expect(err.payload.code).toBe('MESSAGE_TOO_LONG');
+  });
+
+  it('refuses an edit past the same ceiling', async () => {
+    a.clear(); b.clear();
+    a.send('chat_message', { text: 'edit ceiling ' + Date.now() });
+    const got = await b.waitFor('chat_message');
+    expect(got).toBeTruthy();
+
+    a.clear(); b.clear();
+    a.send('edit_message', { messageId: got.payload.id, text: 'x'.repeat(LIMIT + 1) });
+    const err = await a.waitFor('error');
+    expect(err.payload.code).toBe('MESSAGE_TOO_LONG');
+    expect(err.payload.message).toMatch(new RegExp(`max ${LIMIT} chars`));
+  });
+
+  it('accepts an edit right at the ceiling', async () => {
+    a.clear(); b.clear();
+    a.send('chat_message', { text: 'edit ok ' + Date.now() });
+    const got = await b.waitFor('chat_message');
+    expect(got).toBeTruthy();
+
+    a.clear(); b.clear();
+    a.send('edit_message', { messageId: got.payload.id, text: 'y'.repeat(LIMIT) });
+    const edited = await b.waitFor('message_edited');
+    expect(edited.payload.text).toHaveLength(LIMIT);
+  });
+
+  it('truncates an over-long quote instead of storing all of it', async () => {
+    a.clear(); b.clear();
+    a.send('chat_message', { text: 'quote host ' + Date.now(), quoted: { id: 'q1', text: 'z'.repeat(5000), sender: 'someone' } });
+    const got = await b.waitFor('chat_message');
+    expect(got).toBeTruthy();
+    expect(got.payload.quotedMessageText).toHaveLength(LIMIT);
+  });
+});
+
+describe('password length', () => {
+  it('accepts a long passphrase and refuses one past the ceiling', async () => {
+    const c = await client('pw');
+    // 64 characters is the ceiling, and a passphrase is exactly what it is there for
+    const ok = await c.register(uniqueNick('pw'), { password: 'Aa1' + 'b'.repeat(61) });
+    expect(ok.type).toBe('auth_success');
+
+    const d = await client('pw2');
+    const tooLong = await d.register(uniqueNick('pw'), { password: 'Aa1' + 'b'.repeat(62) });
+    expect(tooLong.type).toBe('auth_failure');
+    expect(tooLong.payload.reason).toMatch(/8-64/);
+  });
+});

@@ -4,31 +4,16 @@ import type { User, AppSettings, Message, Session, BannedUser, AvatarUpdate, Pro
 import { generateKeyPair, encryptMessage, decryptMessage } from './crypto';
 import { encryptPrivateKey, decryptPrivateKey, isEncryptedBundle, isKeyBackup } from './crypto-keys';
 import { encryptPassword, decryptPassword } from './device-crypto';
-import { uploadFile, MediaError, setUploadToken } from './upload';
-import { encryptFile, buildFileKeyMap, unwrapAndDecrypt, unwrapAndDecryptChannel, wrapForMedia } from './media-crypto';
+import { uploadFile, uploadStream, MediaError, setUploadToken, mediaProxyUrl } from './upload';
+import { encryptFileStream, buildFileKeyMap, unwrapAndDecrypt, unwrapAndDecryptChannel } from './media-crypto';
 import { newClientMessageId, rememberOwnMessageText, recallOwnMessageText } from './ownMessageCache';
 import { ConnectionContext, useConnection, type ConnectionState, type ConnectionAction, type ReplyTarget, type AdminReport } from './context';
 import { loadSettings, defaultSettings, translations, cn, formatTime, getDeviceLabel } from './utils';
 
 declare const __APP_VERSION__: string;
-import {
-  initializeSignal,
-  initSessionManager,
-  initPreKeyManager,
-  getPreKeyBundleForServer,
-  createSessionWithRemote,
-  createResponderSession,
-  getSessionId,
-  encryptWithSignal,
-  decryptWithSignal,
-  hasSession,
-  resetSession,
-  decodeServerBundle,
-  getMyIdentityKeyBase64,
-  getPeerIdentityKeyBase64,
-  serializeX3dhMessage,
-  deserializeX3dhMessage,
-} from './signal/integration';
+
+/** How many decrypted media blobs stay cached; anything beyond that is re-decrypted on demand. */
+const MEDIA_CACHE_LIMIT = 100;
 
 import { LoginScreen } from './components/LoginScreen';
 import { UpdateOverlay } from './components/UpdateOverlay';
@@ -171,8 +156,13 @@ function connectionReducer(state: ConnectionState, action: ConnectionAction): Co
       return { ...state, dmMessages: { ...state.dmMessages, [action.channel]: [...action.messages, ...(state.dmMessages[action.channel] || [])] } };
     case 'SET_DM_HISTORY_STATE':
       return { ...state, dmHistory: { ...state.dmHistory, [action.channel]: { hasMore: action.hasMore, oldest: action.oldest } } };
-    case 'ADD_DM_MESSAGE':
-      return { ...state, dmMessages: { ...state.dmMessages, [action.channel]: [...(state.dmMessages[action.channel] || []), action.message] } };
+    case 'ADD_DM_MESSAGE': {
+      const existing = state.dmMessages[action.channel] || [];
+      // A message arrives live and again in the history that follows it, so the same id can be added
+      // twice. Appending it again would show it repeated under itself.
+      if (existing.some((m: Message) => m.id === action.message.id)) return state;
+      return { ...state, dmMessages: { ...state.dmMessages, [action.channel]: [...existing, action.message] } };
+    }
     case 'SET_USERS':
       return { ...state, users: action.users };
     case 'ADD_USER':
@@ -286,15 +276,7 @@ try { uploadTokenRef.current = localStorage.getItem('wn_upload_token') || ''; } 
   const stateRef = useRef<ConnectionState>(initialState);
   const unreadCountRef = useRef(0);
   const titleRef = useRef(document.title);
-  const activePeerRef = useRef<string | null>(null);
   const notifSoundRef = useRef<HTMLAudioElement | null>(null);
-  const signalInitializedRef = useRef(false);
-  const preKeyBundlesRef = useRef<Record<string, any>>({});
-  const pendingX3dhRef = useRef<Record<string, { x3dhMessage: any; ratchetPublicKey: Uint8Array }>>({});
-  
-  
-  const identityFingerprintsRef = useRef<Record<string, string>>({});
-  const [identityWarning, setIdentityWarning] = useState<{ userId: string; nickname?: string } | null>(null);
   const [sessions, setSessions] = useState<Session[]>([]);
   const [blockedUsers, setBlockedUsers] = useState<{ id: string; nickname: string }[]>([]);
   const [importModal, setImportModal] = useState<{ data: any; mode: 'setup' | 'settings' } | null>(null);
@@ -355,11 +337,18 @@ useEffect(() => { stateRef.current = state; }, [state]);
     return translations[state.settings.language as keyof typeof translations]?.[key as keyof typeof translations.en] || key;
   }, [state.settings.language]);
 
+  /**
+   * The window title names the account, never the conversation.
+   *
+   * It used to follow the open chat, so the same window read "WhisperNet @admin" while you were
+   * talking to admin and "WhisperNet @123" the moment you went back to the global chat. That made
+   * the title look like it was identifying the person on screen rather than the person at the
+   * keyboard, which is the one thing a title bar is for.
+   */
   const updateTitle = useCallback(() => {
     const count = unreadCountRef.current;
-    const peer = activePeerRef.current;
     const me = nicknameRef.current;
-    const base = peer ? `WhisperNet @${peer}` : (me ? `WhisperNet @${me}` : 'WhisperNet');
+    const base = me ? `WhisperNet @${me}` : 'WhisperNet';
     const newTitle = count > 0 ? `${base} (${count})` : base;
     document.title = newTitle;
     titleRef.current = newTitle;
@@ -397,92 +386,63 @@ useEffect(() => { stateRef.current = state; }, [state]);
   const openGeneral = useCallback(() => {
     dispatch({ type: 'SET_ACTIVE_CHANNEL', channel: 'general' });
     unreadCountRef.current = 0;
-    activePeerRef.current = null;
     updateTitle();
   }, [updateTitle]);
 
   
-  
-  
-  const establishSessionWith = useCallback((otherId: string) => {
-    const myId = userIdRef.current;
-    if (!myId || !signalInitializedRef.current || hasSession(myId, otherId)) return;
-    const bundle = preKeyBundlesRef.current[otherId];
-    if (!bundle) return;
-    try {
-      
-      
-      const decoded = decodeServerBundle(bundle);
-      if (!decoded) {
-        console.error('Cannot decode pre-key bundle for', otherId);
-        return;
-      }
-      const result = createSessionWithRemote(myId, otherId, decoded);
-      if (result) {
-        pendingX3dhRef.current[otherId] = { x3dhMessage: serializeX3dhMessage(result.x3dhMessage), ratchetPublicKey: result.ratchetPublicKey };
-      }
-    } catch (e) { console.error('Failed to create Signal session:', e); }
-  }, []);
-
-  
-  
-  
-  const trackPeerIdentity = useCallback((peerId: string, identityKeyB64: string | null | undefined) => {
-    if (!peerId || !identityKeyB64) return;
-    const known = identityFingerprintsRef.current[peerId];
-    if (!known) {
-      identityFingerprintsRef.current[peerId] = identityKeyB64;
-      try { localStorage.setItem(`wn_ik_${peerId}`, identityKeyB64); } catch {}
-      return;
-    }
-    if (known !== identityKeyB64) {
-      identityFingerprintsRef.current[peerId] = identityKeyB64;
-      try { localStorage.setItem(`wn_ik_${peerId}`, identityKeyB64); } catch {}
-      setIdentityWarning((prev) => {
-        if (prev && prev.userId === peerId) return prev;
-        return { userId: peerId, nickname: state.dmNames[peerId] };
-      });
-    }
-  }, [state.dmNames]);
-
-  const refreshIdentities = useCallback(() => {
-    for (const [peerId, bundle] of Object.entries(preKeyBundlesRef.current)) {
-      trackPeerIdentity(peerId, getPeerIdentityKeyBase64(bundle));
-    }
-  }, [trackPeerIdentity]);
-
-  
-  
-  
-  
-  const healSignalSession = useCallback((otherId: string) => {
-    const myId = userIdRef.current;
-    if (!myId) return;
-    resetSession(myId, otherId);
-    delete preKeyBundlesRef.current[otherId];
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'prekey_fetch', payload: { userIds: [otherId] } }));
-    }
-  }, []);
-
   const openDm = useCallback((userId: string, nickname?: string) => {
     if (nickname) dispatch({ type: 'SET_DM_NAME', userId, nickname });
     dispatch({ type: 'SET_ACTIVE_CHANNEL', channel: userId });
     unreadCountRef.current = 0;
-    activePeerRef.current = nickname || state.dmNames[userId] || null;
     updateTitle();
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'dm_history', payload: { with: userId } }));
       wsRef.current.send(JSON.stringify({ type: 'dm_contacts', payload: {} }));
-      if (!preKeyBundlesRef.current[userId]) {
-        wsRef.current.send(JSON.stringify({ type: 'prekey_fetch', payload: { userIds: [userId] } }));
-      }
-      establishSessionWith(userId);
     }
-  }, [updateTitle, state.dmNames, establishSessionWith]);
+  }, [updateTitle]);
 
   const refreshContacts = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'dm_contacts', payload: {} }));
+  }, []);
+
+  const contactsRefreshRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** One in-flight refresh at a time, so a burst of messages costs one round trip, not twenty. */
+  const scheduleContactsRefresh = useCallback(() => {
+    if (contactsRefreshRef.current) return;
+    contactsRefreshRef.current = setTimeout(() => {
+      contactsRefreshRef.current = null;
+      refreshContacts();
+    }, 400);
+  }, [refreshContacts]);
+
+  const mergePublicKeys = useCallback((incoming?: Record<string, JsonWebKey>) => {
+    if (!incoming) return;
+    publicKeysRef.current = { ...publicKeysRef.current, ...incoming };
+    if (userIdRef.current && publicKeyRef.current) publicKeysRef.current[userIdRef.current] = publicKeyRef.current;
+  }, []);
+
+  /**
+   * Turns a stored direct-message row into text. One decoder, because there used to be three.
+   *
+   * The live push, the history load and the paged history each had their own copy, and they drifted:
+   * they preferred the ratchet branch and ignored the RSA payload, so a message written by an older
+   * client rendered as [encrypted] in a conversation where everything else read fine, and nothing said
+   * why. A direct message now has exactly one body, and one place that knows how to open it.
+   *
+   * A sender cannot decrypt its own message, so its own rows fall back to the local copy of the text
+   * it just sent. That is the only reason [encrypted] ever appears for your own messages.
+   */
+  const readDmText = useCallback(async (m: any): Promise<string> => {
+    let text = m.text || '';
+    if (m.encrypted && privateKeyRef.current && userIdRef.current) {
+      try {
+        text = await decryptMessage(m.encrypted, userIdRef.current, privateKeyRef.current);
+      } catch {
+        if (!text) text = '[encrypted]';
+      }
+    }
+    if (m.isOwn && (!text || text === '[encrypted]')) text = recallOwnMessageText(m.clientId) || text || '[encrypted]';
+    return text;
   }, []);
 
   const requestSessions = useCallback(() => {
@@ -511,8 +471,11 @@ useEffect(() => { stateRef.current = state; }, [state]);
     if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'unblock_user', payload: { userId } }));
   }, []);
 
-  const reportUser = useCallback((targetId: string, reason: string, messageId?: string, source: 'profile' | 'message' = 'message') => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'report_user', payload: { targetId, reason, source, ...(messageId ? { messageId } : {}) } }));
+  /** Reports whether the request actually left, so the modal never sits on "Sending…" forever. */
+  const reportUser = useCallback((targetId: string, reason: string, messageId?: string, source: 'profile' | 'message' = 'message'): boolean => {
+    if (wsRef.current?.readyState !== WebSocket.OPEN) return false;
+    wsRef.current.send(JSON.stringify({ type: 'report_user', payload: { targetId, reason, source, ...(messageId ? { messageId } : {}) } }));
+    return true;
   }, []);
 
   const openProfile = useCallback((userId: string) => {
@@ -525,12 +488,6 @@ useEffect(() => { stateRef.current = state; }, [state]);
   const closeProfile = useCallback(() => {
     requestedProfileIdRef.current = null;
     dispatch({ type: 'SET_PROFILE', profile: null });
-  }, []);
-
-  const fetchPeerPreKey = useCallback((userId: string) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'prekey_fetch', payload: { userIds: [userId] } }));
-    }
   }, []);
 
   const openReport = useCallback((target: ProfileInfo) => {
@@ -578,7 +535,27 @@ useEffect(() => { stateRef.current = state; }, [state]);
     if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'search_messages', payload: { query, channel } }));
   }, []);
 
+  const buildEncryptKeysRef = (extraKeys?: Record<string, JsonWebKey>): Record<string, JsonWebKey> => {
+    const keys: Record<string, JsonWebKey> = { ...publicKeysRef.current, ...extraKeys };
+    if (userIdRef.current && publicKeyRef.current) keys[userIdRef.current] = publicKeyRef.current;
+    return keys;
+  };
+  // a stable handle, so the callbacks that encrypt do not have to be rebuilt on every render
+  const buildEncryptKeys = useCallback(buildEncryptKeysRef, []);
+
+  const ttlSecondsRef = (): number | undefined => {
+    const ttl = stateRef.current.settings.disappearingTTL;
+    if (ttl === '24h') return 86400;
+    if (ttl === '7d') return 604800;
+    if (ttl === '30d') return 2592000;
+    return undefined;
+  };
+  const ttlSeconds = useCallback(ttlSecondsRef, []);
+
   const deleteMessage = useCallback((messageId: string) => {
+    // The server records who wrote a message, so it can refuse anybody else's and remove this one
+    // everywhere at once — every device, and after a reload, which is what sealed sender made
+    // impossible for the sender of an anonymous message.
     if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'delete_message', payload: { messageId } }));
   }, []);
 
@@ -590,9 +567,40 @@ useEffect(() => { stateRef.current = state; }, [state]);
     if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'remove_reaction', payload: { messageId, emoji } }));
   }, []);
 
+  /**
+   * Corrects a message this account wrote.
+   *
+   * The server only ever holds ciphertext for a private chat, so it cannot rewrite the words. What it
+   * can do is swap the ciphertext: the corrected text is encrypted again to the recipient's key here
+   * and the server puts the new blob in place of the old one. Every device then decrypts it the same
+   * way it decrypts any other message, and the correction reaches the recipient as well as the sender
+   * — which is what could not happen while a message was anonymous.
+   */
   const editMessage = useCallback((messageId: string, text: string) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'edit_message', payload: { messageId, text } }));
-  }, []);
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const general = stateRef.current.messages.find((m) => m.id === messageId);
+    if (general) {
+      ws.send(JSON.stringify({ type: 'edit_message', payload: { messageId, text } }));
+      return;
+    }
+    const target = Object.values(stateRef.current.dmMessages)
+      .flat()
+      .find((m) => m.id === messageId);
+    if (!target) return;
+    const peerId = target.channel || target.senderId;
+    const peerKey = publicKeysRef.current[peerId];
+    if (!peerKey || !privateKeyRef.current) return;
+    void (async () => {
+      try {
+        const encrypted = await encryptMessage(text.trim(), buildEncryptKeys({ [peerId]: peerKey }));
+        const ttl = ttlSeconds();
+        ws.send(JSON.stringify({ type: 'edit_message', payload: { messageId, text: text.trim(), encrypted, ttl } }));
+      } catch (e) {
+        console.error('Could not re-encrypt an edited message:', e);
+      }
+    })();
+  }, [buildEncryptKeys, ttlSeconds]);
 
   const connect = useCallback((nickname: string, password: string, isRegister: boolean) => {
     if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) return;
@@ -610,7 +618,7 @@ useEffect(() => { stateRef.current = state; }, [state]);
 
       ws.onopen = async () => {
         const auth = authRef.current;
-        const deviceInfo = await getDeviceLabel();
+            const deviceInfo = await getDeviceLabel();
         if (auth) {
           const nick = auth.nickname.toLowerCase();
           if (auth.isRegister) {
@@ -621,14 +629,7 @@ useEffect(() => { stateRef.current = state; }, [state]);
             localStorage.setItem(`wn_pub_${nick}`, JSON.stringify(keys.publicKey));
             privateKeyRef.current = keys.privateKey;
             publicKeyRef.current = keys.publicKey;
-            if (!signalInitializedRef.current) {
-              initializeSignal();
-              await initSessionManager(auth.password);
-              await initPreKeyManager(auth.password);
-              signalInitializedRef.current = true;
-            }
-            const preKeyBundle = await getPreKeyBundleForServer();
-            ws.send(JSON.stringify({ type: 'auth_register', payload: { nickname: auth.nickname, password: auth.password, publicKey: keys.publicKey, preKeyBundle, deviceId: getDeviceId(), deviceInfo } }));
+            ws.send(JSON.stringify({ type: 'auth_register', payload: { nickname: auth.nickname, password: auth.password, publicKey: keys.publicKey, deviceId: getDeviceId(), deviceInfo } }));
           } else {
             let savedKey = localStorage.getItem(`wn_pk_${nick}`);
             let savedPubKey = localStorage.getItem(`wn_pub_${nick}`);
@@ -654,14 +655,7 @@ useEffect(() => { stateRef.current = state; }, [state]);
                 publicKeyRef.current = JSON.parse(savedPubKey);
               } catch { privateKeyRef.current = null; publicKeyRef.current = null; }
             }
-            if (!signalInitializedRef.current) {
-              initializeSignal();
-              await initSessionManager(auth.password);
-              await initPreKeyManager(auth.password);
-              signalInitializedRef.current = true;
-            }
-            const preKeyBundle = await getPreKeyBundleForServer();
-            ws.send(JSON.stringify({ type: 'auth_login', payload: { nickname: auth.nickname, password: auth.password, preKeyBundle, deviceId: getDeviceId(), deviceInfo } }));
+            ws.send(JSON.stringify({ type: 'auth_login', payload: { nickname: auth.nickname, password: auth.password, deviceId: getDeviceId(), deviceInfo } }));
           }
         }
       };
@@ -685,17 +679,9 @@ useEffect(() => { stateRef.current = state; }, [state]);
               if (wsRef.current?.readyState === WebSocket.OPEN) {
                 wsRef.current.send(JSON.stringify({ type: 'get_blocked', payload: {} }));
                 wsRef.current.send(JSON.stringify({ type: 'get_sessions', payload: {} }));
-                try {
-                  const bundle = signalInitializedRef.current ? await getPreKeyBundleForServer() : null;
-                  if (bundle) wsRef.current.send(JSON.stringify({ type: 'prekey_upload', payload: { bundle } }));
-                } catch {}
               }
               publicKeysRef.current = message.payload.publicKeys || {};
               channelMediaKeyRef.current = typeof message.payload.channelMediaKey === 'string' ? message.payload.channelMediaKey : null;
-              if (message.payload.preKeyBundles) {
-                preKeyBundlesRef.current = message.payload.preKeyBundles;
-                refreshIdentities();
-              }
               {
                 const myId = message.payload.userId;
                 const nick = message.payload.nickname.toLowerCase();
@@ -728,9 +714,12 @@ useEffect(() => { stateRef.current = state; }, [state]);
               dispatch({ type: 'SET_E2EE_READY', ready: !!privateKeyRef.current });
               if (message.payload.onlineUsers) dispatch({ type: 'SET_USERS', users: message.payload.onlineUsers.filter((u: User) => u.id !== message.payload.userId) });
               dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromUsers(message.payload.onlineUsers) });
-              document.title = `WhisperNet @${message.payload.nickname}`;
-              titleRef.current = document.title;
-              unreadCountRef.current = 0;
+               // The title is the account, not the open conversation, so it is derived from the
+               // nickname the server just confirmed rather than from whatever channel is on screen.
+               nicknameRef.current = message.payload.nickname;
+               unreadCountRef.current = 0;
+               updateTitle();
+
               if (authRef.current) {
                 const enc = await encryptPassword(authRef.current.password);
                 localStorage.setItem('wn_auth', JSON.stringify({ nickname: authRef.current.nickname, enc }));
@@ -746,6 +735,7 @@ useEffect(() => { stateRef.current = state; }, [state]);
                 if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'heartbeat', payload: {} }));
               }, 15000);
               ws.send(JSON.stringify({ type: 'dm_contacts', payload: {} }));
+              // messages that arrived while this device was closed, so they are not only ever seen live
               break;
             case 'auth_failure':
               dispatch({ type: 'SET_AUTH_ERROR', error: message.payload.reason });
@@ -764,65 +754,35 @@ useEffect(() => { stateRef.current = state; }, [state]);
               dispatch({ type: 'SET_HISTORY_STATE', hasMore: message.payload.hasMore !== false, oldest: older.length ? older[0].timestamp : null });
               break;
             }
-            case 'dm_history': {
-              mergePublicKeys(message.payload.publicKeys);
-              const ch = message.payload.channel;
-              const parts = ch.split(':');
-              const otherId = parts[0] === userIdRef.current ? parts[1] : parts[0];
-              const msgs = await Promise.all(message.payload.messages.map(async (m: any) => {
-                let text = m.text || '';
-                if (m.signalEncrypted && signalInitializedRef.current && userIdRef.current) {
-                  try {
-                    if (m.x3dhMessage && m.ratchetPublicKey && !hasSession(userIdRef.current, otherId)) {
-                      createResponderSession(userIdRef.current, otherId, m.x3dhMessage, new Uint8Array(m.ratchetPublicKey));
-                    }
-                    const sessionId = getSessionId(userIdRef.current, otherId);
-                    const { ciphertext, ratchetPublicKey, messageNumber } = m.signalEncrypted;
-                    text = await decryptWithSignal(sessionId, ciphertext, ratchetPublicKey, messageNumber);
-                  } catch {
-                    if (m.isOwn) text = recallOwnMessageText(m.clientId) || '[encrypted]';
-                    else { text = '[encrypted]'; healSignalSession(otherId); }
-                  }
-                } else if (m.encrypted && privateKeyRef.current && userIdRef.current) {
-                  try { text = await decryptMessage(m.encrypted, userIdRef.current, privateKeyRef.current); } catch { if (!text) text = '[encrypted]'; }
-                }
-                if (m.isOwn && text === '[encrypted]') text = recallOwnMessageText(m.clientId) || text;
-                return { id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text, timestamp: m.timestamp, isOwn: m.senderId === userIdRef.current, channel: otherId, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined, reactions: normalizeReactions(m.reactions) };
-              }));
-               dispatch({ type: 'SET_DM_MESSAGES', channel: otherId, messages: msgs });
-               dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromMessages(message.payload.messages) });
-               dispatch({ type: 'SET_DM_HISTORY_STATE', channel: otherId, hasMore: message.payload.hasMore !== false, oldest: msgs.length ? msgs[0].timestamp : null });
-               break;
-             }
-             case 'dm_history_page': {
+             case 'dm_history': {
+               mergePublicKeys(message.payload.publicKeys);
                const ch = message.payload.channel;
                const parts = ch.split(':');
                const otherId = parts[0] === userIdRef.current ? parts[1] : parts[0];
-               const older = await Promise.all(message.payload.messages.map(async (m: any) => {
-                 let text = m.text || '';
-                 if (m.signalEncrypted && signalInitializedRef.current && userIdRef.current) {
-                   try {
-                     if (m.x3dhMessage && m.ratchetPublicKey && !hasSession(userIdRef.current, otherId)) {
-                       createResponderSession(userIdRef.current, otherId, m.x3dhMessage, new Uint8Array(m.ratchetPublicKey));
-                     }
-                     const sessionId = getSessionId(userIdRef.current, otherId);
-                     const { ciphertext, ratchetPublicKey, messageNumber } = m.signalEncrypted;
-                     text = await decryptWithSignal(sessionId, ciphertext, ratchetPublicKey, messageNumber);
-                   } catch {
-                     if (m.isOwn) text = recallOwnMessageText(m.clientId) || '[encrypted]';
-                     else text = '[encrypted]';
-                   }
-                 } else if (m.encrypted && privateKeyRef.current && userIdRef.current) {
-                   try { text = await decryptMessage(m.encrypted, userIdRef.current, privateKeyRef.current); } catch { if (!text) text = '[encrypted]'; }
-                 }
-                 if (m.isOwn && text === '[encrypted]') text = recallOwnMessageText(m.clientId) || text;
+               const msgs = await Promise.all(message.payload.messages.map(async (m: any) => {
+                 const text = await readDmText(m);
                  return { id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text, timestamp: m.timestamp, isOwn: m.senderId === userIdRef.current, channel: otherId, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined, reactions: normalizeReactions(m.reactions) };
                }));
-               dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
-               dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromMessages(message.payload.messages) });
-               dispatch({ type: 'SET_DM_HISTORY_STATE', channel: otherId, hasMore: message.payload.hasMore !== false, oldest: older.length ? older[0].timestamp : null });
-               break;
-             }
+               // the whole conversation this time, so a message sent from another device is here too
+                dispatch({ type: 'SET_DM_MESSAGES', channel: otherId, messages: msgs });
+                dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromMessages(message.payload.messages) });
+                dispatch({ type: 'SET_DM_HISTORY_STATE', channel: otherId, hasMore: message.payload.hasMore !== false, oldest: msgs.length ? msgs[0].timestamp : null });
+                break;
+              }
+              case 'dm_history_page': {
+                const ch = message.payload.channel;
+                const parts = ch.split(':');
+                const otherId = parts[0] === userIdRef.current ? parts[1] : parts[0];
+                const older = await Promise.all(message.payload.messages.map(async (m: any) => {
+                  const text = await readDmText(m);
+                  return { id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text, timestamp: m.timestamp, isOwn: m.senderId === userIdRef.current, channel: otherId, fileKey: m.fileKey, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined, reactions: normalizeReactions(m.reactions) };
+                }));
+dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
+                dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromMessages(message.payload.messages) });
+                dispatch({ type: 'SET_DM_HISTORY_STATE', channel: otherId, hasMore: message.payload.hasMore !== false, oldest: older.length ? older[0].timestamp : null });
+                break;
+              }
+
             case 'dm_message': {
               let msgText = message.payload.text || '';
               const ch = message.payload.channel || '';
@@ -830,30 +790,13 @@ useEffect(() => { stateRef.current = state; }, [state]);
               const otherId = userIdRef.current && parts.length === 2
                 ? (parts[0] === userIdRef.current ? parts[1] : parts[0])
                 : message.payload.senderId || '';
-              if (message.payload.signalEncrypted && signalInitializedRef.current && userIdRef.current) {
-                try {
-                  if (message.payload.x3dhMessage && message.payload.ratchetPublicKey && !hasSession(userIdRef.current, otherId)) {
-                    const handshake = deserializeX3dhMessage(message.payload.x3dhMessage);
-                    if (handshake) {
-                      createResponderSession(userIdRef.current, otherId, handshake, new Uint8Array(message.payload.ratchetPublicKey));
-                    }
-                  }
-                  const sessionId = getSessionId(userIdRef.current, otherId);
-                  const { ciphertext, ratchetPublicKey, messageNumber } = message.payload.signalEncrypted;
-                  msgText = await decryptWithSignal(sessionId, ciphertext, ratchetPublicKey, messageNumber);
-                } catch {
-                    console.error('Decryption failed');
-                    if (!message.payload.isOwn) { msgText = '[encrypted]'; healSignalSession(otherId); }
-                }
-              } else if (message.payload.encrypted && privateKeyRef.current && userIdRef.current) {
-                try { msgText = await decryptMessage(message.payload.encrypted, userIdRef.current, privateKeyRef.current); } catch { if (!msgText) msgText = '[encrypted]'; }
-              }
-              if (message.payload.isOwn && !msgText) msgText = recallOwnMessageText(message.payload.clientId) || '[encrypted]';
+              if (message.payload.encrypted) msgText = await readDmText(message.payload);
               dispatch({ type: 'ADD_DM_MESSAGE', channel: otherId, message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: msgText, timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, channel: otherId, fileKey: message.payload.fileKey, expiresAt: message.payload.expiresAt || undefined, quotedMessageId: message.payload.quotedMessageId ?? undefined, quotedMessageText: message.payload.quotedMessageText ?? undefined, quotedMessageSender: message.payload.quotedMessageSender ?? undefined, reactions: normalizeReactions(message.payload.reactions) } });
               dispatch({ type: 'SET_AVATARS', avatars: avatarFromSender(message.payload.senderId, message.payload.senderAvatar) });
               dispatch({ type: 'SET_DM_NAME', userId: otherId, nickname: message.payload.senderNickname });
-              dispatch({ type: 'SET_CONTACTS', contacts: [] });
-              ws.send(JSON.stringify({ type: 'dm_contacts', payload: {} }));
+              // the list is refreshed on the next tick rather than emptied here, which used to flash
+              // "No chats yet" on every incoming message
+              scheduleContactsRefresh();
               if (!message.payload.isOwn) { unreadCountRef.current++; updateTitle(); fireNotification(`@${message.payload.senderNickname}`, msgText); playNotifSound(); }
               break;
             }
@@ -873,17 +816,6 @@ useEffect(() => { stateRef.current = state; }, [state]);
               dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromUsers(message.payload.contacts) });
               for (const c of message.payload.contacts || []) {
                 if (c.id && c.nickname) dispatch({ type: 'SET_DM_NAME', userId: c.id, nickname: c.nickname });
-              }
-              break;
-            case 'prekey_bundles':
-              if (message.payload.bundles) {
-                preKeyBundlesRef.current = { ...preKeyBundlesRef.current, ...message.payload.bundles };
-                refreshIdentities();
-                if (userIdRef.current) {
-                  for (const id of Object.keys(message.payload.bundles)) {
-                    if (activePeerRef.current === id) establishSessionWith(id);
-                  }
-                }
               }
               break;
             case 'search_results':
@@ -1030,10 +962,14 @@ useEffect(() => { stateRef.current = state; }, [state]);
       };
 
       ws.onerror = () => {};
-    } catch (e) {
+    } catch {
       dispatch({ type: 'SET_STATUS', status: 'disconnected' });
     }
-  }, []);
+    // readDmText, mergePublicKeys and scheduleContactsRefresh are stable callbacks declared further
+    // down. They are named here because the frame handler calls them, and a stale copy would decrypt
+    // with a key the user has since replaced. So are the notification helpers and the two admin calls
+    // the frame handler reaches for.
+  }, [readDmText, mergePublicKeys, scheduleContactsRefresh, updateTitle, adminGetBanned, adminReports, fireNotification, playNotifSound]);
 
   
   
@@ -1074,6 +1010,8 @@ useEffect(() => { stateRef.current = state; }, [state]);
     credentialsRef.current = null;
     reconnectAttemptsRef.current = 0;
     userIdRef.current = null;
+    // an acknowledgement can only arrive on the socket that carried the request, so anything still
+    // waiting will never be drawn and is dropped rather than kept for the life of the tab
     if (wsRef.current) { wsRef.current.close(1000, 'User disconnected'); wsRef.current = null; dispatch({ type: 'SET_WS', ws: null }); }
     dispatch({ type: 'SET_STATUS', status: 'disconnected' });
   }, []);
@@ -1088,55 +1026,24 @@ useEffect(() => { stateRef.current = state; }, [state]);
       wsRef.current.send(JSON.stringify({ type: 'revoke_session', payload: {} }));
     }
     disconnect();
-    
-    
-   signalInitializedRef.current = false;
-   preKeyBundlesRef.current = {};
-   pendingX3dhRef.current = {};
-   identityFingerprintsRef.current = {};
-   for (const url of decryptedMediaCacheRef.current.values()) { try { URL.revokeObjectURL(url); } catch {} }
-   decryptedMediaCacheRef.current.clear();
-   setIdentityWarning(null);
+
+    for (const url of decryptedMediaCacheRef.current.values()) { try { URL.revokeObjectURL(url); } catch {} }
+    decryptedMediaCacheRef.current.clear();
+    decryptedMediaRefsRef.current.clear();
     dispatch({ type: 'RESET' });
     localStorage.removeItem('wn_auth');
     localStorage.removeItem('wn_settings');
     localStorage.removeItem('wn_device_id');
-    document.title = 'WhisperNet';
-  }, [disconnect]);
-
-  const buildEncryptKeys = useCallback((extraKeys?: Record<string, JsonWebKey>): Record<string, JsonWebKey> => {
-    const keys: Record<string, JsonWebKey> = { ...publicKeysRef.current, ...extraKeys };
-    if (userIdRef.current && publicKeyRef.current) keys[userIdRef.current] = publicKeyRef.current;
-    return keys;
-  }, []);
-
-  
-  
-  const mergePublicKeys = useCallback((incoming?: Record<string, JsonWebKey>) => {
-    if (!incoming) return;
-    publicKeysRef.current = { ...publicKeysRef.current, ...incoming };
-    if (userIdRef.current && publicKeyRef.current) publicKeysRef.current[userIdRef.current] = publicKeyRef.current;
-  }, []);
+    nicknameRef.current = null;
+    unreadCountRef.current = 0;
+    updateTitle();
+  }, [disconnect, updateTitle]);
 
   const getMyPublicKey = useCallback((): JsonWebKey | null => publicKeyRef.current, []);
   const getPublicKey = useCallback((userId: string): JsonWebKey | null => publicKeysRef.current[userId] || null, []);
 
-  
-  const getMyIdentityKeyB64 = useCallback((): string | null => getMyIdentityKeyBase64(), []);
-  const getPeerIdentityKeyB64 = useCallback((userId: string): string | null => {
-    return getPeerIdentityKeyBase64(preKeyBundlesRef.current[userId] || null);
-  }, []);
-  const dismissIdentityWarning = useCallback(() => setIdentityWarning(null), []);
-
-  const ttlSeconds = useCallback(() => {
-    const ttl = state.settings.disappearingTTL;
-    if (ttl === '24h') return 86400;
-    if (ttl === '7d') return 604800;
-    if (ttl === '30d') return 2592000;
-    return undefined;
-  }, [state.settings.disappearingTTL]);
-
   const decryptedMediaCacheRef = useRef<Map<string, string>>(new Map());
+  const decryptedMediaRefsRef = useRef<Map<string, number>>(new Map());
   const channelMediaKeyRef = useRef<string | null>(null);
 
   const decryptMedia = useCallback(async (message: { id: string; text: string; fileKey?: Record<string, string> }): Promise<string | null> => {
@@ -1146,7 +1053,7 @@ useEffect(() => { stateRef.current = state; }, [state]);
     const mediaMatch = message.text.match(/^\[(image|video)\]([\s\S]*?)\[\/\1\]/);
     if (!mediaMatch) return null;
     let url = mediaMatch[2];
-    url = `/api/media?url=${encodeURIComponent(url)}`;
+    url = mediaProxyUrl(url);
     let blob: Blob | null = null;
     if (privateKeyRef.current) {
       const entry = message.fileKey[userIdRef.current || ''];
@@ -1164,20 +1071,43 @@ useEffect(() => { stateRef.current = state; }, [state]);
     try {
       const objectUrl = URL.createObjectURL(blob);
       decryptedMediaCacheRef.current.set(message.id, objectUrl);
-      if (decryptedMediaCacheRef.current.size > 100) {
-        const oldest = decryptedMediaCacheRef.current.keys().next().value;
-        if (oldest != null) {
-          const stale = decryptedMediaCacheRef.current.get(oldest);
-          decryptedMediaCacheRef.current.delete(oldest);
-          if (stale) { try { URL.revokeObjectURL(stale); } catch {} }
-        }
-      }
+      evictDecryptedMedia();
       return objectUrl;
     } catch (e) {
       console.error('Failed to create object URL:', (e as Error).message);
       return null;
     }
   }, []);
+
+  /**
+   * Object URLs are reference counted by the bubbles that show them. Dropping the oldest entry
+   * unconditionally blanked an image that was still on screen the moment the hundred-and-first media
+   * message arrived.
+   */
+  function retainMedia(id: string): void {
+    decryptedMediaRefsRef.current.set(id, (decryptedMediaRefsRef.current.get(id) ?? 0) + 1);
+  }
+
+  function releaseMedia(id: string): void {
+    const refs = decryptedMediaRefsRef.current.get(id);
+    if (refs === undefined) return;
+    // leave the entry at zero rather than removing it: a bubble whose effect re-runs releases and
+    // immediately retains, and a missing entry read as "nobody wants this" let the cache revoke a url
+    // that was still on screen
+    if (refs <= 1) decryptedMediaRefsRef.current.set(id, 0);
+    else decryptedMediaRefsRef.current.set(id, refs - 1);
+  }
+
+  function evictDecryptedMedia(): void {
+    if (decryptedMediaCacheRef.current.size <= MEDIA_CACHE_LIMIT) return;
+    // only entries nothing points at any more
+    for (const [id, url] of decryptedMediaCacheRef.current) {
+      if ((decryptedMediaRefsRef.current.get(id) ?? 0) > 0) continue;
+      decryptedMediaCacheRef.current.delete(id);
+      try { URL.revokeObjectURL(url); } catch { /* already gone */ }
+      if (decryptedMediaCacheRef.current.size <= MEDIA_CACHE_LIMIT) return;
+    }
+  }
 
   /** Asks the server for the page of messages older than the oldest one we hold. */
   const loadOlderMessages = useCallback(async (channel: string | null, before: number | null) => {
@@ -1203,21 +1133,7 @@ useEffect(() => { stateRef.current = state; }, [state]);
     wsRef.current.send(JSON.stringify({ type: 'chat_message', payload }));
   }, [ttlSeconds]);
 
-  
-  const stampPendingX3dh = (payload: any, to: string) => {
-    if (pendingX3dhRef.current[to]) {
-      payload.x3dhMessage = pendingX3dhRef.current[to].x3dhMessage;
-      payload.ratchetPublicKey = Array.from(pendingX3dhRef.current[to].ratchetPublicKey);
-      delete pendingX3dhRef.current[to];
-    }
-  };
-
-  
-  
-  
-  
   const keyWaitersRef = useRef<Record<string, Promise<JsonWebKey | null>>>({});
-
   /** The recipient key can be missing right after a reconnect; ask for it once and wait briefly. */
   const requestRecipientKey = useCallback((to: string): Promise<JsonWebKey | null> => {
     const pending = keyWaitersRef.current[to];
@@ -1240,7 +1156,7 @@ useEffect(() => { stateRef.current = state; }, [state]);
 
   const sendDmPackage = useCallback(async (
     to: string,
-    options: { text: string; fileKey?: Record<string, string>; sealed?: boolean; quoted?: ReplyTarget }
+    options: { text: string; fileKey?: Record<string, string>; quoted?: ReplyTarget }
   ) => {
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) throw new MediaError('offline');
@@ -1252,27 +1168,26 @@ useEffect(() => { stateRef.current = state; }, [state]);
     const clientId = newClientMessageId();
     const payload: any = { toKey: recipientKey, text: '', ttl: ttlSeconds(), clientId };
     if (options.fileKey) payload.fileKey = options.fileKey;
-    if (options.sealed) payload.sealed = true;
     if (options.quoted) payload.quoted = { id: options.quoted.id, text: options.quoted.text, sender: options.quoted.senderNickname };
-    if (signalInitializedRef.current && hasSession(userIdRef.current || '', to)) {
-      try {
-        payload.signalEncrypted = await encryptWithSignal(getSessionId(userIdRef.current || '', to), content);
-      } catch {
-        healSignalSession(to);
-        throw new MediaError('encrypt');
-      }
-    } else {
-      payload.encrypted = await encryptMessage(content, buildEncryptKeys({ [to]: recipientKey }));
-    }
-    stampPendingX3dh(payload, to);
-    ws.send(JSON.stringify({ type: 'dm_send', payload }));
-    // the ratchet only travels one way, so keep the plaintext to render our own message later
-    rememberOwnMessageText(clientId, content);
-  }, [buildEncryptKeys, ttlSeconds, requestRecipientKey, healSignalSession]);
+    // One body for every direct message: AES-GCM under a fresh key, that key wrapped to the
+    // recipient's RSA public key. There is no session to keep alive and nothing to handshake, which is
+    // the whole reason the ratchet is gone — it was the only thing in this app that could leave a
+    // conversation permanently unreadable, and it did so routinely.
+    payload.encrypted = await encryptMessage(content, buildEncryptKeys({ [to]: recipientKey }));
 
-  const sendDm = useCallback(async (to: string, text: string, sealed: boolean = false, quoted?: ReplyTarget) => {
+    // Sent the ordinary way, with the sender recorded. Anonymity here used to mean the server filed
+    // the message under an addressee-only channel, which meant it could never return it: the sender
+    // could not see their own message on another device, and neither could the recipient after a
+    // reload. Being able to edit, delete and read your own history everywhere is worth more here than
+    // the relay not knowing, and the text itself is still only ever readable by the two of you.
+    ws.send(JSON.stringify({ type: 'dm_send', payload }));
+    // the sender cannot decrypt its own ciphertext, so keep the plaintext to render our own message later
+    rememberOwnMessageText(clientId, content);
+  }, [buildEncryptKeys, ttlSeconds, requestRecipientKey]);
+
+  const sendDm = useCallback(async (to: string, text: string, quoted?: ReplyTarget) => {
     if (!text.trim()) return;
-    await sendDmPackage(to, { text, sealed, quoted });
+    await sendDmPackage(to, { text, quoted });
   }, [sendDmPackage]);
 
   const getMediaTag = (type: string): string => type.startsWith('video/') ? 'video' : 'image';
@@ -1282,8 +1197,10 @@ useEffect(() => { stateRef.current = state; }, [state]);
     recipientIds: string[],
     channelMediaKeyB64?: string | null
   ): Promise<{ text: string; fileKey?: Record<string, string> }> => {
-    const enc = await encryptFile(file);
-    const url = await uploadFile(wrapForMedia(await enc.blob.arrayBuffer()), 'media.png');
+    // encrypted a chunk at a time and posted as it is produced, so a large attachment never has to
+    // exist whole in memory on either side
+    const enc = await encryptFileStream(file);
+    const url = await uploadStream(enc.stream, 'media.png', 'image/png');
     const tag = getMediaTag(file.type);
     const fileKey = await buildFileKeyMap(
       enc.rawKey,
@@ -1320,16 +1237,8 @@ useEffect(() => { stateRef.current = state; }, [state]);
     } catch {
       throw new MediaError('upload');
     }
-    try {
-      await sendDmPackage(to, { text, fileKey });
-    } catch (e) {
-      if (e instanceof MediaError) throw e;
-      // a ratchet that stopped matching means the session is stale, for example after the other
-      // side reinstalled the app: reset it once and let the handshake run again
-      healSignalSession(to);
-      throw new MediaError('encrypt');
-    }
-  }, [prepareEncryptedMedia, sendDmPackage, healSignalSession]);
+    await sendDmPackage(to, { text, fileKey });
+  }, [prepareEncryptedMedia, sendDmPackage]);
 
   useEffect(() => {
     const saved = localStorage.getItem('wn_auth');
@@ -1343,7 +1252,7 @@ useEffect(() => { stateRef.current = state; }, [state]);
         } catch {}
       })();
     }
-  }, []);
+  }, [connect]);
 
   return (
     <>
@@ -1408,13 +1317,13 @@ useEffect(() => { stateRef.current = state; }, [state]);
           (reply) => dispatch({ type: 'SET_REPLY', reply }),
         editingTarget, setEditing: setEditingTarget,
         isAdmin, reports, adminReports, adminBan, adminUnban,
-        t, updateSettings, getMyPublicKey, getPublicKey, decryptMedia, loadOlderMessages,
-        getMyIdentityKeyB64, getPeerIdentityKeyB64, identityWarning, dismissIdentityWarning,
+        t, updateSettings, getMyPublicKey, getPublicKey, decryptMedia, retainMedia, releaseMedia, loadOlderMessages,
+        
         sessions, requestSessions, revokeSession,
         bannedUsers, adminGetBanned, adminError, dismissAdminError,
         blockedUsers, refreshBlocked, blockUser, unblockUser, reportUser,
         showImportModal: (data: any, mode: 'setup' | 'settings') => setImportModal({ data, mode }),
-        openProfile, closeProfile, fetchPeerPreKey, openReport, closeReport, backToProfile, setMyAvatar, removeMyAvatar,
+        openProfile, closeProfile, openReport, closeReport, backToProfile, setMyAvatar, removeMyAvatar,
       }}>
         {children}
         <ProfileOverlay />

@@ -16,7 +16,13 @@ export function LoginScreen() {
     document.title = 'WhisperNet';
   }, []);
 
+  // A failed connection leaves the status on "disconnected" again, which is what it already was,
+  // so a deps-based reset never fired and the form stayed disabled behind a spinner for good.
+  // Watching the transition out of "connecting" covers every outcome.
+  const wasConnecting = useRef(false);
   useEffect(() => {
+    if (state.status === 'connecting') { wasConnecting.current = true; return; }
+    if (wasConnecting.current && state.status !== 'connected') setLoading(false);
     if (state.status === 'connected' || state.authError) setLoading(false);
   }, [state.status, state.authError]);
 
@@ -62,7 +68,7 @@ export function LoginScreen() {
             <input type="password" value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="input" placeholder={isRegister ? t('password_create') : t('password_enter')}
-              autoComplete={isRegister ? 'new-password' : 'current-password'} maxLength={32} disabled={loading} />
+              autoComplete={isRegister ? 'new-password' : 'current-password'} maxLength={64} disabled={loading} />
           </div>
 
           {state.authError && (

@@ -3,10 +3,25 @@ dist/
 data/
 *.log
 .env
+.env.*
+!.env.example
 .DS_Store
 android/app/build/
 android/.gradle/
 android/.idea/
 ios/
-site/
 src-tauri/target/
+
+# the marketing site is deployed from the working copy, but the release artifacts it links to are
+# not: they are large, and the server redirects to the GitHub release when they are missing
+site/downloads/
+
+# signing material and local machine state must never reach the repository
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+google-services.json
+android/local.properties
+android/app/whispernet-release.jks

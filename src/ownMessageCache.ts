@@ -1,7 +1,7 @@
 /**
- * A direct message is encrypted with the Signal double ratchet, which only travels one way: the
- * sender cannot decrypt its own ciphertext. The server therefore hands the message back with only
- * the encrypted blob, and the client would render "[encrypted]" for a picture the user just sent.
+ * A direct message is encrypted to the recipient's key, so the sender cannot decrypt its own
+ * ciphertext. The server therefore hands the message back with only the encrypted blob, and the
+ * client would render "[encrypted]" for a picture the user just sent.
  *
  * To avoid that the client stamps every outgoing dm with an id of its own, keeps the plaintext
  * under that id, and uses it whenever decrypting its own message fails - both for the live echo and

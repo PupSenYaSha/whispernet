@@ -1,4 +1,4 @@
-export interface User {
+﻿export interface User {
   id: string;
   nickname: string;
 }
@@ -17,7 +17,6 @@ export interface ProfileInfo {
   isMe: boolean;
   isBlockedByMe: boolean;
   isBanned: boolean;
-  safetyNumber: string | null;
 }
 
 export interface Message {
@@ -34,8 +33,7 @@ export interface Message {
   quotedMessageText?: string;
   quotedMessageSender?: string;
   editedAt?: number;
-  sealedSender?: boolean;
-  expiresAt?: number;
+expiresAt?: number;
 }
 
 export interface Contact {
@@ -75,7 +73,9 @@ export interface AppSettings {
   fontSize: 'small' | 'normal' | 'large';
   compactMode: boolean;
   disappearingTTL: 'off' | '24h' | '7d' | '30d';
+  screenshotProtection: boolean;
 }
+
 
 declare global {
   interface Window {

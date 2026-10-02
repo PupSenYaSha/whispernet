@@ -1,0 +1,24 @@
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.zip binary
+*.gz binary
+*.apk binary
+*.deb binary
+*.exe binary
+*.jar binary
+*.keystore binary
+*.jks binary
+
+# the gradle wrapper script has to survive a checkout on Windows with its line endings intact
+android/gradlew text eol=lf
+android/gradlew.bat text eol=crlf

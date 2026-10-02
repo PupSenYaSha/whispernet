@@ -1,15 +1,16 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useConnection } from '../context';
-import { mediaErrorKey, MAX_UPLOAD_BYTES, MAX_ENCRYPTED_UPLOAD_BYTES } from '../upload';
+import { mediaErrorKey, MAX_UPLOAD_BYTES } from '../upload';
 import { MAX_MESSAGE_CHARS } from '../limits';
 
 export function MessageInput() {
   const { state, sendMessage, sendDm, sendImage, sendDmImage, blockedUsers, unblockUser, setReply, editingTarget, setEditing, editMessage, t } = useConnection();
   const [hasText, setHasText] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [sealedMode, setSealedMode] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+
   const fileRef = useRef<HTMLInputElement>(null);
   const isConnected = state.status === 'connected';
   const isDm = state.activeChannel !== 'general';
@@ -40,15 +41,14 @@ export function MessageInput() {
     }
   }, [editingTarget]);
 
-  const clearComposer = () => {
+  const clearComposer = useCallback(() => {
     setReply(null);
     setEditing(null);
     const ta = textareaRef.current;
     if (ta) { ta.value = ''; ta.style.height = 'auto'; }
     setHasText(false);
-    setSealedMode(false);
     setError(null);
-  };
+  }, [setReply, setEditing]);
 
   // the composer is an uncontrolled textarea, so React reuses the same node when the channel
   // changes: without this a half typed message would follow the user into the next chat
@@ -58,10 +58,21 @@ export function MessageInput() {
     if (channelRef.current === next) return;
     channelRef.current = next;
     clearComposer();
-  }, [dmTarget]);
+  }, [dmTarget, clearComposer]);
+
+  // Abandoning an edit used to leave the old text sitting in the box, and the next Enter sent it
+  // as a brand new message.
+  useEffect(() => {
+    if (editingTarget) return;
+    const ta = textareaRef.current;
+    if (ta && ta.value) { ta.value = ''; ta.style.height = 'auto'; setHasText(false); }
+  }, [editingTarget]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    // sending a direct message waits for the recipient key and for the crypto, so without a guard
+    // a second Enter sends the same text twice
+    if (sending) return;
     const ta = textareaRef.current;
     const val = ta?.value?.trim();
     if (!val || !isConnected) return;
@@ -71,21 +82,22 @@ export function MessageInput() {
       clearComposer();
       return;
     }
-    if (isDm && dmTarget) {
-      try {
-        await sendDm(dmTarget, val, sealedMode, replyTo || undefined);
-      } catch {
-        return;
-      }
-    } else {
-      try {
+    setSending(true);
+    setError(null);
+    try {
+      if (isDm && dmTarget) {
+        await sendDm(dmTarget, val, replyTo || undefined);
+      } else {
         await sendMessage(val, replyTo || undefined);
-      } catch {
-        return;
       }
+      clearComposer();
+    } catch (e) {
+      setError(t(mediaErrorKey(e)));
+    } finally {
+      setSending(false);
     }
-    clearComposer();
   };
+
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -96,11 +108,11 @@ export function MessageInput() {
 
   const handleFile = async (file: File) => {
     if (!file.type.startsWith('image/') && !file.type.startsWith('video/')) { setError(t('upload_unsupported')); return; }
-    if (file.size > MAX_UPLOAD_BYTES) { setError(t('upload_too_large')); return; }
     if (file.size === 0) { setError(t('upload_failed')); return; }
-    // encrypted media is held in memory while it is ciphered, so a phone cannot take a gigabyte
-    const limit = isDm && dmTarget ? MAX_ENCRYPTED_UPLOAD_BYTES : MAX_UPLOAD_BYTES;
-    if (file.size > limit) { setError(t('upload_too_large_dm')); return; }
+    // encrypted attachments are streamed rather than held whole, so the private chat now carries the
+    // same ceiling as the global one and there is only one rule left to state
+    if (file.size > MAX_UPLOAD_BYTES) { setError(t('upload_too_large')); return; }
+
     setError(null);
     setUploading(true);
     try {
@@ -202,20 +214,25 @@ export function MessageInput() {
           className="flex-1 px-4 py-2.5 rounded-2xl bg-bg-tertiary border border-border-default text-fg-primary text-[15px] placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary focus:border-transparent transition-[border-color,background-color,box-shadow] duration-200 resize-none"
           style={{ minHeight: '44px', maxHeight: '120px', overflow: 'hidden' }}
           rows={1}
-          maxLength={4096}
+          maxLength={MAX_MESSAGE_CHARS}
           aria-label={t('send_message')}
         />
         <button
           type="submit"
-          disabled={!isConnected || !hasText}
+          disabled={!isConnected || !hasText || sending}
           className="flex-shrink-0 w-11 h-11 rounded-2xl bg-accent-primary text-accent-text flex items-center justify-center hover:brightness-110 active:scale-95 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
           aria-label={t('send_message')}
         >
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-            <line x1="22" y1="2" x2="11" y2="13" />
-            <polygon points="22 2 15 22 11 13 2 9 22 2" />
-          </svg>
+          {sending ? (
+            <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" fill="none" /><path className="opacity-75" fill="currentColor" d="M4 12a12 12 0 0 1 12-12V0C5.373 0 0 5.373 0 12h4z" /></svg>
+          ) : (
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <line x1="22" y1="2" x2="11" y2="13" />
+              <polygon points="22 2 15 22 11 13 2 9 22 2" />
+            </svg>
+          )}
         </button>
+
       </div>
     </form>
   );

@@ -73,45 +73,4 @@ export async function decryptMessage(
   return new TextDecoder().decode(decrypted);
 }
 
-export async function generateX3dhSafetyNumber(selfIdentityB64: string, peerIdentityB64?: string | null): Promise<string> {
-  const self = base64ToU8(selfIdentityB64);
-  let data: Uint8Array;
-  if (peerIdentityB64) {
-    const peer = base64ToU8(peerIdentityB64);
-    
-    data = byteCompare(self, peer) <= 0 ? concatBytes(self, peer) : concatBytes(peer, self);
-  } else {
-    data = self;
-  }
-  const hash = await crypto.subtle.digest('SHA-256', data as unknown as ArrayBuffer);
-  const bytes = new Uint8Array(hash);
-  const groups: string[] = [];
-  for (let i = 0; i < 24; i += 4) {
-    groups.push(Array.from(bytes.slice(i, i + 4)).map(b => b.toString(16).padStart(2, '0')).join(''));
-  }
-  return groups.join(' ').toUpperCase();
-}
-
-function base64ToU8(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const buf = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
-  return buf;
-}
-
-function byteCompare(a: Uint8Array, b: Uint8Array): number {
-  const n = Math.min(a.length, b.length);
-  for (let i = 0; i < n; i++) {
-    if (a[i] !== b[i]) return a[i] - b[i];
-  }
-  return a.length - b.length;
-}
-
-function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
-  const out = new Uint8Array(a.length + b.length);
-  out.set(a, 0);
-  out.set(b, a.length);
-  return out;
-}
-
 

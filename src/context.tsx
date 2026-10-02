@@ -1,4 +1,4 @@
-import React from 'react';
+﻿import React from 'react';
 import type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor, Session, BannedUser, AvatarUpdate, ProfileInfo } from './types';
 
 export type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor, Session, BannedUser, AvatarUpdate, ProfileInfo };
@@ -14,8 +14,10 @@ export type AdminReport = {
   messageId?: string;
   messageText?: string;
   reason: string;
+  source?: 'profile' | 'message';
   timestamp: number;
 };
+
 
 export interface ConnectionState {
   status: ConnectionStatus;
@@ -42,7 +44,7 @@ export interface ConnectionState {
   profile: ProfileInfo | null;
   reportTarget: ProfileInfo | null;
   reportStatus: 'idle' | 'pending' | 'sent' | 'failed';
-}
+  }
 
 export interface HistoryWindow {
   hasMore: boolean;
@@ -58,7 +60,7 @@ export type ConnectionAction =
   | { type: 'SET_DM_MESSAGES'; channel: string; messages: Message[] }
   | { type: 'PREPEND_DM_MESSAGES'; channel: string; messages: Message[] }
   | { type: 'SET_DM_HISTORY_STATE'; channel: string; hasMore: boolean; oldest: number | null }
-  | { type: 'ADD_DM_MESSAGE'; channel: string; message: Message }
+| { type: 'ADD_DM_MESSAGE'; channel: string; message: Message }
   | { type: 'SET_USERS'; users: User[] }
   | { type: 'ADD_USER'; user: User }
   | { type: 'REMOVE_USER'; userId: string }
@@ -94,7 +96,8 @@ export interface ConnectionContextType {
   disconnect: () => void;
   logout: () => void;
   sendMessage: (text: string, quoted?: ReplyTarget) => void;
-  sendDm: (to: string, text: string, sealed?: boolean, quoted?: ReplyTarget) => void;
+  sendDm: (to: string, text: string, quoted?: ReplyTarget) => Promise<void>;
+
   sendDmImage: (to: string, file: File) => Promise<void>;
   sendImage: (file: File) => Promise<void>;
   openDm: (userId: string, nickname?: string) => void;
@@ -116,14 +119,14 @@ export interface ConnectionContextType {
   adminUnban: (nickname: string) => void;
   t: (key: string) => string;
   updateSettings: (settings: Partial<AppSettings>) => void;
-  getMyPublicKey: () => JsonWebKey | null;
+getMyPublicKey: () => JsonWebKey | null;
   getPublicKey: (userId: string) => JsonWebKey | null;
-  getMyIdentityKeyB64: () => string | null;
-  getPeerIdentityKeyB64: (userId: string) => string | null;
-  identityWarning: { userId: string; nickname?: string } | null;
-  dismissIdentityWarning: () => void;
   decryptMedia: (message: { id: string; text: string; fileKey?: Record<string, string> }) => Promise<string | null>;
+  /** Keeps a decrypted media object URL alive while a bubble is showing it. */
+  retainMedia: (id: string) => void;
+  releaseMedia: (id: string) => void;
   loadOlderMessages: (channel: string | null, before: number | null) => Promise<void>;
+
   sessions: Session[];
   requestSessions: () => void;
   revokeSession: (sessionId: string) => void;
@@ -135,11 +138,11 @@ export interface ConnectionContextType {
   refreshBlocked: () => void;
   blockUser: (userId: string, nickname?: string) => void;
   unblockUser: (userId: string) => void;
-  reportUser: (targetId: string, reason: string, messageId?: string, source?: 'profile' | 'message') => void;
+  reportUser: (targetId: string, reason: string, messageId?: string, source?: 'profile' | 'message') => boolean;
+
   showImportModal: (data: any, mode: 'setup' | 'settings') => void;
   openProfile: (userId: string) => void;
   closeProfile: () => void;
-  fetchPeerPreKey: (userId: string) => void;
   openReport: (target: ProfileInfo) => void;
   closeReport: () => void;
   backToProfile: () => void;

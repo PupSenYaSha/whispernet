@@ -1,7 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { startTestServer, TestClient, uniqueNick, type StartedServer } from '../helpers';
 import { MAX_MESSAGE_CHARS } from '../../src/limits';
-import { MAX_CONNECTIONS_PER_USER } from '../../server/constants';
 
 let server: StartedServer;
 const clients: TestClient[] = [];
@@ -80,7 +79,7 @@ describe('history paging', () => {
     const aId = ra.payload.userId;
 
     for (let i = 0; i < 60; i++) {
-      a.send('dm_send', { to: bId, signalEncrypted: { ciphertext: 'c' + i, ratchetPublicKey: 'r', messageNumber: i } });
+      a.send('dm_send', { to: bId, encrypted: { ciphertext: 'c' + i, iv: 'iv', encryptedKeys: { [bId]: 'k' + i } } });
       await new Promise((r) => setTimeout(r, 20));
     }
 
@@ -92,8 +91,17 @@ describe('history paging', () => {
 
     b.clear();
     b.send('dm_history', { with: aId, before: first.payload.messages[0].timestamp, limit: 40 });
-    const second = await b.waitFor('dm_history');
+    // an older page has to be answered as a page: answering with the plain type made the client
+    // replace the whole conversation with this slice, and an empty page blanked the chat
+    const second = await b.waitFor('dm_history_page');
     const seen = new Set(first.payload.messages.map((m: any) => m.id));
     expect(second.payload.messages.every((m: any) => !seen.has(m.id))).toBe(true);
+
+    b.clear();
+    b.send('dm_history', { with: aId, before: second.payload.messages[0].timestamp, limit: 40 });
+    const third = await b.waitFor('dm_history_page');
+    // sixty messages over two full pages leaves nothing behind
+    expect(third.payload.messages).toHaveLength(0);
+    expect(third.payload.hasMore).toBe(false);
   }, 60000);
 });

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import type { AvatarUpdate } from '../types';
 import { useConnection } from '../context';
@@ -7,6 +7,23 @@ import { cn } from '../utils';
 import { useEscapeKey } from '../useEscapeKey';
 
 const REASONS = ['report_reason_scam', 'report_reason_harassment', 'report_reason_inappropriate', 'report_reason_other'] as const;
+
+/** A report has to say what it is about; the comment is optional once a reason is chosen. */
+export function canSubmitReport(reason: string): boolean {
+  return !!reason;
+}
+
+/**
+ * Builds the report text a moderator reads: the chosen reason, and the reporter's own words when
+ * they added any. Capped to the length the server stores.
+ */
+export function buildReportText(reason: string, comment: string, translated: Record<string, string>): string {
+  const base = reason === 'report_reason_other' ? (comment.trim() || translated.report_reason_other) : translated[reason];
+  return (reason === 'report_reason_other' ? base : (comment.trim() ? `${base}: ${comment.trim()}` : base)).slice(0, 500);
+}
+
+/** How long to wait for the server before telling the user it did not arrive. */
+const SUBMIT_TIMEOUT_MS = 10000;
 
 export function ReportModal({ targetId, targetNickname, avatar, messageId, onClose, onBack }: {
   targetId: string;
@@ -19,19 +36,35 @@ export function ReportModal({ targetId, targetNickname, avatar, messageId, onClo
   const { state, dispatch, t, reportUser, closeReport } = useConnection();
   const [reason, setReason] = useState<string>('');
   const [comment, setComment] = useState('');
+  const pendingRef = useRef(false);
 
   const status = state.reportStatus;
   const done = status === 'sent';
   const failed = status === 'failed';
 
-  useEscapeKey(() => { if (done) closeReport(); else if (onBack) onBack(); else closeReport(); }, true, 91);
+  // Escape while the comment box has focus must not throw the text away
+  useEscapeKey(() => { if (done) closeReport(); else if (onBack) onBack(); else closeReport(); }, true, 91, false);
+
+  // a report opened from a message bubble reuses the shared status, so it has to start clean
+  useEffect(() => { dispatch({ type: 'SET_REPORT_STATUS', status: 'idle' }); }, [dispatch, targetId, messageId]);
+
+  // without this the button stayed on "Sending…" for good when the answer never came
+  useEffect(() => {
+    if (status !== 'pending') { pendingRef.current = false; return; }
+    const timer = setTimeout(() => dispatch({ type: 'SET_REPORT_STATUS', status: 'failed' }), SUBMIT_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  }, [status, dispatch]);
 
   const submit = () => {
-    if (!reason || status === 'pending') return;
-    const base = reason === 'report_reason_other' ? (comment.trim() || t('report_reason_other')) : t(reason);
-    const details = (reason === 'report_reason_other' ? base : (comment.trim() ? `${base}: ${comment.trim()}` : base)).slice(0, 500);
+    if (status === 'pending') return;
+    if (!canSubmitReport(reason)) return;
+    const details = buildReportText(reason, comment, t as unknown as Record<string, string>);
+    if (!reportUser(targetId, details, messageId, messageId ? 'message' : 'profile')) {
+      dispatch({ type: 'SET_REPORT_STATUS', status: 'failed' });
+      return;
+    }
+    pendingRef.current = true;
     dispatch({ type: 'SET_REPORT_STATUS', status: 'pending' });
-    reportUser(targetId, details, messageId, messageId ? 'message' : 'profile');
   };
 
   return createPortal(
@@ -88,28 +121,27 @@ export function ReportModal({ targetId, targetNickname, avatar, messageId, onClo
           ) : (
             <>
               {REASONS.map(key => (
-                <button key={key} onClick={() => setReason(key)}
-                  className={cn('w-full px-4 py-3 rounded-2xl text-left text-[14px] font-medium border transition-all flex items-center gap-3',
-                    reason === key
-                      ? 'bg-status-error/10 border-status-error text-fg-primary'
-                      : 'bg-bg-tertiary border-border-default text-fg-muted hover:border-fg-subtle')}>
-                  <span className={cn('w-4 h-4 rounded-full border-2 flex items-center justify-center flex-shrink-0',
-                    reason === key ? 'border-status-error' : 'border-fg-subtle')}>
-                    {reason === key && <span className="w-2 h-2 rounded-full bg-status-error" />}
-                  </span>
-                  {t(key)}
-                </button>
-              ))}
+                    <button key={key} onClick={() => setReason(key)}
+                      className={cn('w-full px-4 py-3 rounded-2xl text-left text-[14px] font-medium border transition-all flex items-center gap-3',
+                        reason === key
+                          ? 'bg-status-error/10 border-status-error text-fg-primary'
+                          : 'bg-bg-tertiary border-border-default text-fg-muted hover:border-fg-subtle')}>
+                      <span className={cn('w-4 h-4 rounded-full border-2 flex items-center justify-center flex-shrink-0',
+                        reason === key ? 'border-status-error' : 'border-fg-subtle')}>
+                        {reason === key && <span className="w-2 h-2 rounded-full bg-status-error" />}
+                      </span>
+                      {t(key)}
+                    </button>
+                  ))}
 
-              <textarea
-                value={comment}
-                onChange={(e) => setComment(e.target.value)}
-                placeholder={t('report_hint')}
-                maxLength={500}
-                rows={3}
-                className="w-full px-3.5 py-3 rounded-2xl bg-bg-tertiary border border-border-default text-[14px] text-fg-primary placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary resize-none"
-              />
-
+                  <textarea
+                    value={comment}
+                    onChange={(e) => setComment(e.target.value)}
+                    placeholder={t('report_hint')}
+                    maxLength={500}
+                    rows={3}
+                    className="w-full px-3.5 py-3 rounded-2xl bg-bg-tertiary border border-border-default text-[14px] text-fg-primary placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary resize-none"
+                  />
               <div className="flex gap-2.5 pt-1">
                 {onBack ? (
                   <button onClick={onBack}
@@ -122,7 +154,8 @@ export function ReportModal({ targetId, targetNickname, avatar, messageId, onClo
                     {t('cancel')}
                   </button>
                 )}
-                <button onClick={submit} disabled={!reason || status === 'pending'}
+                <button onClick={submit}
+                  disabled={status === 'pending' || !canSubmitReport(reason)}
                   className="flex-1 py-3 rounded-2xl bg-status-error text-white text-[15px] font-semibold hover:brightness-110 transition-all disabled:opacity-40">
                   {status === 'pending' ? t('sending') : t('report_send')}
                 </button>

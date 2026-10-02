@@ -1,61 +1,53 @@
-param([switch]$IncludeServer)
+param([switch]$Bundle)
 
+# Local packaging helper. Tauri does the desktop builds; this only wraps the steps so a release can
+# be produced on a workstation without recalling the exact commands.
 $ErrorActionPreference = "Stop"
+
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
-$node = (Get-Command node -ErrorAction SilentlyContinue).Source
-if (-not $node) { $node = "C:\Program Files\nodejs\node.exe" }
-$tsc = Join-Path $root "node_modules/tsx/dist/cli.mjs"
-$tscBin = Join-Path $root "node_modules/typescript/bin/tsc"
-$vite = Join-Path $root "node_modules/vite/bin/vite.js"
-$eb = Join-Path $root "node_modules/electron-builder/cli.js"
+Push-Location $root
 
-$pkg = Get-Content (Join-Path $root "package.json") | ConvertFrom-Json
-$version = $pkg.version
+try {
+    $pkg = Get-Content (Join-Path $root "package.json") -Raw | ConvertFrom-Json
+    $version = $pkg.version
 
-Write-Host "=== WhisperNet v$version Build ===" -ForegroundColor Cyan
+    Write-Host "=== WhisperNet v$version ===" -ForegroundColor Cyan
 
-Write-Host "`n[1/3] Building client..." -ForegroundColor Yellow
-& $node $vite build
-if ($LASTEXITCODE -ne 0) { throw "Client build failed" }
+    Write-Host "`n[1/3] Type checking..." -ForegroundColor Yellow
+    npm run typecheck
+    if ($LASTEXITCODE -ne 0) { throw "Type check failed" }
 
-$step = 2
-$totalSteps = if ($IncludeServer) { 4 } else { 3 }
+    Write-Host "`n[2/3] Building the client..." -ForegroundColor Yellow
+    npm run build:client
+    if ($LASTEXITCODE -ne 0) { throw "Client build failed" }
 
-if ($IncludeServer) {
-  Write-Host "`n[$step/$totalSteps] Building server..." -ForegroundColor Yellow
-  & $node $tsc $tscBin -p server/tsconfig.json
-  if ($LASTEXITCODE -ne 0) { throw "Server build failed" }
-  $step++
+    if (-not $Bundle) {
+        Write-Host "`nDone. Re-run with -Bundle to package the desktop app." -ForegroundColor Green
+        return
+    }
+
+    Write-Host "`n[3/3] Packaging the desktop app (Tauri nsis)..." -ForegroundColor Yellow
+    $env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
+    npm run tauri build -- --bundles nsis
+    if ($LASTEXITCODE -ne 0) { throw "Packaging failed" }
+
+    $installer = Get-ChildItem "src-tauri\target\release\bundle\nsis\*.exe" -ErrorAction SilentlyContinue
+    if (-not $installer) { throw "No installer was produced" }
+
+    # the desktop updater replaces the running binary in place, so the release also needs a plain
+    # zip holding the executable next to the installer
+    $zip = Join-Path $root "dist\WhisperNet_${version}_x64-portable.zip"
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $zip) | Out-Null
+    Compress-Archive -Path "src-tauri\target\release\whispernet.exe" -DestinationPath $zip -Force
+
+    Write-Host "`n=== DONE ===" -ForegroundColor Green
+    $installer | ForEach-Object { Write-Host "Installer: $($_.FullName)" -ForegroundColor Cyan }
+    Write-Host "Portable:  $zip" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "To publish:" -ForegroundColor White
+    Write-Host "  1. create the GitHub release with tag v$version" -ForegroundColor White
+    Write-Host "  2. upload the installer and the portable zip as release assets" -ForegroundColor White
 }
-
-Write-Host "`n[$step/$totalSteps] Building Electron..." -ForegroundColor Yellow
-& $node $tsc $tscBin -p electron/tsconfig.json
-if ($LASTEXITCODE -ne 0) { throw "Electron build failed" }
-$step++
-
-Write-Host "`n[$step/$totalSteps] Packaging..." -ForegroundColor Yellow
-$env:CSC_IDENTITY_AUTO_DISCOVERY = "false"
-& $node $eb --win
-if ($LASTEXITCODE -ne 0) { throw "Packaging failed" }
-
-$unpacked = Join-Path $root "dist/build/win-unpacked"
-$zipPath = Join-Path $root "dist/build/WhisperNet-v$version.zip"
-
-Remove-Item $zipPath -Force -ErrorAction SilentlyContinue
-Get-ChildItem "$unpacked/locales" | Where-Object { $_.Name -notmatch "en|ru" } | Remove-Item -Force -ErrorAction SilentlyContinue
-
-Compress-Archive -Path "$unpacked/*" -DestinationPath $zipPath -Force
-$sizeMB = [math]::Round((Get-Item $zipPath).Length / 1MB, 1)
-
-Write-Host "`n=== DONE ===" -ForegroundColor Green
-Write-Host "Zip: dist/build/WhisperNet-v$version.zip ($sizeMB MB)" -ForegroundColor Cyan
-Write-Host ""
-Write-Host "To distribute:" -ForegroundColor White
-Write-Host "  1. Send WhisperNet-v$version.zip to friends" -ForegroundColor White
-Write-Host "  2. They extract and run WhisperNet.exe" -ForegroundColor White
-Write-Host ""
-Write-Host "To publish update:" -ForegroundColor White
-Write-Host "  1. Bump version in package.json" -ForegroundColor White
-Write-Host "  2. Run this script" -ForegroundColor White
-Write-Host "  3. Create GitHub release with tag v$version" -ForegroundColor White
-Write-Host "  4. Upload the zip as release asset" -ForegroundColor White
+finally {
+    Pop-Location
+}

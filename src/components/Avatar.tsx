@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import type { AvatarUpdate } from '../types';
 import { cn, avatarUrl, getAvatarText, getAvatarGradient } from '../utils';
 
@@ -11,6 +11,9 @@ export function Avatar({ userId, nickname, avatar, className, textClassName = 't
 }) {
   const [failed, setFailed] = useState(false);
   const src = avatarUrl(userId, avatar?.ext, avatar?.updatedAt);
+  // a failed load used to stick, so the bubble stayed on initials for the rest of the session and
+  // one broken url bled into the next user rendered into the same node
+  useEffect(() => { setFailed(false); }, [src]);
   const showImg = !!src && !failed;
   return (
     <div className={cn('overflow-hidden flex items-center justify-center flex-shrink-0', className)}>

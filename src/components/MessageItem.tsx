@@ -2,13 +2,15 @@ import type { Message } from '../types';
 import { useState, useRef, useEffect, useMemo, memo } from 'react';
 import { createPortal } from 'react-dom';
 import { useConnection } from '../context';
-import { cn, formatTime } from '../utils';
+import { cn, formatTime, messageControls } from '../utils';
 import { Avatar } from './Avatar';
 import { ReportModal } from './ReportModal';
 import { useEscapeKey } from '../useEscapeKey';
+import { parseMediaTag } from '../media-crypto';
+import { mediaProxyUrl } from '../upload';
 
 function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15px]', animate = false }: { message: Message; showAvatar?: boolean; fontSizeClass?: string; animate?: boolean }) {
-  const { state, deleteMessage: deleteMsg, addReaction, removeReaction, setEditing, decryptMedia, setReply, openProfile, t } = useConnection();
+  const { state, deleteMessage: deleteMsg, addReaction, removeReaction, setEditing, decryptMedia, retainMedia, releaseMedia, setReply, openProfile, t } = useConnection();
   const isSystem = message.senderId === 'system';
   const isOwn = message.isOwn;
 
@@ -18,6 +20,15 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
   const [reportOpen, setReportOpen] = useState(false);
   const [lightbox, setLightbox] = useState<{ url: string; isVideo: boolean } | null>(null);
   const reactionPickerRef = useRef<HTMLDivElement>(null);
+  // one clock for every bubble: each of them computed its countdown from its own render, so a
+  // "24h" label froze at whatever it showed when the message arrived
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!message.expiresAt) return;
+    const timer = setInterval(() => setNow(Date.now()), 30_000);
+    return () => clearInterval(timer);
+  }, [message.expiresAt]);
 
   useEscapeKey(() => setLightbox(null), !!lightbox, 100);
 
@@ -28,8 +39,8 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
       || Object.values(state.dmMessages).flat().find((m) => m.id === message.quotedMessageId);
     const text = found?.text;
     if (!text) return '[encrypted]';
-    const mm = text.match(/^\[(image|video)\][\s\S]*?\[\/\1\]/);
-    if (mm) return mm[1] === 'video' ? `🎥 ${t('video_att')}` : `📷 ${t('photo_att')}`;
+    const mm = parseMediaTag(text);
+    if (mm) return mm.kind === 'video' ? `🎥 ${t('video_att')}` : `📷 ${t('photo_att')}`;
     return text;
   }, [message.quotedMessageText, message.quotedMessageId, state.messages, state.dmMessages, t]);
 
@@ -49,7 +60,10 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
     return () => { document.body.style.overflow = ''; };
   }, [lightbox]);
 
-  const isMedia = /^\[(image|video)\][\s\S]*?\[\/\1\]/.test(message.text);
+  const mediaTag = parseMediaTag(message.text);
+  const isMedia = mediaTag !== null;
+  // authorship decides the controls; sealed sender only decides where a correction is kept
+  const controls = messageControls(message, isMedia);
 
   useEffect(() => {
     let cancelled = false;
@@ -64,11 +78,19 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
       setMediaUrl(null);
     }
     return () => { cancelled = true; };
-  }, [message.id, message.text, message.fileKey, isMedia, decryptMedia]);
+  }, [message, isMedia, decryptMedia]);
+
+  // hold the decrypted object URL for as long as this bubble shows it, otherwise the cache is
+  // allowed to revoke an image that is still on screen
+  useEffect(() => {
+    if (!mediaUrl) return;
+    retainMedia(message.id);
+    return () => releaseMedia(message.id);
+  }, [mediaUrl, message.id, retainMedia, releaseMedia]);
 
   const expiresIn = useMemo(() => {
     if (!message.expiresAt) return null;
-    const remaining = message.expiresAt - Date.now();
+    const remaining = message.expiresAt - now;
     if (remaining <= 0) return 'expired';
     const hours = Math.floor(remaining / 3600000);
     const minutes = Math.floor((remaining % 3600000) / 60000);
@@ -76,7 +98,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
     if (hours > 0) return `${hours}h ${minutes}m`;
     if (minutes > 0) return `${minutes}m ${seconds}s`;
     return `${seconds}s`;
-  }, [message.expiresAt]);
+  }, [message.expiresAt, now]);
 
   if (isSystem) {
     return (
@@ -135,9 +157,8 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
               </div>
             )}
             {(() => {
-              const mediaMatch = message.text.match(/^\[(image|video)\]([\s\S]*?)\[\/\1\]/);
-              if (mediaMatch) {
-                const [, tag] = mediaMatch;
+              if (mediaTag) {
+                const tag = mediaTag.kind;
                 if (message.fileKey) {
                   if (mediaFailed) {
                     return <p className="whitespace-pre-wrap break-words text-status-error text-[13px]">{t('media_decrypt_error')}</p>;
@@ -147,7 +168,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
                       <div className="w-[240px] h-[160px] rounded-xl bg-bg-tertiary flex items-center justify-center">
                         <svg className="animate-spin h-6 w-6 text-fg-muted" viewBox="0 0 24 24">
                           <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" fill="none" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                          <path className="opacity-75" fill="currentColor" d="M4 12a12 12 0 0 1 12-12V0C5.373 0 0 5.373 0 12h4z" />
                         </svg>
                       </div>
                     );
@@ -164,12 +185,12 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
                       onClick={() => { setLightbox({ url: mediaUrl, isVideo: false }); }} />
                   );
                 }
-                const [, , url] = mediaMatch;
-                const safeUrl = /^(https?:\/\/)/i.test(url) ? url : null;
+                const safeUrl = /^(https?:\/\/)/i.test(mediaTag.url) ? mediaTag.url : null;
+
                 if (!safeUrl) {
                   return <p className="whitespace-pre-wrap break-words text-status-error text-[13px]">{t('invalid_url')}</p>;
                 }
-                const proxyUrl = `/api/media?url=${encodeURIComponent(safeUrl)}`;
+                const proxyUrl = mediaProxyUrl(safeUrl);
                 if (tag === 'video') {
                   return (
                     <video src={proxyUrl} controls
@@ -215,9 +236,8 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
           <div className="flex items-center gap-0.5 mt-1.5 px-1">
             <button
               onClick={() => {
-                const mediaMatch = message.text.match(/^\[(image|video)\]([\s\S]*?)\[\/\1\]/);
-                const quoteText = mediaMatch
-                  ? (mediaMatch[1] === 'video' ? `🎥 ${t('video_att')}` : `📷 ${t('photo_att')}`)
+                const quoteText = mediaTag
+                  ? (mediaTag.kind === 'video' ? `🎥 ${t('video_att')}` : `📷 ${t('photo_att')}`)
                   : message.text.trim().slice(0, 140);
                 setReply({ id: message.id, senderNickname: message.senderNickname, text: quoteText });
               }}
@@ -233,17 +253,22 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
               title={t('reactions')} aria-label={t('reactions')}>
               😊
             </button>
-            {isOwn && !isMedia && !message.channel && (
+            {/* Authorship decides who may correct or remove a message, never the sealed flag.
+                Gating on the flag gave the reader of an anonymous message the pencil and the bin, and
+                left the person who had actually written it able to do nothing but delete. The sealed
+                flag only decides *where* a correction is kept: in a private chat the server never held
+                anything but ciphertext, so the new text is written on this device. */}
+            {controls.edit && (
               <button
                 onClick={() => setEditing(message)}
-                className="p-1.5 rounded-full text-fg-muted hover:text-fg-primary hover:bg-bg-tertiary transition-colors"
+                className="p-1.5 rounded-full text-fg-muted hover:text-fg-primary hover:bg-bg-hover transition-colors"
                 title={t('edit_message')} aria-label={t('edit_message')}>
                 <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />
                 </svg>
               </button>
             )}
-            {isOwn && (
+            {controls.remove && (
               <button
                 onClick={() => deleteMsg(message.id)}
                 className="p-1.5 rounded-full text-fg-muted hover:text-status-error hover:bg-status-error/10 transition-colors"
@@ -253,7 +278,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
                 </svg>
               </button>
             )}
-            {!isOwn && (
+            {controls.report && (
               <button
                 onClick={() => { setReportOpen(true); }}
                 className="p-1.5 rounded-full text-fg-muted hover:text-status-error hover:bg-status-error/10 transition-colors"

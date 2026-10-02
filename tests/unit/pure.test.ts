@@ -1,38 +1,50 @@
 import { describe, it, expect } from 'vitest';
-import { generateX3dhSafetyNumber } from '../../src/crypto';
-import { getAvatarText, getAvatarGradient, avatarUrl, formatProfileDate, translations } from '../../src/utils';
+import { generateKeyPair, encryptMessage, decryptMessage } from '../../src/crypto';
+import { getAvatarText, getAvatarGradient, avatarUrl, formatProfileDate, translations, messageControls } from '../../src/utils';
 import { pushEscapeLayer, topEscapeLayer, escapeStackSize, clearEscapeStack, isTypingTarget, runTopEscapeLayer, hasEscapeLayerAtLeast } from '../../src/escapeStack';
 import { resolveBackAction } from '../../src/backNavigation';
+import { canSubmitReport, buildReportText } from '../../src/components/ReportModal';
 import { newClientMessageId, isValidClientMessageId, rememberOwnMessageText, recallOwnMessageText, forgetOwnMessages } from '../../src/ownMessageCache';
 import { MediaError, mediaErrorKey } from '../../src/upload';
 
-const b64 = (seed: number, len = 32) => Buffer.from(Array.from({ length: len }, (_, i) => (i * 7 + seed * 13 + 11) % 256)).toString('base64');
-
-describe('safety number', () => {
-  it('is symmetric for both sides', async () => {
-    const a = b64(1), b = b64(2);
-    const ab = await generateX3dhSafetyNumber(a, b);
-    const ba = await generateX3dhSafetyNumber(b, a);
-    expect(ab).toBe(ba);
+describe('the direct message body', () => {
+  // This is what replaced the ratchet, so it has to hold the properties the ratchet was there for:
+  // a body only the recipient opens, and no state between messages that can go stale.
+  it('opens for the recipient and not for the sender', async () => {
+    const sender = await generateKeyPair();
+    const bob = await generateKeyPair();
+    const enc = await encryptMessage('hello', { 'bob-id': bob.publicKey });
+    expect(await decryptMessage(enc, 'bob-id', bob.privateKey)).toBe('hello');
+    await expect(decryptMessage(enc, 'bob-id', sender.privateKey)).rejects.toThrow();
   });
 
-  it('formats as 6 groups of 8 hex chars, upper case', async () => {
-    const n = await generateX3dhSafetyNumber(b64(1), b64(2));
-    expect(n).toMatch(/^[0-9A-F]{8}( [0-9A-F]{8}){5}$/);
+  it('refuses a body that was not wrapped for this account', async () => {
+    const bob = await generateKeyPair();
+    const enc = await encryptMessage('hello', { 'bob-id': bob.publicKey });
+    await expect(decryptMessage(enc, 'carol-id', bob.privateKey)).rejects.toThrow(/No encrypted key/);
   });
 
-  it('derives from own identity only when no peer is given', async () => {
-    const a = b64(3);
-    const self = await generateX3dhSafetyNumber(a, null);
-    const pair = await generateX3dhSafetyNumber(a, b64(4));
-    expect(self).not.toBe(pair);
-    expect(self).toBe(await generateX3dhSafetyNumber(a, null));
+  it('reads back empty and unicode text', async () => {
+    const bob = await generateKeyPair();
+    for (const text of ['', 'привет 👋', 'a'.repeat(2000)]) {
+      const enc = await encryptMessage(text, { 'bob-id': bob.publicKey });
+      expect(await decryptMessage(enc, 'bob-id', bob.privateKey)).toBe(text);
+    }
   });
 
-  it('changes when the peer identity changes', async () => {
-    const base = await generateX3dhSafetyNumber(b64(1), b64(2));
-    const other = await generateX3dhSafetyNumber(b64(1), b64(5));
-    expect(base).not.toBe(other);
+  it('uses a fresh key and nonce per message, so two identical messages differ', async () => {
+    const bob = await generateKeyPair();
+    const one = await encryptMessage('same', { 'bob-id': bob.publicKey });
+    const two = await encryptMessage('same', { 'bob-id': bob.publicKey });
+    expect(one.ciphertext).not.toBe(two.ciphertext);
+    expect(one.iv).not.toBe(two.iv);
+  });
+
+  it('fails on a tampered ciphertext rather than returning garbage', async () => {
+    const bob = await generateKeyPair();
+    const enc = await encryptMessage('hello', { 'bob-id': bob.publicKey });
+    const flipped = enc.ciphertext.slice(0, -2) + (enc.ciphertext.endsWith('A') ? 'BB' : 'AA');
+    await expect(decryptMessage({ ...enc, ciphertext: flipped }, 'bob-id', bob.privateKey)).rejects.toThrow();
   });
 });
 
@@ -86,11 +98,72 @@ describe('translations', () => {
   });
 
   it('contains keys used by the profile feature', () => {
-    const keys = ['profile', 'my_profile', 'edit_avatar', 'remove_avatar', 'report_title', 'report_send', 'back', 'safety_number_profile', 'banned', 'registered'] as const;
+    const keys = ['profile', 'my_profile', 'edit_avatar', 'remove_avatar', 'report_title', 'report_send', 'screenshot_prot', 'banned', 'registered'] as const;
     for (const key of keys) {
       expect((translations.en as Record<string, string>)[key], key).toBeTruthy();
       expect((translations.ru as Record<string, string>)[key], key).toBeTruthy();
     }
+  });
+
+  // The whole Russian table once shipped as a wall of U+FFFD, which is what a file looks like after
+  // its encoding is mangled in transit. The characters are unrecoverable, so nothing catches this
+  // except a check that looks for them.
+  it('contains no replacement characters', () => {
+    for (const lang of ['en', 'ru'] as const) {
+      for (const [k, v] of Object.entries(translations[lang])) {
+        expect(v.includes('\uFFFD'), `${lang}.${k}`).toBe(false);
+      }
+    }
+  });
+
+  it('actually writes Russian in the Russian table', () => {
+    for (const [k, v] of Object.entries(translations.ru)) {
+      expect(/[\u0400-\u04FF]/.test(v), `ru.${k} is not Russian: ${v}`).toBe(true);
+    }
+  });
+});
+
+describe('who may touch a message', () => {
+  const own = { isOwn: true };
+  const theirs = { isOwn: false };
+
+  it('lets you correct and remove what you wrote', () => {
+    expect(messageControls(own)).toEqual({ edit: true, remove: true, report: false });
+  });
+
+  it('lets you do neither to what somebody else wrote', () => {
+    expect(messageControls(theirs)).toEqual({ edit: false, remove: false, report: true });
+  });
+
+  it('offers no pencil on an attachment, which has no words to correct', () => {
+    expect(messageControls(own, true).edit).toBe(false);
+    expect(messageControls(own, true).remove).toBe(true);
+  });
+});
+
+describe('what a report is made of', () => {
+  // The operator cannot read a private message, so the reporter's own words are the only part of
+  // the report a moderator can use. The reason is the headline; the comment rides along with it.
+  it('will not go out without a reason', () => {
+    expect(canSubmitReport('')).toBe(false);
+    expect(canSubmitReport('report_reason_scam')).toBe(true);
+  });
+
+  it('keeps what was typed and drops the padding', () => {
+    const t = { report_reason_scam: 'Scam', report_reason_other: 'Other' };
+    expect(buildReportText('report_reason_scam', '  he asked for my card details  ', t))
+      .toBe('Scam: he asked for my card details');
+  });
+
+  it('lets the comment stand in when the reason is only other', () => {
+    const t = { report_reason_scam: 'Scam', report_reason_other: 'Other' };
+    expect(buildReportText('report_reason_other', '  spam  ', t)).toBe('spam');
+    expect(buildReportText('report_reason_other', '', t)).toBe('Other');
+  });
+
+  it('holds to the same length cap as any other report', () => {
+    const t = { report_reason_scam: 'Scam', report_reason_other: 'Other' };
+    expect(buildReportText('report_reason_scam', 'x'.repeat(900), t)).toHaveLength(500);
   });
 });
 

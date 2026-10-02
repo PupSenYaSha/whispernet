@@ -1,9 +1,8 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+﻿import { useState, useEffect, useMemo, useCallback } from 'react';
 import type { AccentColor } from '../types';
 import { useConnection } from '../context';
 import { cn } from '../utils';
 import { Avatar } from './Avatar';
-import { SafetyNumberButton } from './SafetyNumberButton';
 import { useEscapeKey } from '../useEscapeKey';
 
 declare const __APP_VERSION__: string;
@@ -65,6 +64,32 @@ function Option({ label, icon, children, stacked }: { label: string; icon?: Reac
   );
 }
 
+/**
+ * What the operator of this server can and cannot see. Said plainly, because the alternative was
+ * people finding out by trying: the words of a private message are between its two ends, but the
+ * server does record who was in the conversation and when.
+ */
+function PrivacyNotice() {
+  const { t } = useConnection();
+
+  return (
+    <div className="flex items-center gap-3 px-4 py-3.5">
+      <div className="w-9 h-9 rounded-2xl bg-gradient-to-br from-bg-tertiary to-bg-tertiary/60 border border-border-default flex items-center justify-center text-accent-primary flex-shrink-0">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+          <rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
+        </svg>
+      </div>
+      <div className="min-w-0">
+        <div className="text-[13px] font-semibold text-accent-primary">{t('privacy_e2ee_title')}</div>
+        <div className="text-[11.5px] text-fg-muted mt-0.5 leading-relaxed">{t('privacy_e2ee_note')}</div>
+      </div>
+    </div>
+  );
+}
+
+
+
+
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="space-y-0">
@@ -123,20 +148,19 @@ function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, onCon
 
 export function SettingsPanel({ onClose, closing, inline }: { onClose: () => void; closing?: boolean; inline?: boolean }) {
   const { state, updateSettings, logout, sessions, requestSessions, isAdmin, reports, adminReports, adminBan, adminUnban, bannedUsers, adminGetBanned, adminError, dismissAdminError, revokeSession: revoke, openProfile, openDm, t } = useConnection();
-  const [confirmAction, setConfirmAction] = useState<'logout' | 'clearData' | 'adminBan' | 'adminUnban' | null>(null);
+  const [confirmAction, setConfirmAction] = useState<'logout' | 'adminBan' | 'adminUnban' | null>(null);
   const [banNick, setBanNick] = useState('');
   const [pendingBan, setPendingBan] = useState<string | null>(null);
   const [banListOpen, setBanListOpen] = useState(false);
-  const [screenshotProt, setScreenshotProtState] = useState(() => !!localStorage.getItem('wn_screenshot_prot'));
-  const setScreenshotProt = useCallback((v: boolean) => {
-    setScreenshotProtState(v);
-    if (v) localStorage.setItem('wn_screenshot_prot', '1');
-    else localStorage.removeItem('wn_screenshot_prot');
-  }, []);
+const screenshotProt = state.settings.screenshotProtection;
+const setScreenshotProt = useCallback((v: boolean) => {
+  updateSettings({ screenshotProtection: v });
+}, [updateSettings]);
+
 
   const reportGroups = useMemo(() => {
-    const map = new Map<string, { targetId: string; targetNick?: string; count: number; lastTimestamp: number; reasons: { reason: string; reporterNick?: string; channel: string; source?: string }[] }>();
-    for (const r of reports as any[]) {
+    const map = new Map<string, { targetId: string; targetNick?: string; count: number; lastTimestamp: number; reasons: { reason: string; reporterNick?: string; channel: string; source?: 'profile' | 'message' }[] }>();
+    for (const r of reports) {
       if (!r?.targetId) continue;
       let g = map.get(r.targetId);
       if (!g) {
@@ -246,12 +270,7 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
         <Option label={t('screenshot_prot')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="3" x2="21" y2="21" /></svg>}>
           <Toggle checked={screenshotProt} onChange={setScreenshotProt} />
         </Option>
-      </Section>
-
-      <Section title={t('sec_safety')}>
-        <Option label={t('safety_number')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>}>
-          <SafetyNumberButton />
-        </Option>
+        <PrivacyNotice />
       </Section>
 
       <Section title={t('sessions')}>
@@ -265,12 +284,12 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 min-w-0">
                     <span className={cn('w-2 h-2 rounded-full flex-shrink-0', s.online === false ? 'bg-fg-muted/50' : 'bg-status-success')} />
-                    <span className="text-[13px] text-fg-primary truncate">{s.name || `…${s.id.slice(-6)}`}</span>
+                    <span className="text-[13px] text-fg-primary truncate">{s.name || `вЂ¦${s.id.slice(-6)}`}</span>
                     {s.current && (
                       <span className="flex-shrink-0 px-2 py-0.5 rounded-full bg-accent-primary/15 text-accent-primary text-[10px] font-bold">{t('current_session')}</span>
                     )}
                   </div>
-                  <span className="text-[11px] text-fg-muted block mt-0.5">{new Date(s.lastActive).toLocaleString()}{s.online === false ? ` · ${t('offline')}` : ''}</span>
+                  <span className="text-[11px] text-fg-muted block mt-0.5">{new Date(s.lastActive).toLocaleString()}{s.online === false ? ` В· ${t('offline')}` : ''}</span>
                 </div>
                 {!s.current && (
                   <button onClick={() => revoke(s.id)}
@@ -290,7 +309,7 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
             {adminError && (
               <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-status-error/10 border border-status-error/30 text-status-error text-[12px]">
                 <span className="min-w-0 leading-relaxed">{adminError}</span>
-                <button onClick={dismissAdminError} className="flex-shrink-0 text-status-error/70 hover:text-status-error text-[16px] leading-none px-1" aria-label="Dismiss">✕</button>
+                <button onClick={dismissAdminError} className="flex-shrink-0 text-status-error/70 hover:text-status-error text-[16px] leading-none px-1" aria-label="Dismiss">вњ•</button>
               </div>
             )}
 
@@ -376,7 +395,7 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
                         </button>
                         {g.count > 1 && (
                           <span className="ml-auto flex-shrink-0 px-2 py-0.5 rounded-full bg-status-error/15 text-status-error text-[10.5px] font-bold">
-                            ×{g.count}
+                            Г—{g.count}
                           </span>
                         )}
                       </div>
@@ -446,10 +465,10 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
             </svg>
             {t('logout')}
           </button>
-          <button onClick={() => setConfirmAction('clearData')}
-            className="w-full py-3 rounded-2xl text-status-error text-[13px] hover:bg-status-error/10 transition-colors font-medium">
-            {t('clear_local_data')}
-          </button>
+          {/* Wiping local data is destructive and irreversible, and there was no confirmation step
+              behind it: one tap and every session, every key and the whole message cache on this
+              device was gone. Removed rather than gated, because a button that destroys an account's
+              history is not something to keep around in a menu. */}
         </div>
       </div>
     );
@@ -487,20 +506,12 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
             </svg>
             {t('logout')}
           </button>
-          <button onClick={() => setConfirmAction('clearData')}
-            className="w-full py-3 rounded-2xl text-status-error text-[13px] hover:bg-status-error/10 transition-colors font-medium">
-            {t('clear_local_data')}
-          </button>
         </div>
       </div>
 
       {confirmAction === 'logout' && (
         <ConfirmModal title={t('confirm_logout')} message={t('confirm_logout_desc')} confirmLabel={t('logout')} cancelLabel={t('cancel')} danger
           onConfirm={() => { logout(); onClose(); }} onCancel={() => setConfirmAction(null)} />
-      )}
-      {confirmAction === 'clearData' && (
-        <ConfirmModal title={t('confirm_clear_data')} message={t('confirm_clear_data_desc')} confirmLabel={t('confirm_clear')} cancelLabel={t('cancel')} danger
-          onConfirm={() => { (() => { const keys = Object.keys(localStorage).filter(k => k.startsWith('wn_')); keys.forEach(k => localStorage.removeItem(k)); })(); window.location.reload(); }} onCancel={() => setConfirmAction(null)} />
       )}
       {confirmAction === 'adminBan' && pendingBan && (
         <ConfirmModal title={t('admin_confirm_ban')} message={`@${pendingBan}`} confirmLabel={t('admin_ban')} cancelLabel={t('cancel')} danger

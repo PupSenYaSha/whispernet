@@ -431,6 +431,12 @@
     animation: fadeSlideIn 0.35s cubic-bezier(0.22, 1, 0.36, 1);
   }
 
+  /* the scroll container is no longer remounted when the first message arrives, so it fades
+     without the slide that used to cover the jump */
+  .animate-fade-scroll {
+    animation: fadeIn 0.25s ease-out;
+  }
+
   .animate-bounce-in {
     animation: bounceIn 0.4s cubic-bezier(0.22, 1, 0.36, 1);
   }

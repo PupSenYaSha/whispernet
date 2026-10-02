@@ -9,9 +9,9 @@ export function ContactsPanel({ onSelect }: { onSelect: () => void }) {
   const [query, setQuery] = useState('');
   const debounceRef = useRef<NodeJS.Timeout | null>(null);
 
-  useEffect(() => {
+useEffect(() => {
     refreshContacts();
-  }, []);
+  }, [refreshContacts]);
 
   const handleSearch = (value: string) => {
     setQuery(value);

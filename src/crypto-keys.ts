@@ -79,6 +79,7 @@ export function isEncryptedBundle(data: unknown): data is EncryptedKeyBundle {
   );
 }
 
+/** The shape of the file the app writes out and reads back for key export and import. */
 export interface KeyBackup {
   version: number;
   type: 'whispernet-key-backup';
@@ -86,33 +87,6 @@ export interface KeyBackup {
   nickname: string;
   publicKey: JsonWebKey;
   encryptedPrivateKey: EncryptedKeyBundle;
-}
-
-export function createBackup(
-  nickname: string,
-  publicKey: JsonWebKey,
-  encryptedBundle: EncryptedKeyBundle
-): KeyBackup {
-  return {
-    version: 1,
-    type: 'whispernet-key-backup',
-    createdAt: new Date().toISOString(),
-    nickname,
-    publicKey,
-    encryptedPrivateKey: encryptedBundle,
-  };
-}
-
-export function downloadBackup(backup: KeyBackup): void {
-  const blob = new Blob([JSON.stringify(backup, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `whispernet-backup-${backup.nickname}-${Date.now()}.json`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
 }
 
 export function isKeyBackup(data: unknown): data is KeyBackup {

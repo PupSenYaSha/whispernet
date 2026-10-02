@@ -1,6 +1,6 @@
 import { WebSocket } from 'ws';
 import { issueUploadToken } from './uploadTokens.js';
-import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundle, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, getIdentityKeyB64, setUserAvatar, removeUserAvatar, getAvatarDir, getDataDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, type StoredSession, getChannelMediaKey } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, setUserAvatar, removeUserAvatar, getAvatarDir, getDataDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, StoredSession, getChannelMediaKey } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { appendFileSync, mkdirSync } from 'fs';
@@ -385,48 +385,6 @@ function hasUnsafeOwnKeys(obj: any): boolean {
   return Object.keys(obj).some(k => k === '__proto__' || k === 'constructor' || k === 'prototype');
 }
 
-function preKeyBundleDiagnostics(bundle: any): Record<string, any> {
-  if (!bundle || typeof bundle !== 'object') return { present: false };
-  const spk = bundle.signedPreKey;
-  return {
-    present: true,
-    keys: Object.keys(bundle).join(','),
-    jsonLen: (() => { try { return JSON.stringify(bundle).length; } catch { return -1; } })(),
-    identityKeyType: typeof bundle.identityKey,
-    identityKeyLen: typeof bundle.identityKey === 'string' ? bundle.identityKey.length : -1,
-    ed25519Type: typeof bundle.ed25519PublicKey,
-    ed25519Len: typeof bundle.ed25519PublicKey === 'string' ? bundle.ed25519PublicKey.length : -1,
-    spkType: spk === null ? 'null' : typeof spk,
-    spkPublicKeyType: spk && typeof spk === 'object' ? typeof spk.publicKey : 'n/a',
-    signatureIsArray: Array.isArray(spk && spk.signature),
-    signatureLen: Array.isArray(spk && spk.signature) ? spk.signature.length : -1,
-    oneTimePreKeyType: bundle.oneTimePreKey === undefined ? 'undefined' : typeof bundle.oneTimePreKey,
-    version: typeof bundle.version,
-    bundleVersion: typeof bundle.bundleVersion,
-  };
-}
-
-function isValidPreKeyBundle(bundle: any): boolean {
-  if (typeof bundle !== 'object' || bundle === null) return false;
-  const MAX_BUNDLE_SIZE = 10000;
-  const str = JSON.stringify(bundle);
-  if (str.length > MAX_BUNDLE_SIZE) return false;
-  if (hasUnsafeOwnKeys(bundle)) return false;
-  if (typeof bundle.identityKey !== 'string' || bundle.identityKey.length === 0) return false;
-  if (typeof bundle.ed25519PublicKey !== 'string') return false;
-  if (typeof bundle.signedPreKey !== 'object' || bundle.signedPreKey === null) return false;
-  if (hasUnsafeOwnKeys(bundle.signedPreKey)) return false;
-  if (typeof bundle.signedPreKey.publicKey !== 'string') return false;
-  if (!Array.isArray(bundle.signedPreKey.signature)) return false;
-  if (bundle.oneTimePreKey && typeof bundle.oneTimePreKey !== 'object') return false;
-  // клиент шлёт "version", legacy-формат использовал "bundleVersion"
-  const version = typeof bundle.bundleVersion === 'number' ? bundle.bundleVersion
-    : typeof bundle.version === 'number' ? bundle.version
-      : 0;
-  if (version < 1) return false;
-  return true;
-}
-
 function isValidPublicKey(key: any): boolean {
   if (typeof key !== 'object' || key === null) return false;
   const MAX_KEY_SIZE = 5000;
@@ -532,10 +490,7 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       case 'key_backup_fetch':
         if (userId) await handleKeyBackupFetch(userId, ws);
         break;
-      case 'sealed_send':
-        if (userId) await handleSealedSend(userId, ws, message.payload);
-        break;
-    case 'dm_history':
+      case 'dm_history':
       if (userId) await handleDmHistory(userId, ws, message.payload);
       break;
     case 'chat_history':
@@ -564,12 +519,6 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
         break;
       case 'auth_update_key':
         if (userId) await handleAuthUpdateKey(userId, ws, message.payload);
-        break;
-      case 'prekey_upload':
-        if (userId) await handlePreKeyUpload(userId, ws, message.payload);
-        break;
-      case 'prekey_fetch':
-        if (userId) await handlePreKeyFetch(userId, ws, message.payload);
         break;
       case 'heartbeat':
         if (currentDeviceId) {
@@ -717,10 +666,6 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     currentDeviceId = deviceId;
     registerDevice(deviceId, { deviceId, ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip, deviceInfo: typeof payload?.deviceInfo === 'string' ? payload.deviceInfo.slice(0, 60) : '' });
 
-    if (payload.preKeyBundle && isValidPreKeyBundle(payload.preKeyBundle)) {
-      await setPreKeyBundle(user.id, payload.preKeyBundle);
-    }
-
     await onAuthenticated(user.id, user.nickname, ws, deviceId);
   }
 
@@ -784,10 +729,6 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     }
 
     clearAuthRateLimit(ip);
-
-    if (payload.preKeyBundle && isValidPreKeyBundle(payload.preKeyBundle)) {
-      await setPreKeyBundle(user.id, payload.preKeyBundle);
-    }
 
     const deviceId = typeof payload.deviceId === 'string' && payload.deviceId.length > 0 && payload.deviceId.length <= 64
       ? payload.deviceId : crypto.randomUUID();
@@ -913,7 +854,7 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     const fileKey = payload?.fileKey && typeof payload.fileKey === 'object' ? payload.fileKey : undefined;
     const expiresAt = resolveExpiry(payload?.ttl, timestamp);
     const quoted = payload?.quoted && typeof payload.quoted === 'object' && typeof payload.quoted.sender === 'string'
-      ? { id: String(payload.quoted.id || ''), text: sanitizeText(String(payload.quoted.text || '')).slice(0, 4096), sender: sanitizeText(payload.quoted.sender).slice(0, 64) }
+      ? { id: String(payload.quoted.id || ''), text: sanitizeText(String(payload.quoted.text || '')).slice(0, MAX_MESSAGE_CHARS), sender: sanitizeText(payload.quoted.sender).slice(0, 64) }
       : null;
     await saveMessage(messageId, senderId, sender.nickname, text, timestamp, undefined, 'general', fileKey, undefined, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined);
 
@@ -997,31 +938,22 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     const messageId = crypto.randomUUID();
     const timestamp = Date.now();
     const fileKey = payload?.fileKey && typeof payload.fileKey === 'object' ? payload.fileKey : undefined;
-    const isSealed = !!payload?.sealed;
     const isEncrypted = !!payload?.encrypted;
-    const isSignalEncrypted = !!payload?.signalEncrypted;
     const expiresAt = resolveExpiry(payload?.ttl, timestamp);
     const quoted = payload?.quoted && typeof payload.quoted === 'object' && typeof payload.quoted.sender === 'string'
-      ? { id: String(payload.quoted.id || ''), text: sanitizeText(String(payload.quoted.text || '')).slice(0, 4096), sender: sanitizeText(payload.quoted.sender).slice(0, 64) }
+      ? { id: String(payload.quoted.id || ''), text: sanitizeText(String(payload.quoted.text || '')).slice(0, MAX_MESSAGE_CHARS), sender: sanitizeText(payload.quoted.sender).slice(0, 64) }
       : null;
 
-    const x3dhMessage = payload?.x3dhMessage && typeof payload.x3dhMessage === 'object' ? payload.x3dhMessage : null;
-    const ratchetPublicKey = Array.isArray(payload?.ratchetPublicKey) ? payload.ratchetPublicKey : null;
     // the sender cannot decrypt its own ratchet ciphertext, so the client tags the message with an
     // id of its own and recognises the echo and the history entry by it
     const clientId = typeof payload?.clientId === 'string' && /^[A-Za-z0-9_-]{8,64}$/.test(payload.clientId) ? payload.clientId : undefined;
 
-    if (isSignalEncrypted) {
-      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey, undefined, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined, payload.signalEncrypted, x3dhMessage, ratchetPublicKey, clientId);
-    } else if (isSealed) {
-      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, undefined, channelId, fileKey, payload.sealed, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined, undefined, undefined, undefined, clientId);
-    } else if (isEncrypted) {
-      await saveMessage(messageId, senderId, sender.nickname, '', timestamp, payload.encrypted, channelId, fileKey, undefined, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined, undefined, undefined, undefined, clientId);
-    } else {
+    if (!isEncrypted) {
       send(ws, { type: 'error', payload: { code: 'ENCRYPTION_REQUIRED', message: 'Direct messages must be encrypted' }, timestamp: Date.now() });
       logSecurity('PLAINTEXT_DM_REJECTED', { from: senderId, to: recipientUser.id });
       return;
     }
+    await saveMessage(messageId, senderId, sender.nickname, '', timestamp, payload.encrypted, channelId, fileKey, undefined, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined, clientId);
 
     const dmPayload = {
       id: messageId,
@@ -1030,10 +962,6 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       senderAvatar: avatarInfo(await getProfileMeta(senderId)),
       text: '',
       encrypted: isEncrypted ? payload.encrypted : null,
-      signalEncrypted: isSignalEncrypted ? payload.signalEncrypted : null,
-      x3dhMessage,
-      ratchetPublicKey,
-      sealed: isSealed ? payload.sealed : null,
       timestamp,
       channel: channelId,
       fileKey,
@@ -1080,40 +1008,7 @@ function b64ToBytes(b64: string): Buffer | null {
   }
 }
 
-/**
- * Safety number в формате клиента (X3DH identity keys):
- * sort(self, peer) -> SHA-256 -> первые 24 байта -> 6 групп по 4 байта, upper-case.
- * Должен совпадать с generateX3dhSafetyNumber() на клиенте.
- */
-function formatSafetyNumber(selfB64: string, peerB64: string | null): string | null {
-  const self = b64ToBytes(selfB64);
-  if (!self) return null;
-  const peer = peerB64 ? b64ToBytes(peerB64) : null;
-  const data = peer
-    ? (Buffer.compare(self, peer) <= 0 ? Buffer.concat([self, peer]) : Buffer.concat([peer, self]))
-    : self;
-  const digest = crypto.createHash('sha256').update(data).digest();
-  const groups: string[] = [];
-  for (let i = 0; i < 24; i += 4) {
-    groups.push(digest.subarray(i, i + 4).toString('hex').toUpperCase());
-  }
-  return groups.join(' ');
-}
-
-async function computeSafetyNumber(viewerId: string, targetId: string): Promise<string | null> {
-  const selfId = await getIdentityKeyB64(viewerId);
-  if (!selfId) return null;
-  if (targetId === viewerId) return formatSafetyNumber(selfId, null);
-  const peerId = await getIdentityKeyB64(targetId);
-  if (!peerId) return null;
-  return formatSafetyNumber(selfId, peerId);
-}
-
-   async function handleSealedSend(senderId: string, ws: WebSocket, payload: any): Promise<void> {
-    await handleDmSend(senderId, ws, { ...payload, sealed: payload?.sealed || true });
-  }
-
-  async function handleAddReaction(userId: string, ws: WebSocket, payload: { messageId: string; emoji: string }): Promise<void> {
+async function handleAddReaction(userId: string, ws: WebSocket, payload: { messageId: string; emoji: string }): Promise<void> {
     if (!payload?.messageId || typeof payload.messageId !== 'string') return;
     if (!isValidEmoji(payload.emoji)) return;
     
@@ -1203,10 +1098,6 @@ async function computeSafetyNumber(viewerId: string, targetId: string): Promise<
       senderAvatar: avatarInfo(userMeta.get(m.senderId)),
    text: m.text || '',
    encrypted: m.encrypted || null,
-   signalEncrypted: m.signalEncrypted || null,
-   x3dhMessage: m.x3dhMessage || null,
-   ratchetPublicKey: m.ratchetPublicKey || null,
-   sealed: m.sealed || null,
       timestamp: m.timestamp,
       isOwn: m.senderId === userId,
       fileKey: m.fileKey || null,
@@ -1304,28 +1195,6 @@ async function computeSafetyNumber(viewerId: string, targetId: string): Promise<
     }
   }
 
-  async function handlePreKeyUpload(userId: string, ws: WebSocket, payload: { bundle: any }): Promise<void> {
-    if (payload?.bundle && isValidPreKeyBundle(payload.bundle)) {
-      await setPreKeyBundle(userId, payload.bundle);
-      send(ws, { type: 'prekey_uploaded', payload: {}, timestamp: Date.now() });
-    } else {
-      logSecurity('PREKEY_REJECTED', { userId, ...preKeyBundleDiagnostics(payload?.bundle) });
-    }
-  }
-
-  async function handlePreKeyFetch(userId: string, ws: WebSocket, payload: { userIds?: string[] }): Promise<void> {
-    if (!payload?.userIds || !Array.isArray(payload.userIds) || payload.userIds.length === 0) {
-      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'userIds array required' }, timestamp: Date.now() });
-      return;
-    }
-    const bundles: Record<string, any> = {};
-    for (const id of payload.userIds.slice(0, 100)) {
-      const bundle = await getPreKeyBundle(id);
-      if (bundle) bundles[id] = bundle;
-    }
-    send(ws, { type: 'prekey_bundles', payload: { bundles }, timestamp: Date.now() });
-  }
-
   async function handleProfileGet(userId: string, ws: WebSocket, payload: { userId?: string }): Promise<void> {
     const targetId = typeof payload?.userId === 'string' ? payload.userId : '';
     if (!targetId) {
@@ -1340,10 +1209,6 @@ async function computeSafetyNumber(viewerId: string, targetId: string): Promise<
     const isMe = targetId === userId;
     const isBlockedByMe = !isMe && (await getBlockedUserIds(userId)).includes(targetId);
     const isBanned = await getUserBanned(targetId);
-    const safetyNumber = await computeSafetyNumber(userId, targetId);
-    if (!safetyNumber && !isMe) {
-      logSecurity('SAFETY_NUMBER_UNAVAILABLE', { viewer: userId, target: targetId, selfBundle: !!(await getIdentityKeyB64(userId)), peerBundle: !!(await getIdentityKeyB64(targetId)) });
-    }
     send(ws, {
       type: 'profile',
       payload: {
@@ -1356,7 +1221,6 @@ async function computeSafetyNumber(viewerId: string, targetId: string): Promise<
           isMe,
           isBlockedByMe,
           isBanned,
-          safetyNumber,
         },
       },
       timestamp: Date.now(),

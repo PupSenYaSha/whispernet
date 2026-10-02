@@ -1,4 +1,4 @@
-import path from 'path';
+﻿import path from 'path';
 import { fileURLToPath } from 'url';
 import { mkdirSync, existsSync } from 'fs';
 import fs from 'fs';
@@ -6,9 +6,9 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  PREKEY_BUNDLE_TTL_MS,
   MESSAGE_CLEANUP_INTERVAL_MS,
-  PREKEY_CLEANUP_INTERVAL_MS,
+  SESSION_CLEANUP_INTERVAL_MS,
+  INACTIVE_SESSION_TTL_MS,
   REPORT_CAP,
   FTS_TABLE,
 } from './constants.js';
@@ -30,12 +30,24 @@ try {
 
 const json = (v: any): string | null => (v == null ? null : JSON.stringify(v));
 
+/**
+ * node:sqlite binds null, numbers, bigints, strings and bytes. It rejects undefined, booleans and
+ * objects outright, with ERR_INVALID_ARG_TYPE naming the parameter position — which is useless on
+ * its own, because a message row has eighteen of them and the number in the log does not say which
+ * field was at fault. So nothing optional is handed to the driver unchecked; every value is coerced
+ * to the type its column can actually hold, and one bad field costs that field instead of the whole
+ * message.
+ */
+const str = (v: unknown): string => (typeof v === 'string' ? v : '');
+const optStr = (v: unknown): string | null => (typeof v === 'string' && v.length > 0 ? v : null);
+const optNum = (v: unknown): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null);
+
 function parseJson<T>(s: string | null | undefined, fallback: T): T {
   if (s == null) return fallback;
   try { return JSON.parse(s) as T; } catch { return fallback; }
 }
 
-function getDb(): DatabaseSync {
+export function getDb(): DatabaseSync {
   const p = path.join(DATA_DIR, DB_FILE);
   if (!db || DB_PATH !== p) {
     if (db) { try { db.close(); } catch {} }
@@ -56,6 +68,7 @@ function ensureSchema(): void {
       nickname TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
       public_key TEXT,
+      sealed_key TEXT,
       created_at INTEGER NOT NULL,
       is_banned INTEGER NOT NULL DEFAULT 0,
       banned_at INTEGER,
@@ -76,9 +89,6 @@ function ensureSchema(): void {
       quoted_message_id TEXT,
       quoted_message_text TEXT,
       quoted_message_sender TEXT,
-      signal_encrypted TEXT,
-      x3dh_message TEXT,
-      ratchet_public_key TEXT,
       edited_at INTEGER,
       expires_at INTEGER
     );
@@ -91,11 +101,6 @@ function ensureSchema(): void {
       emoji TEXT NOT NULL,
       timestamp INTEGER NOT NULL,
       PRIMARY KEY (message_id, user_id)
-    );
-    CREATE TABLE IF NOT EXISTS prekeys (
-      user_id TEXT PRIMARY KEY,
-      bundle TEXT NOT NULL,
-      created_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS keybackups (
       user_id TEXT PRIMARY KEY,
@@ -133,15 +138,17 @@ function ensureSchema(): void {
       value TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);
-    CREATE INDEX IF NOT EXISTS idx_prekeys_created ON prekeys(created_at);
     CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_last_active ON sessions(last_active);
     CREATE INDEX IF NOT EXISTS idx_reports_target ON reports(target_id);
     CREATE INDEX IF NOT EXISTS idx_reports_timestamp ON reports(timestamp);
+    -- Sealed messages are ordinary rows here, addressed by a sealed:<recipientId> channel, so history
+    -- and paging work without a separate table. This index is what makes that lookup cheap.
+    CREATE INDEX IF NOT EXISTS idx_messages_channel_time ON messages(channel, timestamp);
 `);
 
   
-  for (const col of ['avatar_ext TEXT', 'avatar_updated_at INTEGER', 'banned_at INTEGER']) {
+  for (const col of ['avatar_ext TEXT', 'avatar_updated_at INTEGER', 'banned_at INTEGER', 'sealed_key TEXT']) {
     try {
       d.exec(`ALTER TABLE users ADD COLUMN ${col}`);
     } catch {}
@@ -151,10 +158,18 @@ function ensureSchema(): void {
     d.exec(`ALTER TABLE reports ADD COLUMN source TEXT NOT NULL DEFAULT 'message'`);
   } catch {}
 
-  for (const col of ['signal_encrypted TEXT', 'x3dh_message TEXT', 'ratchet_public_key TEXT', 'client_id TEXT']) {
-    try {
-      d.exec(`ALTER TABLE messages ADD COLUMN ${col}`);
-    } catch {}
+  try {
+    d.exec(`ALTER TABLE messages ADD COLUMN client_id TEXT`);
+  } catch {}
+
+  // X3DH and the ratchet are gone. A database created before that still carries the three columns
+  // they used, so they are dropped rather than left behind: an operator reading the schema should not
+  // find key material columns for a protocol the server no longer speaks.
+  for (const table of ['prekeys', 'prekeys_issued']) {
+    try { d.exec(`DROP TABLE IF EXISTS ${table}`); } catch {}
+  }
+  for (const col of ['signal_encrypted', 'x3dh_message', 'ratchet_public_key']) {
+    try { d.exec(`ALTER TABLE messages DROP COLUMN ${col}`); } catch {}
   }
 
   
@@ -264,13 +279,8 @@ function syncFtsDeleteExpired(cutoff: number): void {
 }
 
 
-
-
-
-
-
 function legacyJsonFileNames(): string[] {
-  return ['users.json', 'messages.json', 'reactions.json', 'prekeys.json', 'keybackups.json', 'reports.json', 'sessions.json', 'admins.json', 'channel.json'];
+  return ['users.json', 'messages.json', 'reactions.json', 'keybackups.json', 'reports.json', 'sessions.json', 'admins.json', 'channel.json'];
 }
 
 function anyLegacyDataExists(): boolean {
@@ -324,11 +334,11 @@ function migrateLegacy(): void {
           json(m.encrypted),
           json(m.fileKey),
           typeof m.sealed === 'string' ? m.sealed : null,
-          m.quotedMessageId ?? null,
-          m.quotedMessageText ?? null,
-          m.quotedMessageSender ?? null,
-          typeof m.editedAt === 'number' ? m.editedAt : null,
-          typeof m.expiresAt === 'number' ? m.expiresAt : null,
+          optStr(m.quotedMessageId),
+          optStr(m.quotedMessageText),
+          optStr(m.quotedMessageSender),
+          optNum(m.editedAt),
+          optNum(m.expiresAt),
         );
       }
     }
@@ -339,15 +349,6 @@ function migrateLegacy(): void {
       for (const r of reactions) {
         if (!r || typeof r.messageId !== 'string' || typeof r.userId !== 'string') continue;
         ins.run(r.messageId, r.userId, typeof r.emoji === 'string' ? r.emoji : '', typeof r.timestamp === 'number' ? r.timestamp : Date.now());
-      }
-    }
-
-    const prekeys = readJsonSync('prekeys.json');
-    if (Array.isArray(prekeys)) {
-      const ins = d.prepare('INSERT OR IGNORE INTO prekeys (user_id, bundle, created_at) VALUES (?, ?, ?)');
-      for (const e of prekeys) {
-        if (!e || typeof e.userId !== 'string') continue;
-        ins.run(e.userId, json(e.bundle), typeof e.createdAt === 'number' ? e.createdAt : Date.now());
       }
     }
 
@@ -365,7 +366,7 @@ function migrateLegacy(): void {
       const ins = d.prepare('INSERT OR IGNORE INTO reports (id, reporter_id, reporter_nick, target_id, target_nick, channel, message_id, message_text, reason, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
       for (const r of reports) {
         if (!r || typeof r.id !== 'string') continue;
-        ins.run(r.id, r.reporterId ?? '', r.reporterNick ?? null, r.targetId ?? '', r.targetNick ?? null, r.channel ?? 'general', r.messageId ?? null, r.messageText ?? null, r.reason ?? '', typeof r.timestamp === 'number' ? r.timestamp : Date.now());
+        ins.run(r.id, optStr(r.reporterId) ?? '', optStr(r.reporterNick), optStr(r.targetId) ?? '', optStr(r.targetNick), optStr(r.channel) ?? 'general', optStr(r.messageId), optStr(r.messageText), optStr(r.reason) ?? '', optNum(r.timestamp) ?? Date.now());
       }
     }
 
@@ -424,9 +425,6 @@ export function setDataDir(dir: string): void {
 }
 
 
-
-
-
 export async function getChannelMediaKey(): Promise<string> {
   const existing = metaGet('channel_media_key');
   if (existing && existing.length >= 16) return existing;
@@ -462,7 +460,6 @@ export async function setUserAvatar(userId: string, ext: string): Promise<number
 export async function removeUserAvatar(userId: string): Promise<void> {
   getDb().prepare('UPDATE users SET avatar_ext = NULL, avatar_updated_at = NULL WHERE id = ?').run(userId);
 }
-
 
 
 export async function createUser(nickname: string, password: string, publicKey?: any): Promise<{ id: string; nickname: string } | null> {
@@ -519,27 +516,35 @@ export async function updatePublicKey(userId: string, publicKey: any): Promise<v
   getDb().prepare('UPDATE users SET public_key = ? WHERE id = ?').run(json(publicKey), userId);
 }
 
-export async function setPreKeyBundle(userId: string, bundle: any): Promise<void> {
-  getDb().prepare('INSERT INTO prekeys (user_id, bundle, created_at) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET bundle = excluded.bundle, created_at = excluded.created_at')
-    .run(userId, json(bundle), Date.now());
+/**
+ * The sealed sender's long-lived X25519 public key, base64.
+ *
+ * This replaces the X3DH identity key, which used to arrive inside the pre-key bundle and is gone with
+ * the rest of that protocol. It is stored apart from the RSA key rather than beside it inside the same
+ * JSON document, because that document is a JWK: the media and message paths hand it straight to
+ * crypto.subtle.importKey('jwk', …), and wrapping it would break every one of them for the sake of
+ * one extra field. 32 bytes, nothing more — the server never sees the private half.
+ */
+export async function setSealedKey(userId: string, sealedKeyB64: string): Promise<boolean> {
+  if (!/^[A-Za-z0-9+/]{42}[A-Za-z0-9+/=]{1,2}$|^[A-Za-z0-9+/]{43}=$/.test(sealedKeyB64)) return false;
+  getDb().prepare('UPDATE users SET sealed_key = ? WHERE id = ?').run(sealedKeyB64, userId);
+  return true;
 }
 
-export async function getPreKeyBundle(userId: string): Promise<any | null> {
-  const row = getDb().prepare('SELECT bundle FROM prekeys WHERE user_id = ?').get(userId) as any;
-  return row ? parseJson(row.bundle, null) : null;
+export async function getAllSealedKeys(): Promise<Record<string, string>> {
+  const rows = getDb().prepare('SELECT id, sealed_key as sealedKey FROM users WHERE sealed_key IS NOT NULL').all() as any[];
+  const keys: Record<string, string> = {};
+  for (const r of rows) if (typeof r.sealedKey === 'string' && r.sealedKey.length > 0) keys[r.id] = r.sealedKey;
+  return keys;
 }
 
-export async function getIdentityKeyB64(userId: string): Promise<string | null> {
-  const bundle = await getPreKeyBundle(userId);
-  const idKey = bundle?.identityKey;
-  return typeof idKey === 'string' && idKey.length > 0 ? idKey : null;
-}
-
-export async function getAllPreKeyBundles(): Promise<Record<string, any>> {
-  const rows = getDb().prepare('SELECT user_id as userId, bundle FROM prekeys').all() as any[];
-  const result: Record<string, any> = {};
-  for (const r of rows) result[r.userId] = parseJson(r.bundle, null);
-  return result;
+export async function getSealedKeysByIds(ids: string[]): Promise<Record<string, string>> {
+  if (ids.length === 0) return {};
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = getDb().prepare(`SELECT id, sealed_key as sealedKey FROM users WHERE sealed_key IS NOT NULL AND id IN (${placeholders})`).all(...ids) as any[];
+  const keys: Record<string, string> = {};
+  for (const r of rows) if (typeof r.sealedKey === 'string' && r.sealedKey.length > 0) keys[r.id] = r.sealedKey;
+  return keys;
 }
 
 export async function getAllUsers(): Promise<{ id: string; nickname: string; avatarExt: string | null; avatarUpdatedAt: number | null }[]> {
@@ -556,11 +561,6 @@ export async function getKeyBackup(userId: string): Promise<string | null> {
   return row?.blob ?? null;
 }
 
-export async function deleteKeyBackup(userId: string): Promise<void> {
-  getDb().prepare('DELETE FROM keybackups WHERE user_id = ?').run(userId);
-}
-
-
 
 export function getDmChannelId(userId1: string, userId2: string): string {
   return [userId1, userId2].sort().join(':');
@@ -569,7 +569,6 @@ export function getDmChannelId(userId1: string, userId2: string): string {
 const MESSAGE_COLUMNS = `id, sender_id AS senderId, sender_nickname AS senderNickname, text, timestamp, channel,
    encrypted, file_key AS fileKey, sealed, quoted_message_id AS quotedMessageId,
    quoted_message_text AS quotedMessageText, quoted_message_sender AS quotedMessageSender,
-      signal_encrypted AS signalEncrypted, x3dh_message AS x3dhMessage, ratchet_public_key AS ratchetPublicKey,
       client_id AS clientId,
       edited_at AS editedAt, expires_at AS expiresAt`;
 
@@ -587,9 +586,6 @@ function rowToMessage(row: any, includeText: boolean = true): any {
     quotedMessageId: row.quotedMessageId || undefined,
     quotedMessageText: row.quotedMessageText || undefined,
     quotedMessageSender: row.quotedMessageSender || undefined,
-    signalEncrypted: parseJson(row.signalEncrypted, null),
-    x3dhMessage: parseJson(row.x3dhMessage, null),
-      ratchetPublicKey: parseJson(row.ratchetPublicKey, null),
       clientId: row.clientId || undefined,
     editedAt: row.editedAt || undefined,
     expiresAt: row.expiresAt || undefined,
@@ -611,16 +607,14 @@ export async function saveMessage(
   expiresAt?: number,
    quotedMessageText?: string,
    quotedMessageSender?: string,
-      signalEncrypted?: any,
-      x3dhMessage?: any,
-      ratchetPublicKey?: any,
-      clientId?: string
+   clientId?: string
    ): Promise<void> {
      const d = getDb();
-     const res = d.prepare(`INSERT INTO messages (id, sender_id, sender_nickname, text, timestamp, channel, encrypted, file_key, sealed, quoted_message_id, quoted_message_text, quoted_message_sender, signal_encrypted, x3dh_message, ratchet_public_key, edited_at, expires_at, client_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-       .run(id, senderId, senderNickname, text, timestamp, channel, json(encrypted), json(fileKey), sealed ?? null, quotedMessageId ?? null, quotedMessageText ?? null, quotedMessageSender ?? null, json(signalEncrypted), json(x3dhMessage), json(ratchetPublicKey), editedAt ?? null, expiresAt ?? null, clientId ?? null);
-     syncFtsInsert(Number((res as any).lastInsertRowid), text);
+     const body = str(text);
+     const res = d.prepare(`INSERT INTO messages (id, sender_id, sender_nickname, text, timestamp, channel, encrypted, file_key, sealed, quoted_message_id, quoted_message_text, quoted_message_sender, edited_at, expires_at, client_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+       .run(str(id), str(senderId), str(senderNickname), body, optNum(timestamp) ?? Date.now(), optStr(channel) ?? 'general', json(encrypted), json(fileKey), optStr(sealed), optStr(quotedMessageId), optStr(quotedMessageText), optStr(quotedMessageSender), optNum(editedAt), optNum(expiresAt), optStr(clientId));
+     syncFtsInsert(Number((res as any).lastInsertRowid), body);
    }
 
 export async function updateMessageText(messageId: string, senderId: string, newText: string): Promise<boolean> {
@@ -685,12 +679,6 @@ export async function getDmContacts(userId: string): Promise<{ id: string; nickn
   return result.sort((a, b) => b.lastMessage - a.lastMessage);
 }
 
-export async function getUsersByIds(ids: string[]): Promise<{ id: string; nickname: string }[]> {
-  if (ids.length === 0) return [];
-  const placeholders = ids.map(() => '?').join(',');
-  return getDb().prepare(`SELECT id, nickname FROM users WHERE id IN (${placeholders})`).all(...ids) as { id: string; nickname: string }[];
-}
-
 export async function searchMessages(query: string, channel?: string, limit: number = 50, userId?: string): Promise<any[]> {
   const d = getDb();
   const q = query.toLowerCase();
@@ -703,7 +691,7 @@ export async function searchMessages(query: string, channel?: string, limit: num
       const ids = d.prepare(`SELECT ${FTS_TABLE}.rowid AS rid FROM ${FTS_TABLE} WHERE ${FTS_TABLE} MATCH ? LIMIT 1000`).all(match) as { rid: number }[];
       if (ids.length > 0) {
         const placeholders = ids.map(() => '?').join(',');
-        rows = d.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE messages.rowid IN (${placeholders})`)
+        rows = d.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE messages.rowid IN (${placeholders}) ORDER BY timestamp`)
           .all(...ids.map((i) => i.rid)) as any[];
       }
     } catch {
@@ -711,7 +699,9 @@ export async function searchMessages(query: string, channel?: string, limit: num
     }
   }
   if (rows.length === 0) {
-    rows = d.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE text != '' AND instr(lower(text), ?) > 0`).all(q) as any[];
+    // no limit on this one: instr() cannot use an index, so the ceiling has to come from the query
+    const all = d.prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE text != '' AND instr(lower(text), ?) > 0 LIMIT 5000`).all(q) as any[];
+    rows = all.sort((a, b) => a.timestamp - b.timestamp);
   }
 
   const filtered = rows.filter((m) => {
@@ -742,6 +732,20 @@ export async function deleteMessage(messageId: string, userId: string): Promise<
   return (res as any).changes > 0;
 }
 
+/**
+ * Deletes a message the account was merely the recipient of, which is the one deletion a sealed
+ * message allows. The sender of an anonymous message cannot delete it, for the same reason it cannot
+ * edit it: proving authorship is what sealed sender withholds. This is separate from deleteMessage on
+ * purpose rather than folded into it, so the sender check stays where it was audited.
+ */
+export async function deleteReceivedMessage(messageId: string, recipientId: string): Promise<boolean> {
+  const d = getDb();
+  const row = d.prepare('SELECT channel FROM messages WHERE id = ?').get(messageId) as { channel?: string } | undefined;
+  if (!row || row.channel !== `sealed:${recipientId}`) return false;
+  d.prepare('DELETE FROM reactions WHERE message_id = ?').run(messageId);
+  return (d.prepare('DELETE FROM messages WHERE id = ?').run(messageId) as any).changes > 0;
+}
+
 export async function deleteGeneralMessages(): Promise<number> {
   const d = getDb();
   syncFtsDeleteByChannel('general');
@@ -759,19 +763,13 @@ export async function cleanupExpiredMessages(): Promise<number> {
   return (res as any).changes;
 }
 
-export async function cleanupExpiredPreKeys(): Promise<number> {
-  const cutoff = Date.now() - PREKEY_BUNDLE_TTL_MS;
-  const res = getDb().prepare('DELETE FROM prekeys WHERE created_at < ?').run(cutoff);
-  return (res as any).changes;
-}
-
 export async function startCleanupJobs(): Promise<void> {
   const tick = (label: string, job: () => Promise<number>) => {
     job().then(n => { if (n) console.log(`Cleaned ${n} expired ${label}`); })
       .catch(e => console.warn(`[db] ${label} cleanup failed:`, (e as Error).message));
   };
-  setInterval(() => tick('prekeys', cleanupExpiredPreKeys), PREKEY_CLEANUP_INTERVAL_MS).unref?.();
   setInterval(() => tick('messages', cleanupExpiredMessages), MESSAGE_CLEANUP_INTERVAL_MS).unref?.();
+  setInterval(() => tick('inactive sessions', () => pruneInactiveSessions(INACTIVE_SESSION_TTL_MS)), SESSION_CLEANUP_INTERVAL_MS).unref?.();
 }
 
 export function initializeDatabase(): void {
@@ -792,7 +790,6 @@ export function initializeDatabase(): void {
   }
   console.log(`SQLite storage ready (${p})`);
 }
-
 
 
 export async function addReaction(messageId: string, userId: string, emoji: string): Promise<void> {
@@ -827,7 +824,6 @@ export async function getReactionsForMessages(messageIds: string[]): Promise<Map
 }
 
 
-
 export async function setUserBannedByIdent(userId: string | null, nickname: string | null, banned: boolean): Promise<boolean> {
    const res = userId
    ? getDb().prepare('UPDATE users SET is_banned = ?, banned_at = ? WHERE id = ?').run(banned ? 1 : 0, banned ? Date.now() : null, userId)
@@ -859,7 +855,6 @@ export async function setUserBlocked(userId: string, blockedId: string, blocked:
 }
 
 
-
 export async function addReport(report: { id: string; reporterId: string; reporterNick?: string; targetId: string; targetNick?: string; channel: string; messageId?: string; messageText?: string; reason: string; source?: 'profile' | 'message'; timestamp: number }): Promise<void> {
   const d = getDb();
   d.prepare('INSERT INTO reports (id, reporter_id, reporter_nick, target_id, target_nick, channel, message_id, message_text, reason, source, timestamp) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)')
@@ -878,7 +873,6 @@ export async function removeReportsForTarget(targetId: string): Promise<number> 
   const res = getDb().prepare('DELETE FROM reports WHERE target_id = ?').run(targetId);
   return (res as any).changes;
 }
-
 
 
 export interface StoredSession {
@@ -909,24 +903,19 @@ export async function touchSession(userId: string, deviceId: string): Promise<vo
   getDb().prepare('UPDATE sessions SET last_active = ? WHERE user_id = ? AND device_id = ?').run(Date.now(), userId, deviceId);
 }
 
-
-
-export async function getAdminNicknames(): Promise<string[]> {
-  const rows = getDb().prepare('SELECT nickname FROM admins').all() as { nickname: string }[];
-  return rows.map(r => r.nickname.toLowerCase());
+/**
+ * Sessions that have not been seen for a long time no longer occupy a slot. Without this the cap of
+ * three was spent forever by devices the user had long since thrown away.
+ */
+export async function pruneInactiveSessions(maxAgeMs: number): Promise<number> {
+  const cutoff = Date.now() - maxAgeMs;
+  const res = getDb().prepare('DELETE FROM sessions WHERE last_active < ?').run(cutoff);
+  return (res as any).changes;
 }
+
 
 export async function isAdminNickname(nickname: string): Promise<boolean> {
   if (!nickname) return false;
   const row = getDb().prepare('SELECT nickname FROM admins WHERE nickname = ?').get(nickname.toLowerCase()) as any;
   return !!row;
-}
-
-export async function addAdminNickname(nickname: string): Promise<void> {
-  getDb().prepare('INSERT OR IGNORE INTO admins (nickname) VALUES (?)').run(nickname.toLowerCase());
-}
-
-export async function removeAdminNickname(nickname: string): Promise<boolean> {
-  const res = getDb().prepare('DELETE FROM admins WHERE nickname = ?').run(nickname.toLowerCase());
-  return (res as any).changes > 0;
 }

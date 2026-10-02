@@ -1,5 +1,14 @@
 export const RATE_LIMIT_WINDOW = 60_000;
-export const MAX_AUTH_ATTEMPTS = 30;
+/**
+ * A coarse backstop for one address, counted before anybody has proved who they are.
+ *
+ * It used to be 30, which is wrong for a self-hosted messenger: a whole office, school or mobile
+ * carrier shares one address, so thirty wrong passwords anywhere in the building locked out every
+ * login through it for the rest of the minute. This is now high enough that a shared address never
+ * notices it, and the limit that does the real work is MAX_FAILED_LOGINS, which is counted per
+ * nickname rather than per address.
+ */
+export const MAX_AUTH_ATTEMPTS = Number(process.env.MAX_AUTH_ATTEMPTS || 300);
 export const MIN_MESSAGE_INTERVAL = 500;
 export const MAX_SESSIONS_PER_USER = 3;
 /** Unauthenticated sockets only, and deliberately generous: a whole cafe or office shares one address. */
@@ -8,6 +17,12 @@ export const MAX_CONNECTIONS_PER_IP = 100;
 export const MAX_CONNECTIONS_PER_USER = 10;
 export const MAX_FAILED_LOGINS = 5;
 export const ACCOUNT_LOCKOUT_DURATION = 300_000;
+/**
+ * The same counter counted for one nickname across every address, which is what a spray from many
+ * machines runs into.
+ */
+export const MAX_FAILED_LOGINS_GLOBAL = 20;
+export const ACCOUNT_LOCKOUT_DURATION_GLOBAL = 900_000;
 export const FAILED_LOGIN_RETENTION_MS = 60 * 60 * 1000;
 export const MAX_WS_PAYLOAD_SIZE = 4 * 1024 * 1024;
 export const MAX_MESSAGE_CHARS = 2000;
@@ -15,13 +30,22 @@ export const MAX_MESSAGE_CHARS = 2000;
 export const HEARTBEAT_INTERVAL = 15_000;
 export const CLIENT_TIMEOUT = 90_000;
 
-export const PREKEY_BUNDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 export const MESSAGE_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
-export const PREKEY_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+export const SESSION_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 
 export const REPORT_CAP = 1000;
 
-export const MAX_UPLOAD_SIZE = 1000 * 1024 * 1024;
+/**
+ * How many accounts one address may create, and over what period.
+ *
+ * There was no limit at all, so anyone who reached the port could fill the users table. The window is
+ * long on purpose: a short one punishes a shared address rather than a spammer, which is the same
+ * mistake the auth backstop used to make. Override with MAX_REGISTRATIONS_PER_IP=0 to lift it.
+ */
+export const MAX_REGISTRATIONS_PER_IP = Number(process.env.MAX_REGISTRATIONS_PER_IP || 20);
+export const REGISTRATION_WINDOW_MS = 24 * 60 * 60 * 1000;
+
+export const MAX_UPLOAD_SIZE = Number(process.env.MAX_UPLOAD_SIZE || 1000 * 1024 * 1024);
 export const MAX_MEDIA_STREAM = MAX_UPLOAD_SIZE + 1024 * 1024;
 export const UPLOAD_RATE_LIMIT = 120;
 export const UPLOAD_RATE_WINDOW = 60_000;
@@ -43,4 +67,6 @@ export const FTS_TABLE = 'messages_fts';
 export const MAX_AVATAR_BYTES = 2 * 1024 * 1024;
 export const MAX_AVATAR_PAYLOAD = 4 * 1024 * 1024;
 export const AVATAR_CHANGE_INTERVAL_MS = 60_000;
-export const AVATAR_EXTS = ['png', 'jpeg', 'webp', 'gif'] as const;
+
+/** A device that has not been seen for this long no longer counts against the session cap. */
+export const INACTIVE_SESSION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
