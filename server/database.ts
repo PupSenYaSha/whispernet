@@ -68,7 +68,6 @@ function ensureSchema(): void {
       nickname TEXT UNIQUE NOT NULL,
       password_hash TEXT NOT NULL,
       public_key TEXT,
-      sealed_key TEXT,
       created_at INTEGER NOT NULL,
       is_banned INTEGER NOT NULL DEFAULT 0,
       banned_at INTEGER,
@@ -85,7 +84,6 @@ function ensureSchema(): void {
       channel TEXT NOT NULL DEFAULT 'general',
       encrypted TEXT,
       file_key TEXT,
-      sealed TEXT,
       quoted_message_id TEXT,
       quoted_message_text TEXT,
       quoted_message_sender TEXT,
@@ -142,13 +140,10 @@ function ensureSchema(): void {
     CREATE INDEX IF NOT EXISTS idx_sessions_last_active ON sessions(last_active);
     CREATE INDEX IF NOT EXISTS idx_reports_target ON reports(target_id);
     CREATE INDEX IF NOT EXISTS idx_reports_timestamp ON reports(timestamp);
-    -- Sealed messages are ordinary rows here, addressed by a sealed:<recipientId> channel, so history
-    -- and paging work without a separate table. This index is what makes that lookup cheap.
     CREATE INDEX IF NOT EXISTS idx_messages_channel_time ON messages(channel, timestamp);
 `);
 
-  
-  for (const col of ['avatar_ext TEXT', 'avatar_updated_at INTEGER', 'banned_at INTEGER', 'sealed_key TEXT']) {
+  for (const col of ['avatar_ext TEXT', 'avatar_updated_at INTEGER', 'banned_at INTEGER']) {
     try {
       d.exec(`ALTER TABLE users ADD COLUMN ${col}`);
     } catch {}
@@ -168,12 +163,20 @@ function ensureSchema(): void {
   for (const table of ['prekeys', 'prekeys_issued']) {
     try { d.exec(`DROP TABLE IF EXISTS ${table}`); } catch {}
   }
-  for (const col of ['signal_encrypted', 'x3dh_message', 'ratchet_public_key']) {
+  for (const col of ['signal_encrypted', 'x3dh_message', 'ratchet_public_key', 'sealed']) {
     try { d.exec(`ALTER TABLE messages DROP COLUMN ${col}`); } catch {}
   }
 
-  
-  
+  // Sealed sender is gone for the same reason: a row filed under sealed:<recipientId> hid its own
+  // author, so it could never be edited, deleted or searched by the person who wrote it. Anything
+  // left from before the removal is deleted rather than relabelled, which would invent a sender.
+  try {
+    d.exec(`DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE channel LIKE 'sealed:%')`);
+    d.exec(`DELETE FROM messages WHERE channel LIKE 'sealed:%'`);
+  } catch {}
+
+  try { d.exec('ALTER TABLE users DROP COLUMN sealed_key'); } catch {}
+
   
   try {
     d.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS ${FTS_TABLE} USING fts5(text, content='');`);
@@ -321,19 +324,22 @@ function migrateLegacy(): void {
 
     const messages = readJsonSync('messages.json');
     if (Array.isArray(messages)) {
-      const ins = d.prepare('INSERT OR IGNORE INTO messages (id, sender_id, sender_nickname, text, timestamp, channel, encrypted, file_key, sealed, quoted_message_id, quoted_message_text, quoted_message_sender, edited_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
+      const ins = d.prepare('INSERT OR IGNORE INTO messages (id, sender_id, sender_nickname, text, timestamp, channel, encrypted, file_key, quoted_message_id, quoted_message_text, quoted_message_sender, edited_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)');
       for (const m of messages) {
         if (!m || typeof m.id !== 'string') continue;
+        // A sealed message hid its own author, so it cannot become an ordinary direct message and is
+        // not carried over; see the same note where old rows are dropped from an existing database.
+        const channel = typeof m.channel === 'string' ? m.channel : 'general';
+        if (channel.startsWith('sealed:')) continue;
         ins.run(
           m.id,
           typeof m.senderId === 'string' ? m.senderId : '',
           typeof m.senderNickname === 'string' ? m.senderNickname : '',
           typeof m.text === 'string' ? m.text : '',
           typeof m.timestamp === 'number' ? m.timestamp : Date.now(),
-          typeof m.channel === 'string' ? m.channel : 'general',
+          channel,
           json(m.encrypted),
           json(m.fileKey),
-          typeof m.sealed === 'string' ? m.sealed : null,
           optStr(m.quotedMessageId),
           optStr(m.quotedMessageText),
           optStr(m.quotedMessageSender),
@@ -516,37 +522,6 @@ export async function updatePublicKey(userId: string, publicKey: any): Promise<v
   getDb().prepare('UPDATE users SET public_key = ? WHERE id = ?').run(json(publicKey), userId);
 }
 
-/**
- * The sealed sender's long-lived X25519 public key, base64.
- *
- * This replaces the X3DH identity key, which used to arrive inside the pre-key bundle and is gone with
- * the rest of that protocol. It is stored apart from the RSA key rather than beside it inside the same
- * JSON document, because that document is a JWK: the media and message paths hand it straight to
- * crypto.subtle.importKey('jwk', …), and wrapping it would break every one of them for the sake of
- * one extra field. 32 bytes, nothing more — the server never sees the private half.
- */
-export async function setSealedKey(userId: string, sealedKeyB64: string): Promise<boolean> {
-  if (!/^[A-Za-z0-9+/]{42}[A-Za-z0-9+/=]{1,2}$|^[A-Za-z0-9+/]{43}=$/.test(sealedKeyB64)) return false;
-  getDb().prepare('UPDATE users SET sealed_key = ? WHERE id = ?').run(sealedKeyB64, userId);
-  return true;
-}
-
-export async function getAllSealedKeys(): Promise<Record<string, string>> {
-  const rows = getDb().prepare('SELECT id, sealed_key as sealedKey FROM users WHERE sealed_key IS NOT NULL').all() as any[];
-  const keys: Record<string, string> = {};
-  for (const r of rows) if (typeof r.sealedKey === 'string' && r.sealedKey.length > 0) keys[r.id] = r.sealedKey;
-  return keys;
-}
-
-export async function getSealedKeysByIds(ids: string[]): Promise<Record<string, string>> {
-  if (ids.length === 0) return {};
-  const placeholders = ids.map(() => '?').join(',');
-  const rows = getDb().prepare(`SELECT id, sealed_key as sealedKey FROM users WHERE sealed_key IS NOT NULL AND id IN (${placeholders})`).all(...ids) as any[];
-  const keys: Record<string, string> = {};
-  for (const r of rows) if (typeof r.sealedKey === 'string' && r.sealedKey.length > 0) keys[r.id] = r.sealedKey;
-  return keys;
-}
-
 export async function getAllUsers(): Promise<{ id: string; nickname: string; avatarExt: string | null; avatarUpdatedAt: number | null }[]> {
   return getDb().prepare('SELECT id, nickname, avatar_ext as avatarExt, avatar_updated_at as avatarUpdatedAt FROM users').all() as { id: string; nickname: string; avatarExt: string | null; avatarUpdatedAt: number | null }[];
 }
@@ -567,7 +542,7 @@ export function getDmChannelId(userId1: string, userId2: string): string {
 }
 
 const MESSAGE_COLUMNS = `id, sender_id AS senderId, sender_nickname AS senderNickname, text, timestamp, channel,
-   encrypted, file_key AS fileKey, sealed, quoted_message_id AS quotedMessageId,
+   encrypted, file_key AS fileKey, quoted_message_id AS quotedMessageId,
    quoted_message_text AS quotedMessageText, quoted_message_sender AS quotedMessageSender,
       client_id AS clientId,
       edited_at AS editedAt, expires_at AS expiresAt`;
@@ -582,7 +557,6 @@ function rowToMessage(row: any, includeText: boolean = true): any {
     channel: row.channel,
     encrypted: parseJson(row.encrypted, null),
     fileKey: parseJson(row.fileKey, null),
-    sealed: row.sealed || undefined,
     quotedMessageId: row.quotedMessageId || undefined,
     quotedMessageText: row.quotedMessageText || undefined,
     quotedMessageSender: row.quotedMessageSender || undefined,
@@ -601,7 +575,6 @@ export async function saveMessage(
   encrypted?: any,
   channel: string = 'general',
   fileKey?: Record<string, string>,
-  sealed?: string,
   quotedMessageId?: string,
   editedAt?: number,
   expiresAt?: number,
@@ -611,9 +584,9 @@ export async function saveMessage(
    ): Promise<void> {
      const d = getDb();
      const body = str(text);
-     const res = d.prepare(`INSERT INTO messages (id, sender_id, sender_nickname, text, timestamp, channel, encrypted, file_key, sealed, quoted_message_id, quoted_message_text, quoted_message_sender, edited_at, expires_at, client_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-       .run(str(id), str(senderId), str(senderNickname), body, optNum(timestamp) ?? Date.now(), optStr(channel) ?? 'general', json(encrypted), json(fileKey), optStr(sealed), optStr(quotedMessageId), optStr(quotedMessageText), optStr(quotedMessageSender), optNum(editedAt), optNum(expiresAt), optStr(clientId));
+     const res = d.prepare(`INSERT INTO messages (id, sender_id, sender_nickname, text, timestamp, channel, encrypted, file_key, quoted_message_id, quoted_message_text, quoted_message_sender, edited_at, expires_at, client_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+       .run(str(id), str(senderId), str(senderNickname), body, optNum(timestamp) ?? Date.now(), optStr(channel) ?? 'general', json(encrypted), json(fileKey), optStr(quotedMessageId), optStr(quotedMessageText), optStr(quotedMessageSender), optNum(editedAt), optNum(expiresAt), optStr(clientId));
      syncFtsInsert(Number((res as any).lastInsertRowid), body);
    }
 
@@ -623,6 +596,21 @@ export async function updateMessageText(messageId: string, senderId: string, new
   const res = d.prepare('UPDATE messages SET text = ?, edited_at = ? WHERE id = ? AND sender_id = ?')
     .run(newText, Date.now(), messageId, senderId);
   if ((res as any).changes > 0) syncFtsUpdate(messageId, before?.text ?? '', newText);
+  return (res as any).changes > 0;
+}
+
+/**
+ * Replaces the ciphertext of a message its author wrote.
+ *
+ * This is what makes a private message correctable at all. The server cannot rewrite the words, but it
+ * does record who wrote a message, so it can swap one encrypted body for another and refuse anybody
+ * else's. The text stays empty: a direct message is stored as ciphertext, and the client shows what it
+ * decrypts.
+ */
+export async function updateEncryptedMessage(messageId: string, senderId: string, encrypted: any, expiresAt?: number): Promise<boolean> {
+  const d = getDb();
+  const res = d.prepare('UPDATE messages SET encrypted = ?, expires_at = COALESCE(?, expires_at), edited_at = ? WHERE id = ? AND sender_id = ?')
+    .run(json(encrypted), optNum(expiresAt), Date.now(), messageId, senderId);
   return (res as any).changes > 0;
 }
 
@@ -730,20 +718,6 @@ export async function deleteMessage(messageId: string, userId: string): Promise<
   const res = d.prepare('DELETE FROM messages WHERE id = ? AND sender_id = ?').run(messageId, userId);
   if ((res as any).changes > 0) syncFtsDelete(messageId);
   return (res as any).changes > 0;
-}
-
-/**
- * Deletes a message the account was merely the recipient of, which is the one deletion a sealed
- * message allows. The sender of an anonymous message cannot delete it, for the same reason it cannot
- * edit it: proving authorship is what sealed sender withholds. This is separate from deleteMessage on
- * purpose rather than folded into it, so the sender check stays where it was audited.
- */
-export async function deleteReceivedMessage(messageId: string, recipientId: string): Promise<boolean> {
-  const d = getDb();
-  const row = d.prepare('SELECT channel FROM messages WHERE id = ?').get(messageId) as { channel?: string } | undefined;
-  if (!row || row.channel !== `sealed:${recipientId}`) return false;
-  d.prepare('DELETE FROM reactions WHERE message_id = ?').run(messageId);
-  return (d.prepare('DELETE FROM messages WHERE id = ?').run(messageId) as any).changes > 0;
 }
 
 export async function deleteGeneralMessages(): Promise<number> {

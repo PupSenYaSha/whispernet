@@ -79,7 +79,7 @@ export type ConnectionAction =
   | { type: 'DELETE_MESSAGE'; messageId: string }
   | { type: 'ADD_REACTION'; messageId: string; emoji: string; userId: string }
   | { type: 'REMOVE_REACTION'; messageId: string; emoji: string; userId: string }
-  | { type: 'UPDATE_MESSAGE'; messageId: string; text: string; editedAt: number }
+  | { type: 'UPDATE_MESSAGE'; messageId: string; text: string; encrypted?: any; editedAt: number }
   | { type: 'SET_REPLY'; reply: ReplyTarget }
   | { type: 'CLEAR_GENERAL' }
   | { type: 'SET_AVATARS'; avatars: Record<string, AvatarUpdate> }

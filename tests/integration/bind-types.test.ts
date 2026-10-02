@@ -8,8 +8,8 @@ import { startTestServer, TestClient, uniqueNick, type StartedServer } from '../
  * or an object throws ERR_INVALID_ARG_TYPE naming the parameter position, and because a message row
  * has eighteen parameters, that number identifies nothing on its own — the log said "parameter 9"
  * six times and the message was simply gone. This file pins both halves of the fix: the server
- * refuses a sealed blob that arrives on the wrong frame instead of binding it, and nothing optional
- * is passed to the driver unchecked.
+ * refuses a send with nothing in it rather than binding it, and nothing optional is passed to the
+ * driver unchecked.
  */
 
 let server: StartedServer;
@@ -34,9 +34,10 @@ beforeAll(async () => {
 afterAll(async () => { clients.forEach((c) => c.close()); await server.stop(); });
 
 describe('an unbindable field cannot take a send down', () => {
-  it('refuses a sealed flag sent as a boolean, instead of crashing', async () => {
-    // The older protocol sent `sealed: true` as a flag on dm_send. That boolean was bound straight
-    // into the sealed column and every one of those sends died in the driver.
+  it('refuses a send that is only a flag, instead of crashing', async () => {
+    // The old protocol let `sealed: true` stand in for a body. Whatever the shape of the day, a
+    // send with nothing to open is refused rather than bound into a column, because a throw in the
+    // handler is what left a socket silently deaf for the rest of the session.
     a.clear();
     a.send('dm_send', { to: bId, text: '', sealed: true });
     const err = await a.waitFor('error');
@@ -50,16 +51,16 @@ describe('an unbindable field cannot take a send down', () => {
     expect(dm.payload.encrypted.ciphertext).toBe('AFTERFLAG');
   });
 
-  it('ignores a sealed object on a normal encrypted send', async () => {
+  it('ignores an unknown field on a normal encrypted send', async () => {
     b.clear();
     a.send('dm_send', {
       to: bId,
-      sealed: { blob: 'not a real sealed blob' },
       encrypted: { ciphertext: 'IGNORED', iv: 'iv', encryptedKeys: { [bId]: 'k' } },
+      somethingElse: { blob: 'not anything the server knows' },
     });
     const dm = await b.waitFor('dm_message');
     expect(dm.payload.encrypted.ciphertext).toBe('IGNORED');
-    expect(dm.payload.sealed ?? null).toBeNull();
+    expect(dm.payload.somethingElse ?? null).toBeNull();
   });
 
   it('persists a message whose optional columns are all the wrong type', async () => {
@@ -70,7 +71,6 @@ describe('an unbindable field cannot take a send down', () => {
       '', Date.now(),
       undefined, 'general',
       undefined,
-      true as unknown as string,   // sealed, the column that used to throw
       false as unknown as string,  // quoted_message_id
       { nope: 1 } as unknown as number,
       42 as unknown as number,
@@ -79,7 +79,6 @@ describe('an unbindable field cannot take a send down', () => {
     const row = getDb().prepare('SELECT * FROM messages WHERE id = ?').get(id) as any;
     expect(row).toBeTruthy();
     // the bad values become NULL; the row still lands and is still readable
-    expect(row.sealed).toBeNull();
     expect(row.quoted_message_id).toBeNull();
     expect(row.client_id).toBeNull();
     expect((await getMessageById(id))?.id).toBe(id);

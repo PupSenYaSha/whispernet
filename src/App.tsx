@@ -219,14 +219,20 @@ function connectionReducer(state: ConnectionState, action: ConnectionAction): Co
           Object.entries(state.dmMessages).map(([ch, msgs]) => [ch, msgs.filter(m => m.id !== action.messageId)])
         ),
       };
-    case 'UPDATE_MESSAGE':
+    case 'UPDATE_MESSAGE': {
+      // A private message is corrected as ciphertext, so the bubble has to swap its body rather than
+      // its text; the component decrypts whatever it is holding each time it renders.
+      const patch = action.encrypted
+        ? { encrypted: action.encrypted, editedAt: action.editedAt, text: '' }
+        : { text: action.text, editedAt: action.editedAt };
       return {
         ...state,
-        messages: state.messages.map(m => m.id === action.messageId ? { ...m, text: action.text, editedAt: action.editedAt } : m),
+        messages: state.messages.map(m => m.id === action.messageId ? { ...m, ...patch } : m),
         dmMessages: Object.fromEntries(
-          Object.entries(state.dmMessages).map(([ch, msgs]) => [ch, msgs.map(m => m.id === action.messageId ? { ...m, text: action.text, editedAt: action.editedAt } : m)])
+          Object.entries(state.dmMessages).map(([ch, msgs]) => [ch, msgs.map(m => m.id === action.messageId ? { ...m, ...patch } : m)])
         ),
       };
+    }
     case 'ADD_REACTION':
       return {
         ...state,
@@ -595,7 +601,9 @@ useEffect(() => { stateRef.current = state; }, [state]);
       try {
         const encrypted = await encryptMessage(text.trim(), buildEncryptKeys({ [peerId]: peerKey }));
         const ttl = ttlSeconds();
-        ws.send(JSON.stringify({ type: 'edit_message', payload: { messageId, text: text.trim(), encrypted, ttl } }));
+        // Only the ciphertext goes out. Sending the words alongside it would undo the whole point of
+        // the message being private, and the server has no use for them: it swaps one body for another.
+        ws.send(JSON.stringify({ type: 'edit_message', payload: { messageId, encrypted, ttl } }));
       } catch (e) {
         console.error('Could not re-encrypt an edited message:', e);
       }
@@ -835,7 +843,13 @@ dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
               break;
             }
             case 'message_edited':
-              dispatch({ type: 'UPDATE_MESSAGE', messageId: message.payload.messageId, text: message.payload.text, editedAt: message.payload.editedAt });
+              dispatch({
+                type: 'UPDATE_MESSAGE',
+                messageId: message.payload.messageId,
+                text: message.payload.text,
+                encrypted: message.payload.encrypted,
+                editedAt: message.payload.editedAt,
+              });
               break;
             case 'sessions_list':
               setSessions(message.payload.sessions);

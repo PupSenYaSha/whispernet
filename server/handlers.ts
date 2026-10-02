@@ -1,6 +1,6 @@
 import { WebSocket } from 'ws';
 import { issueUploadToken } from './uploadTokens.js';
-import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, setUserAvatar, removeUserAvatar, getAvatarDir, getDataDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, StoredSession, getChannelMediaKey } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, updateEncryptedMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, setUserAvatar, removeUserAvatar, getAvatarDir, getDataDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, StoredSession, getChannelMediaKey } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { appendFileSync, mkdirSync } from 'fs';
@@ -958,7 +958,7 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     const quoted = payload?.quoted && typeof payload.quoted === 'object' && typeof payload.quoted.sender === 'string'
       ? { id: String(payload.quoted.id || ''), text: sanitizeText(String(payload.quoted.text || '')).slice(0, MAX_MESSAGE_CHARS), sender: sanitizeText(payload.quoted.sender).slice(0, 64) }
       : null;
-    await saveMessage(messageId, senderId, sender.nickname, text, timestamp, undefined, 'general', fileKey, undefined, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined);
+    await saveMessage(messageId, senderId, sender.nickname, text, timestamp, undefined, 'general', fileKey, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined);
 
     const messagePayload = {
       id: messageId,
@@ -1055,7 +1055,7 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       logSecurity('PLAINTEXT_DM_REJECTED', { from: senderId, to: recipientUser.id });
       return;
     }
-    await saveMessage(messageId, senderId, sender.nickname, '', timestamp, payload.encrypted, channelId, fileKey, undefined, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined, clientId);
+    await saveMessage(messageId, senderId, sender.nickname, '', timestamp, payload.encrypted, channelId, fileKey, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined, clientId);
 
     const dmPayload = {
       id: messageId,
@@ -1254,9 +1254,41 @@ const before = Number.isFinite(payload.before) ? Number(payload.before) : undefi
     }
   }
 
-  async function handleEditMessage(userId: string, ws: WebSocket, payload: { messageId: string; text: string }): Promise<void> {
-    if (!payload?.messageId || !payload?.text || typeof payload.text !== 'string') {
-      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'messageId and text required' }, timestamp: Date.now() });
+  async function handleEditMessage(userId: string, ws: WebSocket, payload: { messageId: string; text?: string; encrypted?: any; ttl?: number }): Promise<void> {
+    if (!payload?.messageId || typeof payload.messageId !== 'string') {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'messageId required' }, timestamp: Date.now() });
+      return;
+    }
+
+    const target = await getMessageById(payload.messageId);
+    if (!target || target.senderId !== userId) {
+      send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
+      return;
+    }
+
+    // A private message is stored as ciphertext, so a correction arrives as a new encrypted body rather
+    // than as words. The server checks that the account wrote the message and swaps the body; it never
+    // sees either version of the text.
+    if (target.encrypted) {
+      if (!payload.encrypted || typeof payload.encrypted !== 'object' || typeof payload.encrypted.ciphertext !== 'string' || !payload.encrypted.ciphertext) {
+        send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'An encrypted message must be edited as ciphertext' }, timestamp: Date.now() });
+        return;
+      }
+      const expiresAt = resolveExpiry(payload.ttl, Date.now());
+      const updated = await updateEncryptedMessage(payload.messageId, userId, payload.encrypted, expiresAt);
+      if (!updated) {
+        send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
+        return;
+      }
+      const timestamp = Date.now();
+      const edit = { messageId: payload.messageId, encrypted: payload.encrypted, editedAt: timestamp, expiresAt };
+      broadcastToMessageAudience(payload.messageId, userId, { type: 'message_edited', payload: edit, timestamp });
+      send(ws, { type: 'message_edited', payload: edit, timestamp });
+      return;
+    }
+
+    if (!payload.text || typeof payload.text !== 'string') {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'text required' }, timestamp: Date.now() });
       return;
     }
     const text = sanitizeText(payload.text);
@@ -1264,8 +1296,7 @@ const before = Number.isFinite(payload.before) ? Number(payload.before) : undefi
       send(ws, { type: 'error', payload: { code: 'MESSAGE_TOO_LONG', message: `Message too long (max ${MAX_MESSAGE_CHARS} chars)` }, timestamp: Date.now() });
       return;
     }
-    const target = await getMessageById(payload.messageId);
-    if (!target || target.channel !== 'general' || target.encrypted) {
+    if (target.channel !== 'general') {
       send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
       return;
     }
