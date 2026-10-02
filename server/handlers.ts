@@ -17,6 +17,10 @@ import {
   MAX_CONNECTIONS_PER_USER,
   MAX_FAILED_LOGINS,
   ACCOUNT_LOCKOUT_DURATION,
+  MAX_FAILED_LOGINS_GLOBAL,
+  ACCOUNT_LOCKOUT_DURATION_GLOBAL,
+  MAX_REGISTRATIONS_PER_IP,
+  REGISTRATION_WINDOW_MS,
   FAILED_LOGIN_RETENTION_MS,
   MAX_WS_PAYLOAD_SIZE,
   HEARTBEAT_INTERVAL,
@@ -154,16 +158,26 @@ async function sessionCapReached(userId: string, deviceId: string | null): Promi
 }
 
 
-function unregisterDevice(deviceId: string): void {
-  const client = clients.get(deviceId);
-  if (!client) return;
-  clients.delete(deviceId);
-  const set = userDevices.get(client.userId);
-  if (set) {
-    set.delete(deviceId);
-    if (set.size === 0) userDevices.delete(client.userId);
+/**
+ * Drops a device from the live tables.
+ *
+ * `expectedWs` is what stops a reload from going deaf. The device id lives in localStorage, so a second
+ * tab or a refresh sends the same one; the new socket takes the slot and the old socket is closed, and
+ * when that old socket runs its close handler it looks its id up again. Without the check it finds the
+ * *new* connection by id and unregisters that one instead, leaving the client that just logged in with
+ * no socket registered at all.
+ */
+function unregisterDevice(deviceId: string, expectedWs?: WebSocket): void {
+    const client = clients.get(deviceId);
+    if (!client) return;
+    if (expectedWs && client.ws !== expectedWs) return;
+    clients.delete(deviceId);
+    const set = userDevices.get(client.userId);
+    if (set) {
+      set.delete(deviceId);
+      if (set.size === 0) userDevices.delete(client.userId);
+    }
   }
-}
 
 export function getTotalConnections(): number {
   return totalConnections;
@@ -177,7 +191,19 @@ const DUMMY_PASSWORD_HASH = '$2a$12$C6UzMDM.H8dQYhC1Bcye0e7o3mN0q0VWcZBp4eXmJzVQ
 const authAttempts = new Map<string, { count: number; resetAt: number }>();
 const lastMessageTime = new Map<string, number>();
 const connectionCounts = new Map<string, number>();
+/**
+ * Wrong passwords, keyed by nickname and address together.
+ *
+ * It used to be keyed by nickname alone, which is a denial of service rather than a security measure:
+ * anybody who knew a name could lock the account for five minutes at a time and hold it there for as
+ * long as they cared to. Keying on the pair means a family, an office or a school behind one router no
+ * longer locks each other out, while a spray at one name from one machine still runs into a wall.
+ */
 const failedLogins = new Map<string, { count: number; lockedUntil: number; lastActive: number }>();
+/** The same mistakes counted for one nickname across every address, which is what a spray runs into. */
+const nicknameFailures = new Map<string, { count: number; lockedUntil: number; lastActive: number }>();
+/** Accounts one address has created, and when, so a spammer cannot fill the users table. */
+const registrationsByIp = new Map<string, number[]>();
 
 const lastAvatarChange = new Map<string, number>();
 
@@ -230,15 +256,88 @@ function decodeAvatarDataUrl(dataUrl: unknown): { ext: string; buffer: Buffer } 
   return { ext, buffer };
 }
 
-function recordFailedLogin(lockKey: string, count: number, lockedUntil: number): void {
-  failedLogins.set(lockKey, { count, lockedUntil, lastActive: Date.now() });
-  
-  if (failedLogins.size > 5000) {
-    const cutoff = Date.now() - FAILED_LOGIN_RETENTION_MS;
-    for (const [key, entry] of failedLogins) {
-      if (entry.lastActive < cutoff) failedLogins.delete(key);
-    }
+/** Drops expired entries once the table is big enough to be worth the pass. */
+function pruneCounters(now: number): void {
+  const cutoff = now - FAILED_LOGIN_RETENTION_MS;
+  for (const [key, entry] of failedLogins) {
+    if (entry.lastActive < cutoff && (!entry.lockedUntil || entry.lockedUntil < now)) failedLogins.delete(key);
   }
+  for (const [key, entry] of nicknameFailures) {
+    if (entry.lastActive < cutoff && (!entry.lockedUntil || entry.lockedUntil < now)) nicknameFailures.delete(key);
+  }
+  if (failedLogins.size > 5000 || nicknameFailures.size > 5000) pruneCounters(now);
+}
+
+/**
+ * Counts one wrong password against both the nickname and address pair and the name on its own.
+ *
+ * The pair is what refuses an attempt; the cross-address total is the slower, higher ceiling that
+ * only matters to somebody spraying one name from many machines.
+ */
+function recordFailedLogin(pairKey: string, nicknameKey: string): { count: number; lockedUntil: number } {
+  const now = Date.now();
+  pruneCounters(now);
+
+  const pair = failedLogins.get(pairKey);
+  const pairCount = pair && (!pair.lockedUntil || pair.lockedUntil < now) ? pair.count + 1 : 1;
+  const pairLockedUntil = pairCount >= MAX_FAILED_LOGINS ? now + ACCOUNT_LOCKOUT_DURATION : 0;
+  failedLogins.set(pairKey, { count: pairCount, lockedUntil: pairLockedUntil, lastActive: now });
+
+  const global = nicknameFailures.get(nicknameKey);
+  const globalCount = global && (!global.lockedUntil || global.lockedUntil < now) ? global.count + 1 : 1;
+  const globalLockedUntil = globalCount >= MAX_FAILED_LOGINS_GLOBAL ? now + ACCOUNT_LOCKOUT_DURATION_GLOBAL : 0;
+  nicknameFailures.set(nicknameKey, { count: globalCount, lockedUntil: globalLockedUntil, lastActive: now });
+
+  return { count: pairCount, lockedUntil: pairLockedUntil };
+}
+
+/** Forgets a nickname's failures once the right password came through. */
+function clearFailedLogins(nicknameKey: string): void {
+  nicknameFailures.delete(nicknameKey);
+  for (const [key, entry] of failedLogins) {
+    if (key.endsWith('|' + nicknameKey)) failedLogins.delete(key);
+  }
+}
+
+/**
+ * Whether this attempt is the one that stops answering.
+ *
+ * Only a *wrong* password is ever refused here. A lockout that can turn away the correct password is a
+ * way to lock somebody out of their own account, so the check runs after the comparison succeeds and
+ * the right password always gets in, however many failures the name has collected.
+ */
+function loginLockedOut(pairKey: string, nicknameKey: string): number {
+  const now = Date.now();
+  const pair = failedLogins.get(pairKey);
+  if (pair && pair.lockedUntil > now) return Math.ceil((pair.lockedUntil - now) / 60000);
+  const global = nicknameFailures.get(nicknameKey);
+  if (global && global.lockedUntil > now) return Math.ceil((global.lockedUntil - now) / 60000);
+  return 0;
+}
+
+/**
+ * How many accounts this address may still create in the window.
+ *
+ * The window is long on purpose: a short one punishes a shared address rather than a spammer, which is
+ * the same mistake the auth backstop used to make. A ceiling of zero lifts it entirely.
+ */
+function registrationAllowed(ip: string): { allowed: boolean; retryHours: number } {
+  if (MAX_REGISTRATIONS_PER_IP <= 0) return { allowed: true, retryHours: 0 };
+  const now = Date.now();
+  const since = now - REGISTRATION_WINDOW_MS;
+  const recent = (registrationsByIp.get(ip) || []).filter(t => t > since);
+  registrationsByIp.set(ip, recent);
+  if (recent.length < MAX_REGISTRATIONS_PER_IP) return { allowed: true, retryHours: 0 };
+  const oldest = Math.min(...recent);
+  return { allowed: false, retryHours: Math.max(1, Math.ceil((oldest + REGISTRATION_WINDOW_MS - now) / 3600000)) };
+}
+
+/** Charges an account to the address that created it, but only once one really exists. */
+function recordRegistration(ip: string): void {
+  if (MAX_REGISTRATIONS_PER_IP <= 0) return;
+  const recent = registrationsByIp.get(ip) || [];
+  recent.push(Date.now());
+  registrationsByIp.set(ip, recent);
 }
 
 interface ServerMessage {
@@ -456,7 +555,7 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
   const dispose = () => {
     if (disposed) return;
     disposed = true;
-    handleDisconnect(currentDeviceId, currentUserId);
+    handleDisconnect(currentDeviceId, currentUserId, ws);
     releaseConnectionKey(connectionKey);
     totalConnections = Math.max(0, totalConnections - 1);
   };
@@ -592,46 +691,39 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       return;
     }
 
-    const lockKey = cleanNick.toLowerCase();
-    
-    
-    const purgeCutoff = Date.now() - FAILED_LOGIN_RETENTION_MS;
-    for (const [key, entry] of failedLogins) {
-      if (entry.lastActive < purgeCutoff) failedLogins.delete(key);
-    }
-    const lockEntry = failedLogins.get(lockKey);
-    if (lockEntry && lockEntry.lockedUntil > Date.now()) {
-      const remaining = Math.ceil((lockEntry.lockedUntil - Date.now()) / 60000);
-      logSecurity('LOGIN_LOCKED', { nickname: cleanNick, ip, remainingMin: remaining });
-      send(ws, { type: 'auth_failure', payload: { reason: `Account locked. Try again in ${remaining} minute(s).` }, timestamp: Date.now() });
-      return;
-    }
+    const nicknameKey = cleanNick.toLowerCase();
+    const pairKey = ip + '|' + nicknameKey;
 
     const user = await getUserByNickname(cleanNick);
-    if (!user || typeof password !== 'string' || !user.passwordHash) {
-      
-      
-      await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
-      const newCount = lockEntry ? lockEntry.count + 1 : 1;
-      const lockedUntil = newCount >= MAX_FAILED_LOGINS ? Date.now() + ACCOUNT_LOCKOUT_DURATION : 0;
-      recordFailedLogin(lockKey, newCount, lockedUntil);
-      recordAuthFailure(ip);
-      logSecurity('LOGIN_FAILED', { nickname: cleanNick, ip, attempts: newCount, locked: lockedUntil > 0 });
-      send(ws, { type: 'auth_failure', payload: { reason: 'Invalid nickname or password' }, timestamp: Date.now() });
-      return;
+
+    // A name that does not exist still gets the full comparison, so a miss is indistinguishable from a
+    // wrong password in both the answer and the time it takes.
+    const passwordMatches = user && user.passwordHash && typeof password === 'string'
+      ? await bcrypt.compare(String(password), user.passwordHash)
+      : false;
+    if (!passwordMatches) {
+      // A name that does not exist still pays for the full comparison, so a miss is indistinguishable
+      // from a wrong password in both the answer and the time it takes.
+      await bcrypt.compare(String(password || ''), DUMMY_PASSWORD_HASH);
     }
-    if (!(await bcrypt.compare(String(password), user.passwordHash))) {
-      const newCount = lockEntry ? lockEntry.count + 1 : 1;
-      const lockedUntil = newCount >= MAX_FAILED_LOGINS ? Date.now() + ACCOUNT_LOCKOUT_DURATION : 0;
-      recordFailedLogin(lockKey, newCount, lockedUntil);
+
+    if (!passwordMatches || !user) {
+      const lockedMinutes = loginLockedOut(pairKey, nicknameKey);
+      if (lockedMinutes > 0) {
+        recordAuthFailure(ip);
+        logSecurity('LOGIN_LOCKED', { nickname: cleanNick, ip, remainingMin: lockedMinutes });
+        send(ws, { type: 'auth_failure', payload: { reason: `Account locked. Try again in ${lockedMinutes} minute(s).` }, timestamp: Date.now() });
+        return;
+      }
+      const { count, lockedUntil } = recordFailedLogin(pairKey, nicknameKey);
       recordAuthFailure(ip);
-      logSecurity('LOGIN_FAILED', { nickname: cleanNick, ip, attempts: newCount, locked: lockedUntil > 0 });
+      logSecurity('LOGIN_FAILED', { nickname: cleanNick, ip, attempts: count, locked: lockedUntil > 0 });
       send(ws, { type: 'auth_failure', payload: { reason: 'Invalid nickname or password' }, timestamp: Date.now() });
       return;
     }
 
     logSecurity('LOGIN_SUCCESS', { nickname: cleanNick, ip });
-    failedLogins.delete(lockKey);
+    clearFailedLogins(nicknameKey);
     clearAuthRateLimit(ip);
 
     if (await getUserBanned(user.id)) {
@@ -702,8 +794,17 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       return;
     }
 
-    if (typeof cleanPass !== 'string' || cleanPass.length < 8 || cleanPass.length > 32) {
-      send(ws, { type: 'auth_failure', payload: { reason: 'Password must be 8-32 characters' }, timestamp: Date.now() });
+    // Checked only once the name is genuinely free: a refusal that happens before the account exists
+    // must not spend the budget, or one person holding a name could stop a whole network registering.
+    const registration = registrationAllowed(ip);
+    if (!registration.allowed) {
+      send(ws, { type: 'auth_failure', payload: { reason: `Too many accounts created from this network. Try again in ${registration.retryHours} hour(s).` }, timestamp: Date.now() });
+      logSecurity('REGISTRATION_LIMIT', { ip, limit: MAX_REGISTRATIONS_PER_IP, retryHours: registration.retryHours });
+      return;
+    }
+
+    if (typeof cleanPass !== 'string' || cleanPass.length < 8 || cleanPass.length > 64) {
+      send(ws, { type: 'auth_failure', payload: { reason: 'Password must be 8-64 characters' }, timestamp: Date.now() });
       return;
     }
 
@@ -729,6 +830,7 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     }
 
     clearAuthRateLimit(ip);
+    recordRegistration(ip);
 
     const deviceId = typeof payload.deviceId === 'string' && payload.deviceId.length > 0 && payload.deviceId.length <= 64
       ? payload.deviceId : crypto.randomUUID();
@@ -1268,11 +1370,16 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
     send(ws, { type: 'user_avatar', payload: { userId, avatar: null }, timestamp: Date.now() });
   }
 
-  function handleDisconnect(deviceId: string | null, userId: string | null): void {
+  function handleDisconnect(deviceId: string | null, userId: string | null, ws?: WebSocket): void {
     if (!deviceId) return;
 
     const client = clients.get(deviceId);
-    unregisterDevice(deviceId);
+    unregisterDevice(deviceId, ws);
+
+    // A socket that has already been replaced by a newer one for the same device is not a departure:
+    // the reload it belongs to is already connected, and announcing user_left here would make every
+    // other client show that person as offline.
+    if (ws && client && client.ws !== ws) return;
 
     if (client) {
       sessionLastActive(client.userId, deviceId, Date.now());
