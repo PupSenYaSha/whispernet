@@ -462,14 +462,24 @@ function userConnections(userId: string): number {
   return connectionCounts.get('user:' + userId) || 0;
 }
 
-function sanitize(input: string): string {
+/**
+ * Both sanitizers coerce rather than trusting their argument.
+ *
+ * A client is free to send an object where a string belongs, and these are called on almost every frame.
+ * Passing that straight to .replace() threw inside the handler, which cost the caller its answer for
+ * that request; the socket recovered but the frame never came. Anything that is not a string is simply
+ * empty, which is what the caller would have got from a missing field anyway.
+ */
+function sanitize(input: unknown): string {
+  if (typeof input !== 'string') return '';
   return input
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '')
     .replace(/[<>&"']/g, '')
     .trim();
 }
 
-function sanitizeText(input: string): string {
+function sanitizeText(input: unknown): string {
+  if (typeof input !== 'string') return '';
   return input
     .replace(/[\x00-\x08\x0b\x0c\x0e-\x1f]/g, '')
     .trim();

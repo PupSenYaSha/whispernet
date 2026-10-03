@@ -52,15 +52,17 @@ describe('dm media over the wire', () => {
     const bKeys = await generateKeyPair();
 
     const ca = await open('10.20.0.1', 'ma');
-    const cb = await open('10.20.0.2', 'mb');
-    const ra = await ca.register(uniqueNick('ma'), { publicKey: aKeys.publicKey });
+const cb = await open('10.20.0.2', 'mb');
+const ra = await ca.register(uniqueNick('ma'), { publicKey: aKeys.publicKey });
+    const token = ca.uploadToken;
+    expect(token).toBeTruthy();
     const rb = await cb.register(uniqueNick('mb'), { publicKey: bKeys.publicKey });
     expect(ra.type, `a: ${JSON.stringify(ra.payload)}`).toBe('auth_success');
     expect(rb.type, `b: ${JSON.stringify(rb.payload)}`).toBe('auth_success');
 
     const plaintext = 'the bytes of a photo';
     const enc = await encryptFile(new Blob([new TextEncoder().encode(plaintext)]));
-    const url = await upload(origin, enc.blob);
+    const url = await upload(origin, enc.blob, token);
     expect(url).toMatch(/^https?:\/\//);
 
     const fileKey = await buildFileKeyMap(
@@ -91,15 +93,16 @@ describe('dm media over the wire', () => {
     const bKeys = await generateKeyPair();
 
     const ca = await open('10.20.0.3', 'ha');
-    const cb = await open('10.20.0.4', 'hb');
-    const ra = await ca.register(uniqueNick('ha'), { publicKey: aKeys.publicKey });
+const cb = await open('10.20.0.4', 'hb');
+const ra = await ca.register(uniqueNick('ha'), { publicKey: aKeys.publicKey });
+    const token = ca.uploadToken;
     const rb = await cb.register(uniqueNick('hb'), { publicKey: bKeys.publicKey });
     expect(ra.type).toBe('auth_success');
     expect(rb.type).toBe('auth_success');
 
     const plaintext = 'history photo';
     const enc = await encryptFile(new Blob([new TextEncoder().encode(plaintext)]));
-    const url = await upload(origin, enc.blob);
+    const url = await upload(origin, enc.blob, token);
     const fileKey = await buildFileKeyMap(
       enc.rawKey, [rb.payload.userId], () => bKeys.publicKey, ra.payload.userId, aKeys.publicKey, enc.ivB64, null,
     );
@@ -173,10 +176,10 @@ async function startLocalMediaHost(): Promise<{ port: number; stop: () => void }
   return { port, stop: () => srv.close() };
 }
 
-async function upload(origin: string, blob: Blob): Promise<string> {
+async function upload(origin: string, blob: Blob, token: string): Promise<string> {
   const form = new FormData();
   form.append('file', new Blob([blob], { type: 'image/png' }), 'media.png');
-  const res = await fetch(`${origin}/api/upload`, { method: 'POST', body: form });
+  const res = await fetch(`${origin}/api/upload`, { method: 'POST', body: form, headers: { 'X-WN-Upload-Token': token } });
   if (!res.ok) throw new Error(`upload failed: ${res.status} ${await res.text()}`);
   const body = await res.json();
   return body.url;
@@ -186,12 +189,12 @@ async function upload(origin: string, blob: Blob): Promise<string> {
  * The streamed route is what lifted the private-chat ceiling: a multipart body has to arrive whole,
  * so a large attachment had to be held in memory by the sender before the request could start.
  */
-async function uploadStream(origin: string, stream: ReadableStream<Uint8Array>): Promise<string> {
+async function uploadStream(origin: string, stream: ReadableStream<Uint8Array>, token: string): Promise<string> {
   const res = await fetch(`${origin}/api/upload-raw?name=media.png&type=image%2Fpng`, {
     method: 'POST',
     body: stream,
     duplex: 'half',
-    headers: { 'Content-Type': 'application/octet-stream' },
+    headers: { 'Content-Type': 'application/octet-stream', 'X-WN-Upload-Token': token },
   } as RequestInit);
   if (!res.ok) throw new Error(`streamed upload failed: ${res.status} ${await res.text()}`);
   const body = await res.json();
@@ -199,6 +202,17 @@ async function uploadStream(origin: string, stream: ReadableStream<Uint8Array>):
 }
 
 describe('a streamed attachment over the wire', () => {
+  // The upload routes now need the token the handshake issues, so this suite signs in one account
+  // and uploads as it rather than posting anonymously.
+  let token = '';
+
+  beforeAll(async () => {
+    const uploader = await open('10.20.0.9', 'streamer');
+    await uploader.register(uniqueNick('str'));
+    token = uploader.uploadToken;
+    expect(token).toBeTruthy();
+  });
+
   it('is accepted, stored and readable back byte for byte', async () => {
     const aKeys = await generateKeyPair();
     const bKeys = await generateKeyPair();
@@ -207,7 +221,7 @@ describe('a streamed attachment over the wire', () => {
     for (let i = 0; i < plaintext.length; i++) plaintext[i] = (i * 31) % 256;
 
     const enc = await encryptFileStream(new Blob([plaintext]));
-    const url = await uploadStream(origin, enc.stream);
+    const url = await uploadStream(origin, enc.stream, token);
     expect(url).toMatch(/^https?:\/\//);
 
     const fileKey = await buildFileKeyMap(
@@ -237,7 +251,7 @@ describe('a streamed attachment over the wire', () => {
     });
     const res = await fetch(`${origin}/api/upload-raw?name=media.png&type=image%2Fpng`, {
       method: 'POST', body: stream, duplex: 'half',
-      headers: { 'Content-Type': 'application/octet-stream' },
+      headers: { 'Content-Type': 'application/octet-stream', 'X-WN-Upload-Token': token },
     } as RequestInit).catch(() => null);
     // either the server refuses it, or the client notices the socket closing mid-body: both are the
     // ceiling doing its job, and what must not happen is the whole thing being accepted
@@ -249,7 +263,7 @@ describe('a streamed attachment over the wire', () => {
       method: 'POST',
       body: new ReadableStream({ start(c) { c.enqueue(new Uint8Array([1, 2, 3])); c.close(); } }),
       duplex: 'half',
-      headers: { 'Content-Type': 'application/octet-stream' },
+      headers: { 'Content-Type': 'application/octet-stream', 'X-WN-Upload-Token': token },
     } as RequestInit);
     expect(res.status).toBe(400);
   });
@@ -263,7 +277,7 @@ describe('a streamed attachment over the wire', () => {
 
     const enc = await encryptFile(new Blob([new TextEncoder().encode(plaintext)]));
     const { wrapForMedia } = await import('../../src/media-crypto');
-    const url = await upload(origin, wrapForMedia(await enc.blob.arrayBuffer()));
+    const url = await upload(origin, wrapForMedia(await enc.blob.arrayBuffer()), token);
 
     const fileKey = await buildFileKeyMap(
       enc.rawKey, ['user-b'], () => bKeys.publicKey, 'user-a', aKeys.publicKey, enc.ivB64, null,

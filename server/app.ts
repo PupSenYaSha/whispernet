@@ -86,12 +86,16 @@ function sanitizeFilename(name: string): string {
   return name.replace(/[\x00-\x1f\x7f/\\"]/g, '').slice(0, 128) || 'upload';
 }
 
+function resolveUploadUser(req: any): string | null {
+  return resolveUploadTokenUser(req.headers?.['x-wn-upload-token'])
+    ?? resolveUploadTokenUser((req.query as any)?.t);
+}
+
 function resolveUploadRateKey(req: any): string {
   // The token arrives in a header for uploads, but media is fetched by <img> and <video>, which cannot
   // carry one. Without reading it from the query string as well, every media request fell back to the
   // address, which put a whole family or office on one shared counter.
-  const userId = resolveUploadTokenUser(req.headers?.['x-wn-upload-token'])
-    ?? resolveUploadTokenUser((req.query as any)?.t);
+  const userId = resolveUploadUser(req);
   if (userId) return 'user:' + userId;
   // anonymous callers fall back to the address, which is all we know about them
   return 'ip:' + (req.ip || req.socket?.remoteAddress || 'unknown');
@@ -382,6 +386,24 @@ export function createApp(clientDir?: string) {
     }
   }
 
+  /**
+   * Refuses an upload from anybody who cannot name an account.
+   *
+   * Both upload routes used to take the token only to decide whose rate limit to charge, and never to
+   * decide whether to serve the request at all. Since the ceiling is a gigabyte and the websocket
+   * handshake is the only thing that issues a token, that left the endpoint open to anyone who could
+   * reach the port: no account, no password, just a body of whatever size they liked. Reading is a
+   * separate matter and stays open, because an <img> cannot carry a header.
+   */
+  function requireUploadUser(req: any, reply: any): string | null {
+    const userId = resolveUploadUser(req);
+    if (!userId) {
+      reply.code(401).send({ error: 'Upload token required' });
+      return null;
+    }
+    return userId;
+  }
+
   /** Writes a request stream to disk, refusing anything past the ceiling without buffering it. */
   async function drainToTempFile(source: Readable, tmpPath: string): Promise<number> {
     return new Promise<number>((resolve) => {
@@ -409,6 +431,8 @@ export function createApp(clientDir?: string) {
   }
 
   app.post('/api/upload', async (req, reply) => {
+    if (!requireUploadUser(req, reply)) return;
+
     const rateKey = resolveUploadRateKey(req);
     if (!checkUploadRate(rateKey)) {
       return reply.code(429).send({ error: 'Rate limit' });
@@ -470,6 +494,8 @@ export function createApp(clientDir?: string) {
    * the same gigabyte the global chat already did.
    */
   app.post('/api/upload-raw', async (req, reply) => {
+    if (!requireUploadUser(req, reply)) return;
+
     const rateKey = resolveUploadRateKey(req);
     if (!checkUploadRate(rateKey)) {
       return reply.code(429).send({ error: 'Rate limit' });

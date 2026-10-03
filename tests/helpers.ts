@@ -48,6 +48,8 @@ export async function startTestServer(env: Record<string, string> = {}): Promise
 export class TestClient {
   logs: any[] = [];
   ws!: WebSocket;
+  /** The upload token the server issued on sign-in, kept so a test can upload as this account. */
+  uploadToken = '';
   private authResolve: ((m: any) => void) | null = null;
 
   constructor(private url: string, public label = 'client') { }
@@ -60,6 +62,7 @@ export class TestClient {
       this.ws.on('message', (data) => {
         const m = JSON.parse(data.toString());
         this.logs.push(m);
+        if (m.type === 'auth_success' && typeof m.payload?.uploadToken === 'string') this.uploadToken = m.payload.uploadToken;
         if ((m.type === 'auth_success' || m.type === 'auth_failure' || m.type === 'twofactor_required') && this.authResolve) {
           this.authResolve(m);
           this.authResolve = null;
@@ -209,6 +212,7 @@ export function postMultipart(
   port: number,
   urlPath: string,
   parts: Array<{ name: string; filename?: string; contentType?: string; body: Buffer | string }>,
+  uploadToken?: string,
 ): Promise<{ status: number; body: any }> {
   const boundary = '----TestBoundary' + crypto.randomBytes(6).toString('hex');
   const chunks: Buffer[] = [];
@@ -223,9 +227,13 @@ export function postMultipart(
   }
   chunks.push(Buffer.from(`--${boundary}--\r\n`));
   const body = Buffer.concat(chunks);
+  const headers: Record<string, string> = { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': String(body.length) };
+  // the endpoint requires a token now, so a caller that has one passes it and a caller testing the
+  // refusal deliberately leaves it out
+  if (uploadToken) headers['X-WN-Upload-Token'] = uploadToken;
   return new Promise((resolve) => {
     const req = http.request(
-      { host: '127.0.0.1', port, path: urlPath, method: 'POST', headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}`, 'Content-Length': body.length } },
+      { host: '127.0.0.1', port, path: urlPath, method: 'POST', headers },
       (res) => {
         const out: Buffer[] = [];
         res.on('data', (c) => out.push(c));
