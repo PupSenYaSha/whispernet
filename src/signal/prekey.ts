@@ -248,6 +248,21 @@ export class PreKeyManager {
     this.saveTimeout = setTimeout(() => this.doSave(), 500);
   }
 
+  /**
+   * Writes the pending state out now rather than in half a second.
+   *
+   * Losing an identity key is worse than losing a session: every conversation that was ever opened with
+   * it can no longer be read by this device, and there is no key left anywhere to fix that. Every way of
+   * leaving goes through here.
+   */
+  flush(): void {
+    if (this.saveTimeout) {
+      clearTimeout(this.saveTimeout);
+      this.saveTimeout = null;
+    }
+    void this.doSave();
+  }
+
   private async doSave(): Promise<void> {
     try {
       const ikData = this.identityKeyPair ? JSON.stringify({

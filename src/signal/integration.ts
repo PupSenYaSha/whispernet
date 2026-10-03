@@ -10,6 +10,35 @@ export async function initSessionManager(password: string): Promise<void> {
   sessionManager.startCleanupTimer();
 }
 
+/**
+ * Writes pending key state out at once.
+ *
+ * Both managers debounce their writes, which is right while the app runs but means a tab closed inside
+ * the window loses the session. That loss is unrecoverable for a ratchet - the messages already sent
+ * under the discarded key can never be opened again by anybody - so every way of leaving goes through
+ * here: closing the tab, losing the connection, and the page going away.
+ */
+export function flushSignalState(): void {
+  try { sessionManager.flush(); } catch { /* nothing worth failing a page exit over */ }
+  try { preKeyManager.flush?.(); } catch { /* as above */ }
+}
+
+/** Installs the listeners. Called once, after the managers are ready. */
+export function installSignalFlushHandlers(): () => void {
+  if (typeof window === 'undefined') return () => {};
+  const onLeave = () => flushSignalState();
+  window.addEventListener('pagehide', onLeave);
+  window.addEventListener('beforeunload', onLeave);
+  window.addEventListener('blur', onLeave);
+  document.addEventListener('visibilitychange', onLeave);
+  return () => {
+    window.removeEventListener('pagehide', onLeave);
+    window.removeEventListener('beforeunload', onLeave);
+    window.removeEventListener('blur', onLeave);
+    document.removeEventListener('visibilitychange', onLeave);
+  };
+}
+
 export async function initPreKeyManager(password: string): Promise<void> {
   await preKeyManager.init(password);
 }

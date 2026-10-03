@@ -6,7 +6,11 @@ import { encryptPrivateKey, decryptPrivateKey, isEncryptedBundle, isKeyBackup } 
 import { encryptPassword, decryptPassword } from './device-crypto';
 import { uploadFile, uploadStream, MediaError, setUploadToken, mediaProxyUrl } from './upload';
 import { encryptFileStream, buildFileKeyMap, unwrapAndDecrypt, unwrapAndDecryptChannel } from './media-crypto';
-import { newClientMessageId, rememberOwnMessageText, recallOwnMessageText } from './ownMessageCache';
+import { newClientMessageId, rememberOwnMessageText, recallOwnMessageText } from './ownMessageCache'
+import {
+  startRatchet, publishBundle, rememberBundles, rememberBundle,
+  sealFor, openFor, isDmBody, sessionExists, flushRatchet,
+} from './dmCrypto';;
 import { ConnectionContext, useConnection, type ConnectionState, type ConnectionAction, type ReplyTarget, type AdminReport } from './context';
 import { loadSettings, defaultSettings, translations, cn, formatTime, getDeviceLabel } from './utils';
 
@@ -254,6 +258,29 @@ function connectionReducer(state: ConnectionState, action: ConnectionAction): Co
   }
 }
 
+/**
+ * Who the other party in a private message is.
+ *
+ * A row carries both participants joined by a colon, and for our own message the other end is the peer,
+ * while for theirs it is the sender. Reading a message needs the peer's identity because the ratchet
+ * session is keyed by the pair, so picking the wrong end picks the wrong session.
+ */
+function peerOf(m: any): string {
+  const channel = typeof m?.channel === 'string' ? m.channel : '';
+  if (channel.includes(':')) {
+    const [a, b] = channel.split(':');
+    if (m?.isOwn) return a === currentAccountId() ? b : a;
+    return b === currentAccountId() ? a : b;
+  }
+  return m?.senderId || channel;
+}
+
+/** The signed-in account id, readable from anywhere rather than threaded through every callback. */
+let accountId = '';
+function currentAccountId(): string {
+  return accountId;
+}
+
 function ConnectionProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(connectionReducer, initialState, (init) => ({
     ...init,
@@ -440,7 +467,16 @@ useEffect(() => { stateRef.current = state; }, [state]);
    */
   const readDmText = useCallback(async (m: any): Promise<string> => {
     let text = m.text || '';
-    if (m.encrypted && privateKeyRef.current && userIdRef.current) {
+    const peerId = peerOf(m);
+    if (isDmBody(m.encrypted)) {
+      try {
+        const opened = await openFor(peerId, m.encrypted, privateKeyRef.current);
+        if (opened !== null) text = opened;
+        else if (!text) text = '[encrypted]';
+      } catch {
+        if (!text) text = '[encrypted]';
+      }
+    } else if (m.encrypted && privateKeyRef.current && userIdRef.current) {
       try {
         text = await decryptMessage(m.encrypted, userIdRef.current, privateKeyRef.current);
       } catch {
@@ -680,6 +716,7 @@ useEffect(() => { stateRef.current = state; }, [state]);
       try { localStorage.setItem('wn_upload_token', message.payload.uploadToken); } catch { /* private mode */ }
     }
               setIsAdmin(message.payload.role === 'admin');
+              accountId = message.payload.userId || '';
               dispatch({ type: 'SET_USER', userId: message.payload.userId, nickname: message.payload.nickname });
               dispatch({ type: 'SET_STATUS', status: 'connected' });
               dispatch({ type: 'SET_RECONNECT_ATTEMPTS', attempts: 0 });
@@ -687,6 +724,25 @@ useEffect(() => { stateRef.current = state; }, [state]);
               if (wsRef.current?.readyState === WebSocket.OPEN) {
                 wsRef.current.send(JSON.stringify({ type: 'get_blocked', payload: {} }));
                 wsRef.current.send(JSON.stringify({ type: 'get_sessions', payload: {} }));
+              }
+              // The ratchet needs the account password to unlock its key material, and it publishes a
+              // bundle so strangers can start a conversation. Both happen after sign-in rather than at
+              // load because there is no password before it.
+              if (authRef.current?.password) {
+                void (async () => {
+                  try {
+                    await startRatchet(message.payload.userId, authRef.current!.password!);
+                    rememberBundles(message.payload.preKeyBundles || message.payload.identityKeys || {});
+                    const bundle = await publishBundle();
+                    if (bundle && ws.readyState === WebSocket.OPEN) {
+                      ws.send(JSON.stringify({ type: 'prekey_upload', payload: { bundle } }));
+                    }
+                  } catch (e) {
+                    // A failure here is not fatal: without a session every message falls back to the
+                    // stateless envelope, which is less safe but always readable.
+                    console.warn('[ratchet] could not start:', (e as Error).message);
+                  }
+                })();
               }
               publicKeysRef.current = message.payload.publicKeys || {};
               channelMediaKeyRef.current = typeof message.payload.channelMediaKey === 'string' ? message.payload.channelMediaKey : null;
@@ -825,6 +881,16 @@ dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
               for (const c of message.payload.contacts || []) {
                 if (c.id && c.nickname) dispatch({ type: 'SET_DM_NAME', userId: c.id, nickname: c.nickname });
               }
+              break;
+            case 'prekey_bundles':
+              // A peer we had no session with turns up here; remembering the bundle is what lets the
+              // next message to them go under the ratchet instead of the envelope.
+              for (const [id, bundle] of Object.entries(message.payload.bundles || {})) {
+                rememberBundle(id, bundle);
+                bundleWaitersRef.current[id] = true;
+              }
+              break;
+            case 'prekey_uploaded':
               break;
             case 'search_results':
               dispatch({ type: 'SET_SEARCH_RESULTS', results: message.payload.results });
@@ -1016,6 +1082,10 @@ dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
   }, [connect]);
 
   const disconnect = useCallback(() => {
+    // Both managers debounce their writes, so signing out inside that window would drop the session and
+    // the identity key. Neither loss is recoverable: the messages already sent under the discarded keys
+    // could never be opened again by this device.
+    flushRatchet();
     if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
     if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
     heartbeatIntervalRef.current = null;
@@ -1148,6 +1218,8 @@ dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
   }, [ttlSeconds]);
 
   const keyWaitersRef = useRef<Record<string, Promise<JsonWebKey | null>>>({});
+  /** Peers whose bundle has arrived, so a send knows it can build a session without asking again. */
+  const bundleWaitersRef = useRef<Record<string, boolean>>({});
   /** The recipient key can be missing right after a reconnect; ask for it once and wait briefly. */
   const requestRecipientKey = useCallback((to: string): Promise<JsonWebKey | null> => {
     const pending = keyWaitersRef.current[to];
@@ -1168,6 +1240,19 @@ dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
     return wait;
   }, []);
 
+  /** Fetches the peer's published bundle, without which no session can be started. */
+  const requestPeerBundle = useCallback(async (to: string): Promise<boolean> => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    ws.send(JSON.stringify({ type: 'prekey_fetch', payload: { userIds: [to] } }));
+    const deadline = Date.now() + 3000;
+    while (Date.now() < deadline) {
+      if (bundleWaitersRef.current[to]) return true;
+      await new Promise((r) => setTimeout(r, 150));
+    }
+    return false;
+  }, []);
+
   const sendDmPackage = useCallback(async (
     to: string,
     options: { text: string; fileKey?: Record<string, string>; quoted?: ReplyTarget }
@@ -1183,11 +1268,14 @@ dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
     const payload: any = { toKey: recipientKey, text: '', ttl: ttlSeconds(), clientId };
     if (options.fileKey) payload.fileKey = options.fileKey;
     if (options.quoted) payload.quoted = { id: options.quoted.id, text: options.quoted.text, sender: options.quoted.senderNickname };
-    // One body for every direct message: AES-GCM under a fresh key, that key wrapped to the
-    // recipient's RSA public key. There is no session to keep alive and nothing to handshake, which is
-    // the whole reason the ratchet is gone — it was the only thing in this app that could leave a
-    // conversation permanently unreadable, and it did so routinely.
-    payload.encrypted = await encryptMessage(content, buildEncryptKeys({ [to]: recipientKey }));
+    if (!bundleWaitersRef.current[to] && !sessionExists(to)) await requestPeerBundle(to);
+    // The body goes under the ratchet when a session can be built, which is what makes an older message
+    // unreadable to somebody who seizes the server later: the key that opened it is gone. The stateless
+    // envelope is still produced alongside it, both as the fallback when no session can be had and as
+    // the copy this account's other devices read.
+    const { body } = await sealFor(to, content, () =>
+      encryptMessage(content, buildEncryptKeys({ [to]: recipientKey })));
+    payload.encrypted = body;
 
     // Sent the ordinary way, with the sender recorded. Anonymity here used to mean the server filed
     // the message under an addressee-only channel, which meant it could never return it: the sender
@@ -1197,7 +1285,7 @@ dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
     ws.send(JSON.stringify({ type: 'dm_send', payload }));
     // the sender cannot decrypt its own ciphertext, so keep the plaintext to render our own message later
     rememberOwnMessageText(clientId, content);
-  }, [buildEncryptKeys, ttlSeconds, requestRecipientKey]);
+  }, [buildEncryptKeys, ttlSeconds, requestRecipientKey, requestPeerBundle]);
 
   const sendDm = useCallback(async (to: string, text: string, quoted?: ReplyTarget) => {
     if (!text.trim()) return;

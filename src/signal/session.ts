@@ -92,6 +92,23 @@ export class SessionManager {
     this.saveTimeout = setTimeout(() => this.doSave(), 500);
   }
 
+  /**
+   * Writes the pending state out now instead of in half a second.
+   *
+   * The debounce is right while the app is running - writing on every message would be a write per
+   * message - but a tab closed inside the window loses the session, and a lost session is the one
+   * failure a ratchet cannot recover from: everything already said under the old key stays unreadable,
+   * with no key left anywhere to open it. Closing the tab, losing connection and losing power all go
+   * through here.
+   */
+  flush(): void {
+    if (this.saveTimeout) {
+      clearTimeout(this.saveTimeout);
+      this.saveTimeout = null;
+    }
+    void this.doSave();
+  }
+
   private async doSave(): Promise<void> {
     try {
       const obj: Record<string, any> = {};

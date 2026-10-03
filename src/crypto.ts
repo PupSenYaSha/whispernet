@@ -74,3 +74,47 @@ export async function decryptMessage(
 }
 
 
+
+/**
+ * The number two people read aloud to be sure they are talking to each other.
+ *
+ * Derived from the long-lived identity keys, sorted so both sides reach the same answer without an
+ * agreed order. A server that handed each of them a different key would produce a different number on
+ * each side, which is the entire point of putting it on screen: it is the one check that does not depend
+ * on the server being honest.
+ */
+export async function generateSafetyNumber(selfIdentityB64: string, peerIdentityB64?: string | null): Promise<string> {
+  const self = base64ToU8(selfIdentityB64);
+  const data = peerIdentityB64
+    ? (() => {
+        const peer = base64ToU8(peerIdentityB64);
+        return byteCompare(self, peer) <= 0 ? concatBytes(self, peer) : concatBytes(peer, self);
+      })()
+    : self;
+  const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', data as unknown as ArrayBuffer));
+  const groups: string[] = [];
+  for (let i = 0; i < 24; i += 4) {
+    groups.push(Array.from(hash.slice(i, i + 4)).map(b => b.toString(16).padStart(2, '0')).join(''));
+  }
+  return groups.join(' ').toUpperCase();
+}
+
+function base64ToU8(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
+}
+
+function byteCompare(a: Uint8Array, b: Uint8Array): number {
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) if (a[i] !== b[i]) return a[i] - b[i];
+  return a.length - b.length;
+}
+
+function concatBytes(a: Uint8Array, b: Uint8Array): Uint8Array {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
+}
