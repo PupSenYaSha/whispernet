@@ -1,6 +1,6 @@
 import { WebSocket } from 'ws';
 import { issueUploadToken } from './uploadTokens.js';
-import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, updateEncryptedMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, setUserAvatar, removeUserAvatar, getAvatarDir, getDataDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, StoredSession, getChannelMediaKey } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundlesByIds, getIdentityKeyB64, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, updateEncryptedMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, setUserAvatar, removeUserAvatar, getAvatarDir, getDataDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, StoredSession, getChannelMediaKey } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import { appendFileSync, mkdirSync } from 'fs';
@@ -494,6 +494,53 @@ function hasUnsafeOwnKeys(obj: any): boolean {
   return Object.keys(obj).some(k => k === '__proto__' || k === 'constructor' || k === 'prototype');
 }
 
+/**
+ * What a rejected bundle looked like, for the log.
+ *
+ * A client on an older build, or one whose crypto failed to initialise, used to send nothing useful
+ * here, and the server answered with silence in both cases. Recording the shape is the only way to tell
+ * those apart after the fact.
+ */
+function preKeyBundleDiagnostics(bundle: any): Record<string, any> {
+  if (!bundle || typeof bundle !== 'object') return { present: false };
+  const spk = bundle.signedPreKey;
+  return {
+    present: true,
+    keys: Object.keys(bundle).join(','),
+    jsonLen: (() => { try { return JSON.stringify(bundle).length; } catch { return -1; } })(),
+    identityKeyType: typeof bundle.identityKey,
+    identityKeyLen: typeof bundle.identityKey === 'string' ? bundle.identityKey.length : -1,
+    spkType: spk === null ? 'null' : typeof spk,
+    spkPublicKeyType: spk && typeof spk === 'object' ? typeof spk.publicKey : 'n/a',
+    signatureIsArray: Array.isArray(spk && spk.signature),
+    signatureLen: Array.isArray(spk && spk.signature) ? spk.signature.length : -1,
+    oneTimePreKeyType: bundle.oneTimePreKey === undefined ? 'undefined' : typeof bundle.oneTimePreKey,
+    version: typeof bundle.version,
+    bundleVersion: typeof bundle.bundleVersion,
+  };
+}
+
+function isValidPreKeyBundle(bundle: any): boolean {
+  if (typeof bundle !== 'object' || bundle === null) return false;
+  const MAX_BUNDLE_SIZE = 10000;
+  const str = JSON.stringify(bundle);
+  if (str.length > MAX_BUNDLE_SIZE) return false;
+  if (hasUnsafeOwnKeys(bundle)) return false;
+  if (typeof bundle.identityKey !== 'string' || bundle.identityKey.length === 0) return false;
+  if (typeof bundle.ed25519PublicKey !== 'string') return false;
+  if (typeof bundle.signedPreKey !== 'object' || bundle.signedPreKey === null) return false;
+  if (hasUnsafeOwnKeys(bundle.signedPreKey)) return false;
+  if (typeof bundle.signedPreKey.publicKey !== 'string') return false;
+  if (!Array.isArray(bundle.signedPreKey.signature)) return false;
+  if (bundle.oneTimePreKey && typeof bundle.oneTimePreKey !== 'object') return false;
+  // the client sends "version"; the legacy format used "bundleVersion"
+  const version = typeof bundle.bundleVersion === 'number' ? bundle.bundleVersion
+    : typeof bundle.version === 'number' ? bundle.version
+      : 0;
+  if (version < 1) return false;
+  return true;
+}
+
 function isValidPublicKey(key: any): boolean {
   if (typeof key !== 'object' || key === null) return false;
   const MAX_KEY_SIZE = 5000;
@@ -628,6 +675,12 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
         break;
       case 'auth_update_key':
         if (userId) await handleAuthUpdateKey(userId, ws, message.payload);
+        break;
+      case 'prekey_upload':
+        if (userId) await handlePreKeyUpload(userId, ws, message.payload);
+        break;
+      case 'prekey_fetch':
+        if (userId) await handlePreKeyFetch(userId, ws, message.payload);
         break;
       case 'heartbeat':
         if (currentDeviceId) {
@@ -769,6 +822,10 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     registerDevice(deviceId, { deviceId, ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip, deviceInfo: typeof payload?.deviceInfo === 'string' ? payload.deviceInfo.slice(0, 60) : '' });
 
     await onAuthenticated(user.id, user.nickname, ws, deviceId);
+    // The bundle is refreshed on every sign-in, so a client whose keys were rotated while it was
+    // away does not go on advertising the old ones.
+    if (isValidPreKeyBundle(payload?.preKeyBundle)) await setPreKeyBundle(user.id, payload.preKeyBundle);
+
   }
 
   async function handleAuthRegister(ws: WebSocket, payload: { nickname: string; password: string; publicKey?: any; preKeyBundle?: any; deviceId?: string; deviceInfo?: string }): Promise<void> {
@@ -858,6 +915,9 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
   async function onAuthenticated(userId: string, nickname: string, ws: WebSocket, deviceId?: string): Promise<void> {
     const publicKeys = await getAllPublicKeys();
     const userMeta = await buildAvatarInfoMap();
+    // Handed over on sign-in so key verification never needs a second round trip: the identity keys a
+    // safety number is computed from travel with the rest of the directory.
+    const identityKeys = await getPreKeyBundlesByIds([userId]);
 
     const seen = new Set<string>();
     const onlineUsers: { id: string; nickname: string; avatar: AvatarInfo | null }[] = [];
@@ -865,7 +925,7 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       if (!seen.has(c.userId)) { seen.add(c.userId); onlineUsers.push({ id: c.userId, nickname: c.nickname, avatar: avatarInfo(userMeta.get(c.userId)) }); }
     }
 
-    send(ws, { type: 'auth_success', payload: { userId, nickname, deviceId, uploadToken: issueUploadToken(userId), publicKeys, preKeyBundles: {}, onlineUsers, role: await isAdminNickname(nickname) ? 'admin' : 'user', channelMediaKey: await getChannelMediaKey() }, timestamp: Date.now() });
+    send(ws, { type: 'auth_success', payload: { userId, nickname, deviceId, uploadToken: issueUploadToken(userId), publicKeys, identityKeys, preKeyBundles: identityKeys, onlineUsers, role: await isAdminNickname(nickname) ? 'admin' : 'user', channelMediaKey: await getChannelMediaKey() }, timestamp: Date.now() });
 
     const history = await getRecentMessages(100);
     const reactionsById = await getReactionsForMessages(history.map((m) => m.id));
@@ -1327,6 +1387,33 @@ const before = Number.isFinite(payload.before) ? Number(payload.before) : undefi
     }
   }
 
+  /**
+   * The bundle a stranger needs to open a ratchet with this account.
+   *
+   * It is public material, so the only thing worth checking is its shape: a bundle that arrives as the
+   * wrong type used to be bound straight into the column, which threw inside the driver and lost the
+   * message.
+   */
+  async function handlePreKeyUpload(userId: string, ws: WebSocket, payload: { bundle: any }): Promise<void> {
+    if (payload?.bundle && isValidPreKeyBundle(payload.bundle)) {
+      await setPreKeyBundle(userId, payload.bundle);
+      send(ws, { type: 'prekey_uploaded', payload: {}, timestamp: Date.now() });
+    } else {
+      logSecurity('PREKEY_REJECTED', { userId, ...preKeyBundleDiagnostics(payload?.bundle) });
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Invalid prekey bundle' }, timestamp: Date.now() });
+    }
+  }
+
+  /** Fetches the bundles a conversation needs, capped so one frame cannot ask for the whole table. */
+  async function handlePreKeyFetch(userId: string, ws: WebSocket, payload: { userIds?: string[] }): Promise<void> {
+    if (!payload?.userIds || !Array.isArray(payload.userIds) || payload.userIds.length === 0) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'userIds array required' }, timestamp: Date.now() });
+      return;
+    }
+    const bundles = await getPreKeyBundlesByIds(payload.userIds.filter(id => typeof id === 'string').slice(0, 100));
+    send(ws, { type: 'prekey_bundles', payload: { bundles }, timestamp: Date.now() });
+  }
+
   async function handleProfileGet(userId: string, ws: WebSocket, payload: { userId?: string }): Promise<void> {
     const targetId = typeof payload?.userId === 'string' ? payload.userId : '';
     if (!targetId) {
@@ -1353,6 +1440,10 @@ const before = Number.isFinite(payload.before) ? Number(payload.before) : undefi
           isMe,
           isBlockedByMe,
           isBanned,
+          // The long-lived public half of this account's ratchet identity. A safety number is computed
+          // from it on both sides, so reading the same number aloud is what rules out a server that
+          // handed each of them a different key.
+          identityKey: await getIdentityKeyB64(targetId),
         },
       },
       timestamp: Date.now(),

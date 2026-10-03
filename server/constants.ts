@@ -70,3 +70,12 @@ export const AVATAR_CHANGE_INTERVAL_MS = 60_000;
 
 /** A device that has not been seen for this long no longer counts against the session cap. */
 export const INACTIVE_SESSION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+
+/**
+ * How long a published prekey bundle is trusted before it is dropped.
+ *
+ * A bundle is what lets a stranger open a ratchet, so a stale one is worse than none: a sender would
+ * build a session against key material its owner rotated away months ago, and the conversation would
+ * be unreadable on the other side. Clients refresh well inside this.
+ */
+export const PREKEY_BUNDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;

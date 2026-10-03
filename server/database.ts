@@ -9,6 +9,7 @@ import {
   MESSAGE_CLEANUP_INTERVAL_MS,
   SESSION_CLEANUP_INTERVAL_MS,
   INACTIVE_SESSION_TTL_MS,
+  PREKEY_BUNDLE_TTL_MS,
   REPORT_CAP,
   FTS_TABLE,
 } from './constants.js';
@@ -131,11 +132,23 @@ function ensureSchema(): void {
     CREATE TABLE IF NOT EXISTS admins (
       nickname TEXT PRIMARY KEY
     );
+    /**
+     * The published key material a sender needs to open a ratchet with somebody it has never spoken to.
+     * One row per account, overwritten whenever the client rotates: the identity key lasts as long as
+     * the account, the signed prekey is rotated on a schedule, and the one-time prekeys inside it are
+     * consumed so a single bundle cannot be replayed.
+     */
+    CREATE TABLE IF NOT EXISTS prekeys (
+      user_id TEXT PRIMARY KEY,
+      bundle TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_reactions_message ON reactions(message_id);
+    CREATE INDEX IF NOT EXISTS idx_prekeys_created ON prekeys(created_at);
     CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
     CREATE INDEX IF NOT EXISTS idx_sessions_last_active ON sessions(last_active);
     CREATE INDEX IF NOT EXISTS idx_reports_target ON reports(target_id);
@@ -160,9 +173,14 @@ function ensureSchema(): void {
   // X3DH and the ratchet are gone. A database created before that still carries the three columns
   // they used, so they are dropped rather than left behind: an operator reading the schema should not
   // find key material columns for a protocol the server no longer speaks.
-  for (const table of ['prekeys', 'prekeys_issued']) {
-    try { d.exec(`DROP TABLE IF EXISTS ${table}`); } catch {}
-  }
+  //
+  // The ratchet is back, so the prekey table is created rather than dropped. Only the staging table the
+  // old implementation used - which recorded which one-time prekeys had already been handed out, so
+  // that the same bundle could not be served twice - is gone, and so are the three columns the ratchet
+  // used to need on a message row. It no longer needs them: a ratchet body travels in the same
+  // encrypted column as everything else, so history, quoting, editing and search all keep working
+  // without knowing which kind of body they are carrying.
+  try { d.exec('DROP TABLE IF EXISTS prekeys_issued'); } catch {}
   for (const col of ['signal_encrypted', 'x3dh_message', 'ratchet_public_key', 'sealed']) {
     try { d.exec(`ALTER TABLE messages DROP COLUMN ${col}`); } catch {}
   }
@@ -522,6 +540,55 @@ export async function updatePublicKey(userId: string, publicKey: any): Promise<v
   getDb().prepare('UPDATE users SET public_key = ? WHERE id = ?').run(json(publicKey), userId);
 }
 
+/**
+ * Stores the bundle a sender needs to start a ratchet: identity key, signed prekey and a handful of
+ * one-time prekeys. It is public material by design - it is what lets a stranger open a conversation -
+ * and it is replaced wholesale whenever the client rotates.
+ */
+export async function setPreKeyBundle(userId: string, bundle: any): Promise<void> {
+  getDb().prepare('INSERT INTO prekeys (user_id, bundle, created_at) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET bundle = excluded.bundle, created_at = excluded.created_at')
+    .run(userId, json(bundle), Date.now());
+}
+
+export async function getPreKeyBundle(userId: string): Promise<any | null> {
+  const row = getDb().prepare('SELECT bundle FROM prekeys WHERE user_id = ?').get(userId) as any;
+  return row ? parseJson(row.bundle, null) : null;
+}
+
+/**
+ * The identity key on its own, which is what a safety number is computed from.
+ *
+ * Key verification needs only the long-lived half of the bundle: a number both people can read aloud
+ * and compare is a check that the keys in play are the ones they think they are, and a server that
+ * quietly swapped them would have to swap this one too.
+ */
+export async function getIdentityKeyB64(userId: string): Promise<string | null> {
+  const bundle = await getPreKeyBundle(userId);
+  const idKey = bundle?.identityKey;
+  return typeof idKey === 'string' && idKey.length > 0 ? idKey : null;
+}
+
+export async function getPreKeyBundlesByIds(ids: string[]): Promise<Record<string, any>> {
+  const out: Record<string, any> = {};
+  if (ids.length === 0) return out;
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = getDb().prepare(`SELECT user_id as userId, bundle FROM prekeys WHERE user_id IN (${placeholders})`).all(...ids) as any[];
+  for (const r of rows) {
+    const bundle = parseJson(r.bundle, null);
+    if (bundle) out[r.userId] = bundle;
+  }
+  return out;
+}
+
+/**
+ * Forgets bundles nobody has refreshed. A stale signed prekey is worse than none: a sender would build
+ * a session against material the owner has already replaced.
+ */
+export async function cleanupExpiredPreKeys(maxAgeMs: number): Promise<number> {
+  const res = getDb().prepare('DELETE FROM prekeys WHERE created_at < ?').run(Date.now() - maxAgeMs);
+  return (res as any).changes;
+}
+
 export async function getAllUsers(): Promise<{ id: string; nickname: string; avatarExt: string | null; avatarUpdatedAt: number | null }[]> {
   return getDb().prepare('SELECT id, nickname, avatar_ext as avatarExt, avatar_updated_at as avatarUpdatedAt FROM users').all() as { id: string; nickname: string; avatarExt: string | null; avatarUpdatedAt: number | null }[];
 }
@@ -743,6 +810,8 @@ export async function startCleanupJobs(): Promise<void> {
       .catch(e => console.warn(`[db] ${label} cleanup failed:`, (e as Error).message));
   };
   setInterval(() => tick('messages', cleanupExpiredMessages), MESSAGE_CLEANUP_INTERVAL_MS).unref?.();
+  // A bundle that has not been refreshed in this long is not the material its owner is using any more.
+  setInterval(() => tick('prekeys', () => cleanupExpiredPreKeys(PREKEY_BUNDLE_TTL_MS)), SESSION_CLEANUP_INTERVAL_MS).unref?.();
   setInterval(() => tick('inactive sessions', () => pruneInactiveSessions(INACTIVE_SESSION_TTL_MS)), SESSION_CLEANUP_INTERVAL_MS).unref?.();
 }
 
