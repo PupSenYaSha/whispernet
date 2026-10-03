@@ -986,7 +986,16 @@ dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
                 const requested = requestedProfileIdRef.current;
                 if (requested && p.id !== requested) break;
                 if (!requested && stateRef.current.profile) break;
-                dispatch({ type: 'SET_PROFILE', profile: p });
+                dispatch({
+                  type: 'SET_PROFILE',
+                  profile: {
+                    ...p,
+                    // The identity key is what a safety number is computed from, and it arrives with the
+                    // profile so verification costs no extra round trip and cannot be skipped by a server
+                    // that simply never sends it.
+                    identityKey: typeof p.identityKey === 'string' ? p.identityKey : null,
+                  },
+                });
                 if (p.avatar && p.avatar.ext) {
                   dispatch({ type: 'SET_AVATARS', avatars: { [p.id]: p.avatar } });
                 } else if (p.id) {

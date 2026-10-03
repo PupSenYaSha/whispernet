@@ -6,6 +6,7 @@ import { Avatar } from './Avatar';
 import { cn, formatProfileDate } from '../utils';
 import { fileToAvatarDataUrl } from '../avatar';
 import { useEscapeKey } from '../useEscapeKey';
+import { SafetyNumberRow } from './SafetyNumberRow';
 
 export function ProfileModal({ profile }: { profile: ProfileInfo }) {
   const { state, t, openDm, blockUser, unblockUser, openReport, closeProfile, setMyAvatar, removeMyAvatar, blockedUsers } = useConnection();
@@ -65,6 +66,8 @@ export function ProfileModal({ profile }: { profile: ProfileInfo }) {
             <span className="text-[11px] font-medium text-fg-muted uppercase tracking-wider">{t('registered')}</span>
             <span className="text-[14px] font-semibold text-fg-primary">{formatProfileDate(profile.createdAt)}</span>
           </div>
+
+          {!profile.isMe && <SafetyNumberRow peerId={profile.id} peerIdentityKey={profile.identityKey} />}
 
           {profile.isMe ? (
             <div className="flex flex-col gap-2 pt-2">

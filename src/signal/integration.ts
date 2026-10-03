@@ -294,6 +294,27 @@ export function hasSession(userId1: string, userId2: string): boolean {
   return !!sessionManager.getSession(id);
 }
 
+/**
+ * The live chain keys of a session, for the forward-secrecy tests.
+ *
+ * Exposed deliberately rather than worked around: the claim that a stolen state cannot read what came
+ * before it is only worth something if it can be tested against the state the running manager really
+ * holds, and reaching into it from a test is cheaper than inventing a second code path that could
+ * drift from this one.
+ */
+export function getSessionKeysForTest(sessionId: string): {
+  rootKey: number[] | null;
+  receivingChainKey: number[] | null;
+  sendingChainKey: number[] | null;
+} {
+  const state = sessionManager.getSession(sessionId)?.state;
+  return {
+    rootKey: state ? Array.from(state.rootKey) : null,
+    receivingChainKey: state?.receivingChainKey ? Array.from(state.receivingChainKey) : null,
+    sendingChainKey: state?.sendingChainKey ? Array.from(state.sendingChainKey) : null,
+  };
+}
+
 function arrayToBase64(arr: Uint8Array): string {
   let binary = '';
   for (let i = 0; i < arr.length; i++) {

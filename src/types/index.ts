@@ -15,8 +15,15 @@ export interface ProfileInfo {
   createdAt: number;
   online: boolean;
   isMe: boolean;
-  isBlockedByMe: boolean;
+isBlockedByMe: boolean;
   isBanned: boolean;
+  /**
+   * The long-lived public half of this account's ratchet identity.
+   *
+   * A safety number is computed from it on both sides. It is here rather than fetched separately so
+   * verification costs no round trip and cannot be quietly skipped.
+   */
+  identityKey?: string | null;
 }
 
 export interface Message {
