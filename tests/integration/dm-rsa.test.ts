@@ -5,11 +5,14 @@ import { generateKeyPair, encryptMessage, decryptMessage } from '../../src/crypt
 /**
  * A direct message has to be readable by the person it was written to.
  *
- * The ratchet that used to carry these is gone. What replaced it is RSA-OAEP with an AES-GCM body,
- * which is stateless: there is no session to negotiate, nothing to keep alive, and therefore no
- * failure mode that can leave a conversation permanently showing [encrypted]. These tests drive the
- * real client crypto over the real server, because the bug this replaces was never in the cipher — it
- * was in how the three delivery paths disagreed about which body a row carried.
+ * Two bodies travel with every one of them: the ratchet, which is what the recipient reads when a session
+ * exists, and a stateless RSA envelope addressed to the recipient and to the sender's own account. The
+ * envelope is what makes a ratchet failure degrade to a readable message rather than a permanently
+ * encrypted one, and what lets the sender's other devices read what it sends.
+ *
+ * These drive the real client crypto over the real server, because the failures worth catching in a
+ * messenger are almost never in the cipher - they are in how the two sides disagree about which body a
+ * row carries, and in what the server decides to store alongside it.
  */
 
 let server: StartedServer;
@@ -118,15 +121,27 @@ describe('a direct message is readable by its recipient', () => {
     const bob = await account('rsab');
     const ttl = 86400;
 
+    // a real message to quote, so the quote resolves to something that is actually stored
+    alice.client.send('dm_send', { to: bob.userId, encrypted: await sealFor(alice, bob, 'earlier') });
+    const earlier = await bob.client.waitFor('dm_message');
+    expect(await openText(bob, earlier.payload.encrypted)).toBe('earlier');
+
+    bob.client.clear();
     alice.client.send('dm_send', {
       to: bob.userId,
       ttl,
-      quoted: { id: 'prev', text: 'earlier', sender: alice.nickname },
+      // the words and the name in here are ignored: only the id is trusted
+      quoted: { id: earlier.payload.id, text: 'something else entirely', sender: 'someone else' },
       encrypted: await sealFor(alice, bob, 'replying'),
     });
     const got = await bob.client.waitFor('dm_message');
     expect(await openText(bob, got.payload.encrypted)).toBe('replying');
-    expect(got.payload.quotedMessageText).toBe('earlier');
+    expect(got.payload.quotedMessageId).toBe(earlier.payload.id);
+    // A quote of a private message carries the name and the id but no words: the row is ciphertext and
+    // the server has nothing to read. The client resolves the text from the conversation it already has,
+    // which is the only place it could come from.
+    expect(got.payload.quotedMessageText ?? null).toBeNull();
+    expect(got.payload.quotedMessageSender).toBe(alice.nickname);
     expect(got.payload.expiresAt).toBeGreaterThan(Date.now());
   });
 });

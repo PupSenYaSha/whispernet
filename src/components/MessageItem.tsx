@@ -7,10 +7,12 @@ import { Avatar } from './Avatar';
 import { ReportModal } from './ReportModal';
 import { useEscapeKey } from '../useEscapeKey';
 import { parseMediaTag } from '../media-crypto';
+import { hasReadUpTo } from '../presence';
+import { EMOJI_GROUPS, QUICK_EMOJI } from '../emojis';
 import { mediaProxyUrl } from '../upload';
 
-function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15px]', animate = false }: { message: Message; showAvatar?: boolean; fontSizeClass?: string; animate?: boolean }) {
-  const { state, deleteMessage: deleteMsg, addReaction, removeReaction, setEditing, decryptMedia, retainMedia, releaseMedia, setReply, openProfile, t } = useConnection();
+function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15px]', animate = false, isPinned = false, channel }: { message: Message; showAvatar?: boolean; fontSizeClass?: string; animate?: boolean; isPinned?: boolean; channel?: string }) {
+  const { state, deleteMessage: deleteMsg, addReaction, removeReaction, setEditing, decryptMedia, retainMedia, releaseMedia, setReply, openProfile, copyMessageText, forwardMessage, togglePin, jumpTo, t } = useConnection();
   const isSystem = message.senderId === 'system';
   const isOwn = message.isOwn;
 
@@ -19,7 +21,21 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
   const [mediaFailed, setMediaFailed] = useState(false);
   const [reportOpen, setReportOpen] = useState(false);
   const [lightbox, setLightbox] = useState<{ url: string; isVideo: boolean } | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [emojiOpen, setEmojiOpen] = useState(false);
+  const [emojiGroup, setEmojiGroup] = useState(EMOJI_GROUPS[0].key);
+  const [forwardOpen, setForwardOpen] = useState(false);
+  const [forwardNotice, setForwardNotice] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
   const reactionPickerRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+  const activeChannel = channel || message.channel || 'general';
+
+  const flash = (text: string) => {
+    setToast(text);
+    setTimeout(() => setToast((cur) => (cur === text ? null : cur)), 1600);
+  };
+
   // one clock for every bubble: each of them computed its countdown from its own render, so a
   // "24h" label froze at whatever it showed when the message arrived
   const [now, setNow] = useState(() => Date.now());
@@ -49,6 +65,9 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
       if (reactionPickerRef.current && !reactionPickerRef.current.contains(e.target as Node)) {
         setShowReactions(false);
       }
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
     };
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
@@ -64,6 +83,9 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
   const isMedia = mediaTag !== null;
   // authorship decides the controls; sealed sender only decides where a correction is kept
   const controls = messageControls(message, isMedia);
+  // How far the other end has said it has read. The server keeps no record of this, so it is exactly
+  // what it told us: one of their devices looked.
+  const readByPeer = isOwn && !!message.channel && hasReadUpTo(state.readUpTo, message.channel, message.timestamp);
 
   useEffect(() => {
     let cancelled = false;
@@ -207,33 +229,122 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
             })()}
           </div>
 
-          {showReactions && (
+          {menuOpen && (
             <div
-              ref={reactionPickerRef}
-              className={`absolute bottom-full mb-2 p-2 bg-bg-secondary rounded-xl border border-border-default shadow-lg flex gap-1 z-10 ${isOwn ? 'right-0' : 'left-0'}`}
-              role="dialog"
+              className="absolute top-full mt-1 z-20 min-w-[190px] rounded-xl bg-bg-secondary border border-border-default shadow-lg py-1 overflow-hidden"
+              role="menu"
             >
-              {['👍', '👎', '❤️', '😂', '😮', '😢', '🎉', '🔥'].map(emoji => (
-                <button
-                  key={emoji}
-                  onClick={() => {
-                    const reactions = message.reactions || {};
-                    const hasReacted = (reactions[emoji] || []).includes(state.userId || '');
-                    if (hasReacted) removeReaction(message.id, emoji);
-                    else addReaction(message.id, emoji);
-                    setShowReactions(false);
-                  }}
-                  className={`p-1.5 rounded-full text-xl transition-transform hover:scale-110 ${
-                    (message.reactions?.[emoji] || []).includes(state.userId || '') ? 'ring-2 ring-accent-primary' : ''
-                  }`}
-                >
-                  {emoji}
-                </button>
-              ))}
+              <MenuItem
+                label={t('copy_text')}
+                onClick={async () => { setMenuOpen(false); flash(await copyMessageText(message.text) ? t('copied') : t('copy_failed')); }}
+              />
+              <MenuItem
+                label={t('forward')}
+                onClick={() => { setMenuOpen(false); setForwardOpen(true); }}
+              />
+              <MenuItem
+                label={isPinned ? t('unpin') : t('pin')}
+                onClick={() => { setMenuOpen(false); togglePin(message.id, activeChannel); }}
+              />
+              {controls.edit && (
+                <MenuItem label={t('edit_message')} onClick={() => { setMenuOpen(false); setEditing(message); }} />
+              )}
+              {controls.remove && (
+                <MenuItem label={t('delete')} danger onClick={() => { setMenuOpen(false); deleteMsg(message.id); }} />
+              )}
             </div>
           )}
 
-          <div className="flex items-center gap-0.5 mt-1.5 px-1">
+          {toast && (
+            <span className="absolute top-full right-0 mt-1 z-20 px-2.5 py-1 rounded-lg bg-fg-primary text-bg-primary text-[11px] font-medium shadow-lg">
+              {toast}
+            </span>
+          )}
+
+          {showReactions && (
+            <div
+              ref={reactionPickerRef}
+              className={cn('absolute bottom-full mb-2 z-30 rounded-2xl bg-bg-secondary border border-border-default shadow-lg', isOwn ? 'right-0' : 'left-0')}
+              role="dialog"
+              aria-label={t('reactions')}
+            >
+              {/* the quick strip: a single tap reacts without opening anything */}
+              <div className="flex gap-0.5 p-1.5">
+                {QUICK_EMOJI.map((emoji) => (
+                  <button
+                    key={emoji}
+                    onClick={() => {
+                      const already = (message.reactions?.[emoji] || []).includes(state.userId || '');
+                      if (already) removeReaction(message.id, emoji);
+                      else addReaction(message.id, emoji);
+                      setShowReactions(false);
+                    }}
+                    className={cn(
+                      'p-1.5 rounded-full text-xl transition-transform hover:scale-110',
+                      (message.reactions?.[emoji] || []).includes(state.userId || '') && 'ring-2 ring-accent-primary',
+                    )}
+                  >
+                    {emoji}
+                  </button>
+                ))}
+                <span className="w-px bg-border-default mx-0.5 my-1 flex-shrink-0" />
+                <button
+                  onClick={() => setEmojiOpen((v) => !v)}
+                  className={cn('p-1.5 rounded-full text-lg transition-colors hover:bg-bg-tertiary', emojiOpen && 'bg-accent-primary/15 text-accent-primary')}
+                  aria-label={t('emoji_more')}
+                >
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                    <circle cx="12" cy="12" r="9" /><path d="M8.5 14.5s1.3 1.8 3.5 1.8 3.5-1.8 3.5-1.8" /><circle cx="9" cy="10" r=".8" fill="currentColor" /><circle cx="15" cy="10" r=".8" fill="currentColor" />
+                  </svg>
+                </button>
+              </div>
+
+              {emojiOpen && (
+                <div className="w-[248px] border-t border-border-default">
+                  <div className="flex gap-1 px-2 pt-2 pb-1 overflow-x-auto">
+                    {EMOJI_GROUPS.map((g) => (
+                      <button
+                        key={g.key}
+                        onClick={() => setEmojiGroup(g.key)}
+                        className={cn('px-1.5 py-0.5 rounded-md text-[10px] font-bold whitespace-nowrap transition-colors',
+                          emojiGroup === g.key ? 'bg-accent-primary/15 text-accent-primary' : 'text-fg-muted hover:bg-bg-tertiary')}
+                      >
+                        {t(g.labelKey)}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-8 gap-0.5 p-2 max-h-[168px] overflow-y-auto">
+                    {(EMOJI_GROUPS.find((g) => g.key === emojiGroup) || EMOJI_GROUPS[0]).emojis.map((emoji) => (
+                      <button
+                        key={emoji}
+                        onClick={() => { addReaction(message.id, emoji); setShowReactions(false); setEmojiOpen(false); }}
+                        className="p-1 rounded-lg text-xl hover:bg-bg-tertiary transition-transform hover:scale-110"
+                      >
+                        {emoji}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="flex items-center gap-0.5 mt-1.5 px-1" ref={menuRef}>
+            {isPinned && (
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-accent-primary flex-shrink-0 -ml-0.5" aria-label={t('pinned')}>
+                <path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
+              </svg>
+            )}
+            {message.quotedMessageId && (
+              <button
+                onClick={() => jumpTo(message.quotedMessageId!)}
+                className="p-1.5 -ml-1.5 rounded-full text-fg-muted hover:text-fg-primary hover:bg-bg-tertiary transition-colors"
+                title={t('jump_to_quoted')} aria-label={t('jump_to_quoted')}>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="9 10 4 15 9 20" /><path d="M20 4v7a4 4 0 0 1-4 4H4" />
+                </svg>
+              </button>
+            )}
             <button
               onClick={() => {
                 const quoteText = mediaTag
@@ -288,10 +399,38 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
                 </svg>
               </button>
             )}
+            {!isMedia && (
+              <button
+                onClick={() => setMenuOpen((v) => !v)}
+                className="p-1.5 rounded-full text-fg-muted hover:text-fg-primary hover:bg-bg-tertiary transition-colors"
+                title={t('more_actions')} aria-label={t('more_actions')} aria-haspopup="menu" aria-expanded={menuOpen}>
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+                  <circle cx="12" cy="5" r="1" /><circle cx="12" cy="12" r="1" /><circle cx="12" cy="19" r="1" />
+                </svg>
+              </button>
+            )}
             <span className="text-[11px] text-fg-muted ml-auto">
               {formatTime(message.timestamp)}
               {message.editedAt && (
                 <span className="ml-1.5 text-fg-muted/80">• {t('edited')}</span>
+              )}
+              {isOwn && message.channel && message.channel !== 'general' && (
+                <span
+                  className={cn('ml-1 inline-flex items-center', readByPeer ? 'text-accent-primary' : 'text-fg-muted/70')}
+                  title={readByPeer ? t('read') : t('delivered')}
+                  aria-label={readByPeer ? t('read') : t('delivered')}
+                >
+                  {readByPeer ? (
+                    <svg width="15" height="11" viewBox="0 0 20 12" fill="none" aria-hidden="true">
+                      <path d="M1 6.5l3.2 3.2L10 4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                      <path d="M8 6.5l3.2 3.2L19 2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  ) : (
+                    <svg width="13" height="11" viewBox="0 0 14 12" fill="none" aria-hidden="true">
+                      <path d="M1 6.5l3.2 3.2L12 2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                    </svg>
+                  )}
+                </span>
               )}
               {expiresIn && (
                 <span className={`ml-1.5 text-[10px] font-mono ${expiresIn === 'expired' ? 'text-status-error' : 'text-accent-primary'}`}>
@@ -327,6 +466,26 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
         onClose={() => setReportOpen(false)}
       />
     )}
+    {forwardNotice && (
+      <div className="px-3 py-2 rounded-xl bg-status-warning/10 border border-status-warning/30 text-status-warning text-[12px] leading-relaxed">
+        {forwardNotice}
+      </div>
+    )}
+    {forwardOpen && (
+      <ForwardPicker
+        onClose={() => { setForwardOpen(false); setForwardNotice(null); }}
+        onPick={async (to) => {
+          setForwardOpen(false);
+          try {
+            await forwardMessage(message.id, to);
+          } catch (e) {
+            // An attachment cannot be forwarded as it stands - its key stayed in the conversation it was
+            // sent to. Saying so beats a message that arrives as an image nobody can open.
+            if ((e as Error)?.message === 'forward_media_unsupported') setForwardNotice(t('forward_media_unsupported'));
+          }
+        }}
+      />
+    )}
     {lightbox && createPortal(
       <div className="fixed inset-0 z-[100] bg-black/90 flex items-center justify-center p-4" onClick={() => setLightbox(null)} role="dialog" aria-modal="true"
         style={{ animation: 'fadeIn 0.15s ease-out' }}>
@@ -345,6 +504,90 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
       document.body
     )}
     </>
+  );
+}
+
+function MenuItem({ label, onClick, danger }: { label: string; onClick: () => void; danger?: boolean }) {
+  return (
+    <button
+      onClick={onClick}
+      role="menuitem"
+      className={cn(
+        'w-full text-left px-3 py-2 text-[13px] transition-colors',
+        danger ? 'text-status-error hover:bg-status-error/10' : 'text-fg-primary hover:bg-bg-tertiary',
+      )}
+    >
+      {label}
+    </button>
+  );
+}
+
+/**
+ * Where to forward to.
+ *
+ * The conversations this account already has, plus the public chat. Forwarding is a new message under the
+ * sender's own name rather than a pointer to the original, which is what it has to be once the original
+ * can be deleted by somebody else - so it goes through the ordinary send path and is encrypted like any
+ * other message of its own.
+ */
+function ForwardPicker({ onClose, onPick }: { onClose: () => void; onPick: (to: string) => void }) {
+  const { state, t } = useConnection();
+  const [query, setQuery] = useState('');
+  const contacts = state.contacts.filter((c) =>
+    !query.trim() || c.nickname.toLowerCase().includes(query.trim().toLowerCase())
+  );
+
+  return createPortal(
+    <div className="fixed inset-0 z-[95] flex items-center justify-center p-4" onClick={onClose} role="dialog" aria-modal="true" aria-label={t('forward')}>
+      <div className="absolute inset-0 bg-black/50" aria-hidden="true" />
+      <div
+        className="relative bg-bg-secondary border border-border-default rounded-2xl shadow-2xl w-full max-w-sm max-h-[70vh] flex flex-col overflow-hidden"
+        onClick={(e) => e.stopPropagation()}
+        style={{ animation: 'scaleIn 0.2s cubic-bezier(0.22, 1, 0.36, 1)' }}
+      >
+        <div className="px-4 py-3 border-b border-border-default flex items-center gap-3">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-fg-muted flex-shrink-0">
+            <polyline points="17 1 21 5 17 9" /><path d="M3 11V9a4 4 0 0 1 4-4h14" /><polyline points="7 23 3 19 7 15" /><path d="M21 13v2a4 4 0 0 1-4 4H3" />
+          </svg>
+          <input
+            autoFocus
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder={t('forward_to')}
+            className="flex-1 bg-transparent text-[14px] text-fg-primary placeholder:text-fg-muted focus:outline-none"
+            aria-label={t('forward_to')}
+          />
+        </div>
+        <div className="overflow-y-auto py-1">
+          <button
+            onClick={() => onPick('general')}
+            className="w-full flex items-center gap-3 px-4 py-2.5 text-left text-[14px] text-fg-primary hover:bg-bg-tertiary transition-colors"
+          >
+            <div className="w-8 h-8 rounded-xl bg-accent-primary/20 flex items-center justify-center flex-shrink-0">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-accent-primary))" strokeWidth="2">
+                <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+              </svg>
+            </div>
+            {t('global_chat')}
+          </button>
+          {contacts.map((c) => (
+            <button
+              key={c.id}
+              onClick={() => onPick(c.id)}
+              className="w-full flex items-center gap-3 px-4 py-2.5 text-left text-[14px] text-fg-primary hover:bg-bg-tertiary transition-colors"
+            >
+              <Avatar userId={c.id} nickname={c.nickname} avatar={state.avatars[c.id]} className="w-8 h-8 rounded-xl" textClassName="text-[11px]" />
+              <span className="truncate">@{c.nickname}</span>
+            </button>
+          ))}
+          {contacts.length === 0 && (
+            <p className="px-4 py-4 text-center text-[13px] text-fg-muted">{t('no_chats')}</p>
+          )}
+        </div>
+      </div>
+    </div>,
+    document.body
   );
 }
 

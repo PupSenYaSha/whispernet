@@ -128,16 +128,26 @@ export function createApp(clientDir?: string) {
   app.addHook('onRequest', async (req, reply) => {
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('X-Frame-Options', 'DENY');
-    reply.header('X-XSS-Protection', '1; mode=block');
-    reply.header('Referrer-Policy', 'strict-origin-when-cross-origin');
-    reply.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-    reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    // X-XSS-Protection is deliberately absent. It has been deprecated for years, every modern browser
+    // ignores it, and the filter it used to switch on has itself been a source of vulnerabilities.
+    reply.header('Referrer-Policy', 'no-referrer');
+    reply.header('Permissions-Policy', 'camera=(), microphone=(), geolocation=(), payment=(), usb=(), interest-cohort=()');
+    reply.header('Cross-Origin-Opener-Policy', 'same-origin');
+    reply.header('Cross-Origin-Resource-Policy', 'same-site');
+    if (req.protocol === 'https' || req.headers['x-forwarded-proto'] === 'https') {
+      reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+    }
     const host = req.headers.host || 'localhost';
     // the policy is built from a host the client chose, so only a plain host:port may go in -
     // anything else could carry extra directives into the header
     const configured = (process.env.PUBLIC_HOST || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
     const cspHost = SAFE_HOST_RE.test(configured) ? configured : (SAFE_HOST_RE.test(host) ? host : 'localhost');
-    reply.header('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://${mediaHost} http://${mediaHost}; media-src 'self' blob: https://${mediaHost} http://${mediaHost}; connect-src 'self' wss://${cspHost} ws://${cspHost}; font-src 'self' https://fonts.gstatic.com`);
+    // The websocket scheme follows the one the page itself arrived on. Listing `ws:` unconditionally left
+    // a plaintext socket permitted on an encrypted deployment, which is one misdirected request away
+    // from being used.
+    const secure = req.protocol === 'https' || req.headers['x-forwarded-proto'] === 'https';
+    const wsScheme = secure ? 'wss:' : 'ws:';
+    reply.header('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://${mediaHost} http://${mediaHost}; media-src 'self' blob: https://${mediaHost} http://${mediaHost}; connect-src 'self' ${wsScheme}//${cspHost}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'; font-src 'self'`);
     const origin = req.headers.origin;
     if (origin) {
       let allowedHost = '';
@@ -200,6 +210,71 @@ export function createApp(clientDir?: string) {
       .send(buf);
   });
 
+  /**
+   * Streams a stored attachment out.
+   *
+   * It used to be read whole into a buffer and handed over with `send`. The ceiling on an attachment is
+   * a gigabyte, this route needs no token - reading stays open, because an <img> cannot carry one - so a
+   * single unauthenticated request was enough to make the process allocate a gigabyte. It goes out in
+   * chunks now, and a Range header is honoured so seeking in a video does not restart from the
+   * beginning, which is what makes a <video> element usable at all.
+   */
+  async function streamStoredMedia(req: any, reply: any, fp: string): Promise<any> {
+    let stat: fs.Stats;
+    try {
+      stat = await fs.promises.stat(fp);
+      if (!stat.isFile()) return reply.code(404).send({ error: 'Not found' });
+    } catch {
+      return reply.code(404).send({ error: 'Not found' });
+    }
+
+    const size = stat.size;
+    const range = typeof req.headers?.range === 'string' ? req.headers.range : '';
+    const match = /^bytes=(\d*)-(\d*)$/.exec(range.trim());
+
+    // The range is settled before the content type is set. Once it has been, fastify no longer
+    // serialises an object for this reply, and a refusal sent as `{error: ...}` comes back as a 500
+    // about an invalid payload rather than the status that was meant.
+    let start = 0;
+    let end = size - 1;
+    let partial = false;
+    if (match && (match[1] || match[2])) {
+      if (match[1] === '') {
+        // a suffix range: the last N bytes
+        const suffix = Number(match[2]);
+        if (!Number.isFinite(suffix) || suffix <= 0) {
+          reply.header('Content-Range', `bytes */${size}`);
+          return reply.code(416).type('text/plain').send('Range not satisfiable');
+        }
+        start = Math.max(0, size - suffix);
+      } else {
+        start = Number(match[1]);
+        end = match[2] === '' ? size - 1 : Number(match[2]);
+      }
+      if (!Number.isFinite(start) || !Number.isFinite(end) || start > end || start >= size) {
+        reply.header('Content-Range', `bytes */${size}`);
+        return reply.code(416).type('text/plain').send('Range not satisfiable');
+      }
+      if (end >= size) end = size - 1;
+      partial = true;
+    }
+
+    reply.header('Content-Type', 'application/octet-stream');
+    reply.header('Accept-Ranges', 'bytes');
+    reply.header('Cache-Control', 'public, max-age=86400');
+    reply.header('X-Content-Type-Options', 'nosniff');
+
+    if (partial) {
+      reply.code(206);
+      reply.header('Content-Range', `bytes ${start}-${end}/${size}`);
+      reply.header('Content-Length', String(end - start + 1));
+      return reply.send(fs.createReadStream(fp, { start, end }));
+    }
+
+    reply.header('Content-Length', String(size));
+    return reply.send(fs.createReadStream(fp));
+  }
+
   app.get('/api/media', async (req, reply) => {
     if (!checkMediaRate(resolveUploadRateKey(req))) {
       return reply.code(429).send({ error: 'Rate limit' });
@@ -212,11 +287,7 @@ export function createApp(clientDir?: string) {
       if (!/^[a-f0-9]{32}$/.test(id)) return reply.code(400).send({ error: 'Invalid media id' });
       const fp = path.join(getMediaDir(), id);
       if (!existsSync(fp)) return reply.code(404).send({ error: 'Not found' });
-      const buf = await fs.promises.readFile(fp);
-      return reply
-        .header('Content-Type', 'application/octet-stream')
-        .header('Cache-Control', 'public, max-age=86400')
-        .send(buf);
+      return streamStoredMedia(req, reply, fp);
     }
 
     let parsed: URL;

@@ -89,6 +89,55 @@ describe('correcting a private message', () => {
     expect(onSecond.payload.encrypted.ciphertext).toBe('third-body');
   });
 
+  it('takes a per-device correction, and hands each device only its own body', async () => {
+    // A correction is sealed like any other message: one body per device of both accounts. Broadcasting
+    // the whole fan-out instead would tell a phone what was sent to a laptop, in bytes it can only fail
+    // to open.
+    const phone = await client('ed-fan-phone');
+    clients.push(phone);
+    const phoneReg = await phone.login(bobNick, { deviceId: 'ed-fan-phone' });
+    expect(phoneReg.type).toBe('auth_success');
+
+    const fanOut = {
+      kind: 'devices',
+      bodies: [
+        { deviceId: 'ed-fan-phone', body: { ciphertext: 'for-the-phone', ratchetPublicKey: 'rk', messageNumber: 0 } },
+        { deviceId: 'ed-b-2', body: { ciphertext: 'for-the-laptop', ratchetPublicKey: 'rk', messageNumber: 0 } },
+      ],
+    };
+
+    dm(alice, bobId, fanOut);
+    const delivered = await phone.waitFor('dm_message', 5000);
+    const editedId = delivered.payload.id;
+
+    phone.clear();
+    alice.clear();
+    alice.send('edit_message', { messageId: editedId, encrypted: fanOut });
+
+    const onPhone = await phone.waitFor('message_edited', 5000);
+    expect(onPhone.payload.encrypted.ciphertext).toBe('for-the-phone');
+    // and not the other one, which is the whole point
+    expect(JSON.stringify(onPhone.payload)).not.toContain('for-the-laptop');
+
+    // history is filtered the same way, or a reload would hand it every device's copy
+    phone.clear();
+    phone.send('dm_history', { with: aliceId });
+    const hist = await phone.waitFor('dm_history', 5000);
+    const row = hist.payload.messages.find((m: any) => m.id === editedId);
+    expect(row.encrypted.ciphertext).toBe('for-the-phone');
+    expect(JSON.stringify(hist.payload)).not.toContain('for-the-laptop');
+  });
+
+  it('refuses a correction that is not a body it could have been sent', async () => {
+    alice.clear();
+    alice.send('edit_message', {
+      messageId: sentId,
+      encrypted: { kind: 'devices', bodies: [] },
+    });
+    const err = await alice.waitFor('error', 4000);
+    expect(err.payload.code).toBe('INVALID_PAYLOAD');
+  });
+
   it('refuses somebody who did not write it', async () => {
     bob.clear();
     bob.send('edit_message', { messageId: sentId, encrypted: { ciphertext: 'hijacked', iv: 'iv3', encryptedKeys: { [aliceId]: 'k3' } } });

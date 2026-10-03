@@ -74,7 +74,9 @@ function ensureSchema(): void {
       banned_at INTEGER,
       blocked TEXT NOT NULL DEFAULT '[]',
       avatar_ext TEXT,
-      avatar_updated_at INTEGER
+      avatar_updated_at INTEGER,
+      /** The account-level identity key a safety number is computed from. See setIdentityKeyB64. */
+      identity_key TEXT
     );
     CREATE TABLE IF NOT EXISTS messages (
       id TEXT PRIMARY KEY,
@@ -134,14 +136,22 @@ function ensureSchema(): void {
     );
     /**
      * The published key material a sender needs to open a ratchet with somebody it has never spoken to.
-     * One row per account, overwritten whenever the client rotates: the identity key lasts as long as
-     * the account, the signed prekey is rotated on a schedule, and the one-time prekeys inside it are
-     * consumed so a single bundle cannot be replayed.
+     *
+     * One row per **device**, not per account. That distinction is the whole multi-device story: every
+     * device has its own identity key and its own signed prekey, so a sender builds a separate session
+     * with each and seals a separate body for each. Keyed on the account alone, the second device to
+     * sign in would overwrite the first one's bundle and every message would reach only whichever
+     * device happened to upload last.
+     *
+     * Within a row the identity key lasts as long as the device, the signed prekey is rotated on a
+     * schedule, and the one-time prekeys inside it are consumed so a single bundle cannot be replayed.
      */
     CREATE TABLE IF NOT EXISTS prekeys (
-      user_id TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      device_id TEXT NOT NULL,
       bundle TEXT NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (user_id, device_id)
     );
     CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
@@ -156,7 +166,7 @@ function ensureSchema(): void {
     CREATE INDEX IF NOT EXISTS idx_messages_channel_time ON messages(channel, timestamp);
 `);
 
-  for (const col of ['avatar_ext TEXT', 'avatar_updated_at INTEGER', 'banned_at INTEGER']) {
+  for (const col of ['avatar_ext TEXT', 'avatar_updated_at INTEGER', 'banned_at INTEGER', 'identity_key TEXT']) {
     try {
       d.exec(`ALTER TABLE users ADD COLUMN ${col}`);
     } catch {}
@@ -195,7 +205,37 @@ function ensureSchema(): void {
 
   try { d.exec('ALTER TABLE users DROP COLUMN sealed_key'); } catch {}
 
-  
+  // Prekeys move from one row per account to one row per device.
+  //
+  // The old key cannot simply be left in place: keyed on the account alone, a second device signing in
+  // overwrites the first device's bundle, and every sender then builds its session against material
+  // that device no longer holds. So the rows are rebuilt under the new key, and the one device that was
+  // using the old row keeps its identity key - which means it keeps every conversation already pinned
+  // to it, the only outcome that does not sign people out of their own history. It republishes under its
+  // own device id on the next sign-in, which replaces the placeholder row cleanly.
+  const prekeyCols = (d.prepare('PRAGMA table_info(prekeys)').all() as any[]).map((c) => c.name);
+  if (!prekeyCols.includes('device_id')) {
+    try {
+      const legacy = d.prepare('SELECT user_id, bundle, created_at FROM prekeys').all() as any[];
+      d.exec('ALTER TABLE prekeys RENAME TO prekeys_legacy');
+      d.exec(`CREATE TABLE prekeys (
+        user_id TEXT NOT NULL,
+        device_id TEXT NOT NULL,
+        bundle TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (user_id, device_id)
+      )`);
+      const insert = d.prepare('INSERT OR REPLACE INTO prekeys (user_id, device_id, bundle, created_at) VALUES (?, ?, ?, ?)');
+      for (const row of legacy) {
+        const device = (parseJson(row.bundle, null) as any)?.deviceId;
+        insert.run(row.user_id, typeof device === 'string' && device ? device : 'legacy', row.bundle, row.created_at);
+      }
+      d.exec('DROP TABLE prekeys_legacy');
+    } catch (e) {
+      console.warn('[db] could not move prekeys to per-device rows:', e);
+    }
+  }
+
   try {
     d.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS ${FTS_TABLE} USING fts5(text, content='');`);
     ftsAvailable = true;
@@ -541,41 +581,73 @@ export async function updatePublicKey(userId: string, publicKey: any): Promise<v
 }
 
 /**
- * Stores the bundle a sender needs to start a ratchet: identity key, signed prekey and a handful of
- * one-time prekeys. It is public material by design - it is what lets a stranger open a conversation -
- * and it is replaced wholesale whenever the client rotates.
+ * Stores one device's bundle: its identity key, signed prekey and a handful of one-time prekeys.
+ *
+ * Public material by design - it is what lets a stranger open a conversation - and replaced wholesale
+ * whenever that device rotates. Keyed on the device as well as the account, so a second device signing
+ * in does not overwrite the first one's material: a sender builds a session with each and seals a
+ * separate body for each, which is what makes a message readable on a phone and a laptop at once
+ * without any of them sharing key material.
  */
-export async function setPreKeyBundle(userId: string, bundle: any): Promise<void> {
-  getDb().prepare('INSERT INTO prekeys (user_id, bundle, created_at) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET bundle = excluded.bundle, created_at = excluded.created_at')
-    .run(userId, json(bundle), Date.now());
+export async function setPreKeyBundle(userId: string, deviceId: string, bundle: any): Promise<void> {
+  getDb().prepare('INSERT INTO prekeys (user_id, device_id, bundle, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(user_id, device_id) DO UPDATE SET bundle = excluded.bundle, created_at = excluded.created_at')
+    .run(userId, deviceId, json(bundle), Date.now());
 }
 
+/**
+ * Every bundle one account has published, one per device.
+ *
+ * The freshest row per device is what a sender wants, and since a device overwrites its own row on
+ * every upload there is only ever one row per device to begin with.
+ */
+export async function getPreKeyBundlesByIds(ids: string[]): Promise<Record<string, { deviceId: string; bundle: any }[]>> {
+  const out: Record<string, { deviceId: string; bundle: any }[]> = {};
+  if (ids.length === 0) return out;
+  const placeholders = ids.map(() => '?').join(',');
+  const rows = getDb()
+    .prepare(`SELECT user_id as userId, device_id as deviceId, bundle, created_at FROM prekeys WHERE user_id IN (${placeholders}) ORDER BY created_at ASC`)
+    .all(...ids) as any[];
+  for (const r of rows) {
+    const bundle = parseJson(r.bundle, null);
+    if (!bundle) continue;
+    (out[r.userId] ||= []).push({ deviceId: r.deviceId, bundle });
+  }
+  return out;
+}
+
+/** The freshest bundle for an account, which is what a caller with a single device in mind wants. */
 export async function getPreKeyBundle(userId: string): Promise<any | null> {
-  const row = getDb().prepare('SELECT bundle FROM prekeys WHERE user_id = ?').get(userId) as any;
+  const row = getDb().prepare('SELECT bundle FROM prekeys WHERE user_id = ? ORDER BY created_at DESC LIMIT 1').get(userId) as any;
   return row ? parseJson(row.bundle, null) : null;
 }
 
 /**
- * The identity key on its own, which is what a safety number is computed from.
+ * The account's own long-lived identity key, which is what a safety number is computed from.
  *
- * Key verification needs only the long-lived half of the bundle: a number both people can read aloud
- * and compare is a check that the keys in play are the ones they think they are, and a server that
- * quietly swapped them would have to swap this one too.
+ * Deliberately separate from the per-device bundles above. A safety number has to be the same on every
+ * device the account owns, or comparing it would mean comparing a different number per device and
+ * proving nothing; so the number comes from one account-level key while the ratchet keys stay per
+ * device. This is also the key a server would have to substitute to make two people read the same
+ * wrong number, which is exactly why it is worth reading aloud.
  */
 export async function getIdentityKeyB64(userId: string): Promise<string | null> {
-  const bundle = await getPreKeyBundle(userId);
-  const idKey = bundle?.identityKey;
-  return typeof idKey === 'string' && idKey.length > 0 ? idKey : null;
+  const row = getDb().prepare('SELECT identity_key FROM users WHERE id = ?').get(userId) as any;
+  const key = row?.identity_key;
+  return typeof key === 'string' && key.length > 0 ? key : null;
 }
 
-export async function getPreKeyBundlesByIds(ids: string[]): Promise<Record<string, any>> {
-  const out: Record<string, any> = {};
+export async function setIdentityKeyB64(userId: string, identityKey: string): Promise<void> {
+  getDb().prepare('UPDATE users SET identity_key = ? WHERE id = ?').run(identityKey, userId);
+}
+
+/** Account-level identity keys for a set of accounts, for safety numbers. */
+export async function getIdentityKeysByIds(ids: string[]): Promise<Record<string, string>> {
+  const out: Record<string, string> = {};
   if (ids.length === 0) return out;
   const placeholders = ids.map(() => '?').join(',');
-  const rows = getDb().prepare(`SELECT user_id as userId, bundle FROM prekeys WHERE user_id IN (${placeholders})`).all(...ids) as any[];
+  const rows = getDb().prepare(`SELECT id, identity_key FROM users WHERE id IN (${placeholders})`).all(...ids) as any[];
   for (const r of rows) {
-    const bundle = parseJson(r.bundle, null);
-    if (bundle) out[r.userId] = bundle;
+    if (typeof r.identity_key === 'string' && r.identity_key.length > 0) out[r.id] = r.identity_key;
   }
   return out;
 }
@@ -631,6 +703,20 @@ function rowToMessage(row: any, includeText: boolean = true): any {
     editedAt: row.editedAt || undefined,
     expiresAt: row.expiresAt || undefined,
   };
+}
+
+/**
+ * The bodies a sender sealed for one conversation, one per device.
+ *
+ * Each is a complete ratchet body for a specific device, so the server is holding N copies of one message
+ * and can open none of them - it does not know which device is which beyond the label the sender chose,
+ * and the label is not what opens a body. A sender whose recipient has one device sends one body, which
+ * is the ordinary case and exactly what it sent before.
+ */
+export interface DeviceBody {
+  /** The device this body is for, as the recipient's own bundle was labelled. */
+  deviceId: string;
+  body: any;
 }
 
 export async function saveMessage(

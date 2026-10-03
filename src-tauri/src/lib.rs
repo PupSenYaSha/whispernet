@@ -208,7 +208,16 @@ fn supervisor(app: tauri::AppHandle) {
 const POLL_JS: &str = r##"(function(){
   if(!window.__wnDesktop) window.__wnDesktop = true;
   var prot = false;
-  try { prot = !!localStorage.getItem('wn_screenshot_prot'); } catch(e) {}
+  try {
+    // The setting moved into wn_settings when the rest of the preferences were tidied up; the old key
+    // is still consulted so a desktop shell talking to an older build still protects the window.
+    var raw = localStorage.getItem('wn_settings');
+    if (raw) {
+      var parsed = JSON.parse(raw);
+      if (parsed && typeof parsed.screenshotProtection === 'boolean') prot = parsed.screenshotProtection;
+    }
+    if (!prot && localStorage.getItem('wn_screenshot_prot')) prot = true;
+  } catch(e) {}
   return JSON.stringify({ title: document.title, prot: prot });
 })()"##;
 
@@ -383,32 +392,56 @@ fn fetch_text(url: &str) -> Result<String, String> {
         .map_err(|e| format!("read text: {}", e))
 }
 
-fn verify_update(app: &tauri::AppHandle, release: &Release, zip_path: &Path) -> Result<(), String> {
-    let digest_asset = release
-        .assets
-        .iter()
-        .find(|a| a.name.ends_with(".sha256"));
-    match digest_asset {
-        Some(asset) => {
-            let text = fetch_text(&asset.browser_download_url)?;
-            let captured = regex_capture_hex(&text);
-            let expected = captured.unwrap_or_default().to_lowercase();
-            if expected.is_empty() {
-                log_msg(app, "digest asset unparseable; skipping verification");
-                return Ok(());
-            }
-            let actual = sha256_file(zip_path)?;
-            if expected != actual {
-                return Err("update integrity check failed (SHA-256 mismatch)".into());
-            }
-            log_msg(app, &format!("SHA-256 verified: {}", &actual[..12]));
-            Ok(())
+/// Whether this build accepts an update it cannot check.
+///
+/// Off by default, and the reason it exists at all is that the check below is a plain digest fetched
+/// from the same place as the payload. That catches a corrupted download and a mirror serving something
+/// stale. It does not catch whoever controls the release - for that the payload has to be signed, and
+/// nothing here holds a key. Turning this on is a statement that you are willing to install a build you
+/// cannot verify, so it has to be said out loud rather than assumed.
+fn unverified_updates_allowed() -> bool {
+    matches!(
+        std::env::var("ALLOW_UNVERIFIED_UPDATES").unwrap_or_default().as_str(),
+        "1" | "true" | "yes"
+    )
+}
+
+fn verify_update(app: &tauri::AppHandle, release: &Release, zip_path: &Path, zip_name: &str) -> Result<(), String> {
+    // The digest has to be the one published for this exact file. Matching "any asset ending in
+    // .sha256" would accept a digest belonging to a different artefact in the same release.
+    let expected_name = format!("{}.sha256", zip_name);
+    let digest_asset = release.assets.iter().find(|a| a.name == expected_name);
+
+    let Some(asset) = digest_asset else {
+        log_msg(app, &format!("no {} published; refusing to install", expected_name));
+        if unverified_updates_allowed() {
+            log_msg(app, "ALLOW_UNVERIFIED_UPDATES is set; installing anyway");
+            return Ok(());
         }
-        None => {
-            log_msg(app, "no .sha256 digest asset; skipping verification");
-            Ok(())
+        return Err(format!(
+            "update refused: the release publishes no {} to check the download against",
+            expected_name
+        ));
+    };
+
+    let text = fetch_text(&asset.browser_download_url)?;
+    let Some(captured) = regex_capture_hex(&text) else {
+        log_msg(app, "digest asset unparseable; refusing to install");
+        if unverified_updates_allowed() {
+            log_msg(app, "ALLOW_UNVERIFIED_UPDATES is set; installing anyway");
+            return Ok(());
         }
+        return Err("update refused: the published digest could not be read".into());
+    };
+
+    let expected = captured.to_lowercase();
+    let actual = sha256_file(zip_path)?;
+    if expected != actual {
+        log_msg(app, "SHA-256 mismatch; refusing to install");
+        return Err("update integrity check failed (SHA-256 mismatch)".into());
     }
+    log_msg(app, &format!("SHA-256 verified: {}", &actual[..12]));
+    Ok(())
 }
 
 fn regex_capture_hex(text: &str) -> Option<String> {
@@ -482,8 +515,7 @@ fn apply_and_restart(app: &tauri::AppHandle, update_dir: &Path) {
     let Some(_) = current.parent() else {
         log_msg(app, "apply: cannot resolve app dir");
         return;
-    };
-    let Some(exe_name) = current.file_name() else {
+    };    let Some(exe_name) = current.file_name() else {
         log_msg(app, "apply: cannot resolve exe name");
         return;
     };
@@ -541,6 +573,7 @@ fn updater(app: tauri::AppHandle) {
         log_msg(&app, "No zip asset");
         return;
     };
+    let zip_name = asset.name.clone();
     log_msg(&app, &format!("Update: {}", latest));
     push_update(
         &app,
@@ -568,7 +601,7 @@ fn updater(app: tauri::AppHandle) {
         return;
     }
     log_msg(&app, "Downloaded");
-    if let Err(e) = verify_update(&app, &release, &zip_path) {
+    if let Err(e) = verify_update(&app, &release, &zip_path, &zip_name) {
         log_msg(&app, &format!("Error: {}", e));
         push_update(&app, format!("{{\"kind\":\"error\",\"message\":\"{}\"}}", e));
         return;

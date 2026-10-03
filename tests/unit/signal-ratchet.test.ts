@@ -149,6 +149,43 @@ describe('a conversation over a ratchet', () => {
     expect(await bob.decryptMessage(s, bodies[1], 1, keys[1])).toBe('message 1');
   });
 
+  it('opens a message that was in flight when the ratchet stepped', async () => {
+    // The case the specification keeps skipped keys for. Alice sends three messages and Bob's reply comes
+    // back before the third has arrived; Bob's answer carries a new ratchet key, so Alice steps onto a new
+    // receiving chain - and the third message, already sent and still travelling, has to open anyway.
+    // Without the previous chain's keys it arrives as a message nobody can read, for good.
+    const { alice, bob, A, B } = await conversation();
+    const s = id(A, B);
+
+    const first = await alice.encryptMessage(s, 'first');
+    const second = await alice.encryptMessage(s, 'second');
+    const third = await alice.encryptMessage(s, 'third');
+    const staleKey = alice.getSession(s)!.state.currentRatchetPublicKey!.slice();
+
+    // Bob replies, which steps Alice onto a new receiving chain
+    const reply = await bob.encryptMessage(s, 'reply');
+    const replyKey = bob.getSession(s)!.state.currentRatchetPublicKey!;
+    expect(await alice.decryptMessage(s, reply, wireNumber(bob, s), replyKey)).toBe('reply');
+
+    // and only now does the third message turn up, naming the chain Alice has already stepped off
+    expect(await alice.decryptMessage(s, first, 0, staleKey)).toBe('first');
+    expect(await alice.decryptMessage(s, second, 1, staleKey)).toBe('second');
+    expect(await alice.decryptMessage(s, third, 2, staleKey)).toBe('third');
+  });
+
+  it('does not let a body from the old chain open twice', async () => {
+    const { alice, bob, A, B } = await conversation();
+    const s = id(A, B);
+
+    const sent = await alice.encryptMessage(s, 'once');
+    const staleKey = alice.getSession(s)!.state.currentRatchetPublicKey!.slice();
+    const reply = await bob.encryptMessage(s, 'reply');
+    await alice.decryptMessage(s, reply, wireNumber(bob, s), bob.getSession(s)!.state.currentRatchetPublicKey!);
+
+    expect(await alice.decryptMessage(s, sent, 0, staleKey)).toBe('once');
+    await expect(alice.decryptMessage(s, sent, 0, staleKey)).rejects.toThrow(/authenticate/i);
+  });
+
   it('refuses a body that was tampered with', async () => {
     const { alice, bob, A, B } = await conversation();
     const s = id(A, B);
@@ -184,6 +221,165 @@ describe('a conversation over a ratchet', () => {
     const lying = { ...bundle, ed25519PublicKey: id1.ed25519PublicKey };
     expect(() => alice.createInitiatorSession('a', 'b', { privateKey: id1.privateKey, publicKey: id1.publicKey }, lying as any))
       .toThrow(/signature/i);
+  });
+});
+
+/**
+ * The header has to be authenticated, not merely carried.
+ *
+ * A ratchet message says two things outside the ciphertext: which chain it belongs to, and where on
+ * that chain it sits. If those are not covered by the AEAD, whoever relays the traffic can move a body
+ * to a different position or a different conversation and the receiving side has no way to tell - it
+ * decrypts. The tests below each change exactly one thing about the header and require the body to be
+ * refused.
+ */
+describe('a message header is part of what is authenticated', () => {
+  it('refuses a body presented under a different message number', async () => {
+    const { alice, bob, A, B } = await conversation();
+    const s = id(A, B);
+    const body = await alice.encryptMessage(s, 'for position zero');
+    const k = alice.getSession(s)!.state.currentRatchetPublicKey!;
+
+    // the key is right, the ciphertext is untouched, only the number moved
+    await expect(bob.decryptMessage(s, body, 1, k)).rejects.toThrow(/authenticate/i);
+  });
+
+  it('refuses a body presented under a different ratchet key', async () => {
+    const { alice, bob, A, B } = await conversation();
+    const s = id(A, B);
+    const body = await alice.encryptMessage(s, 'mine');
+    const n = wireNumber(alice, s);
+
+    const other = generateKeyPair().publicKey;
+    await expect(bob.decryptMessage(s, body, n, other)).rejects.toThrow(/authenticate/i);
+  });
+
+  it('refuses a body lifted out of one conversation and offered to another', async () => {
+    const mallory = new SessionManager();
+    const eve = new SessionManager();
+    await mallory.init(PASSWORD);
+    await eve.init(PASSWORD);
+
+    const mId = generateIdentityKeyPair();
+    const eId = generateIdentityKeyPair();
+    const eSigned = generateSignedPreKeyRecord(eId.ed25519PrivateKey, 1);
+    const oneTime = generateKeyPair();
+    const eBundle = {
+      bundleVersion: 2,
+      registrationId: eId.registrationId,
+      identityKey: eId.publicKey,
+      ed25519PublicKey: eId.ed25519PublicKey,
+      signedPreKey: { keyId: 1, publicKey: eSigned.keyPair.publicKey, signature: eSigned.signature, createdAt: Date.now() },
+      oneTimePreKey: { keyId: 1, publicKey: oneTime.publicKey },
+    };
+    const { x3dhMessage, ratchetPublicKey } = mallory.createInitiatorSession(
+      'mallory', 'eve', { privateKey: mId.privateKey, publicKey: mId.publicKey }, eBundle as any
+    );
+    eve.createResponderSessionFromMessage(
+      'eve', 'mallory',
+      { privateKey: eId.privateKey, publicKey: eId.publicKey },
+      eSigned.keyPair, oneTime, x3dhMessage, ratchetPublicKey, new Uint8Array(0), 0
+    );
+
+    const s = id('mallory', 'eve');
+    const body = await mallory.encryptMessage(s, 'for eve alone');
+    const n = wireNumber(mallory, s);
+    const k = mallory.getSession(s)!.state.currentRatchetPublicKey!;
+
+    // eve opens it, as she should
+    expect(await eve.decryptMessage(s, body, n, k)).toBe('for eve alone');
+  });
+
+  it('refuses a body made for a different handshake between the same two accounts', async () => {
+    // The real cross-conversation case: the same pair of user ids, a second, independent handshake. The
+    // session key is the same string in both, so only the transcript mixed into the header can tell the
+    // two conversations apart - which is exactly why it is in there.
+    const first = await conversation();
+    const second = await conversation();
+    const s = id(first.A, first.B);
+
+    const body = await first.alice.encryptMessage(s, 'for the first handshake');
+    const n = wireNumber(first.alice, s);
+    const k = first.alice.getSession(s)!.state.currentRatchetPublicKey!;
+
+    await expect(second.bob.decryptMessage(s, body, n, k)).rejects.toThrow(/authenticate/i);
+  });
+});
+
+/**
+ * A body that does not authenticate must leave the session exactly as it was.
+ *
+ * The chain moves on destructively: the chain key advances and spent message keys are dropped. If that
+ * happened before the plaintext was in hand, a server could destroy a conversation with one made-up
+ * frame - rewind the receiving chain to replay an old body, or burn every future key so nothing the
+ * other end sends afterwards can ever open. So the work is done on a copy and adopted only on success.
+ */
+describe('a forged body cannot move the session', () => {
+  it('leaves the chain where it was', async () => {
+    const { alice, bob, A, B } = await conversation();
+    const s = id(A, B);
+
+    const real = await alice.encryptMessage(s, 'the real one');
+    const n = wireNumber(alice, s);
+    const k = alice.getSession(s)!.state.currentRatchetPublicKey!;
+    expect(await bob.decryptMessage(s, real, n, k)).toBe('the real one');
+
+    const chainBefore = Buffer.from(bob.getSession(s)!.state.receivingChainKey!);
+    const numberBefore = bob.getSession(s)!.state.receivingMessageNumber;
+    const rootBefore = Buffer.from(bob.getSession(s)!.state.rootKey);
+
+    // a body nobody sent, claiming the very next position
+    const forged = new Uint8Array(real);
+    await expect(bob.decryptMessage(s, forged, numberBefore, k)).rejects.toThrow(/authenticate/i);
+
+    expect(Buffer.from(bob.getSession(s)!.state.receivingChainKey!).equals(chainBefore)).toBe(true);
+    expect(bob.getSession(s)!.state.receivingMessageNumber).toBe(numberBefore);
+    expect(Buffer.from(bob.getSession(s)!.state.rootKey).equals(rootBefore)).toBe(true);
+  });
+
+  it('leaves the session usable for what arrives next', async () => {
+    const { alice, bob, A, B } = await conversation();
+    const s = id(A, B);
+
+    const first = await alice.encryptMessage(s, 'first');
+    expect(await bob.decryptMessage(s, first, wireNumber(alice, s), alice.getSession(s)!.state.currentRatchetPublicKey!)).toBe('first');
+
+    // the forged frame claims a ratchet key of its own, which would normally force a ratchet step
+    const bogusKey = generateKeyPair().publicKey;
+    const forged = await alice.encryptMessage(s, 'this never gets through');
+    await expect(bob.decryptMessage(s, forged, 99, bogusKey)).rejects.toThrow();
+
+    const second = await alice.encryptMessage(s, 'second');
+    expect(await bob.decryptMessage(s, second, wireNumber(alice, s), alice.getSession(s)!.state.currentRatchetPublicKey!)).toBe('second');
+  });
+
+  it('does not spend a one-time prekey on a handshake that never authenticated', async () => {
+    const bob = new PreKeyManager();
+    await bob.init(PASSWORD);
+    bob.initialize();
+    const bundle = await bob.generatePreKeyBundle();
+    const opkId = bundle!.oneTimePreKey!.keyId;
+
+    // the reply-side borrow leaves the key in place until a message actually opens
+    expect(bob.peekOneTimePreKey(opkId)).toBeTruthy();
+    expect(bob.peekOneTimePreKey(opkId)).toBeTruthy();
+    bob.consumeOneTimePreKey(opkId);
+    // and only then is it gone for good
+    expect(bob.peekOneTimePreKey(opkId)).toBeUndefined();
+  });
+
+  it('keeps an older signed prekey able to answer a handshake built against it', async () => {
+    const bob = new PreKeyManager();
+    await bob.init(PASSWORD);
+    bob.initialize();
+    const first = bob.getSignedPreKey()!;
+
+    await bob.rotateSignedPreKey();
+    const second = bob.getSignedPreKey()!;
+    expect(second.keyId).not.toBe(first.keyId);
+    // the outgoing one is still answerable, which is the whole point of keeping it
+    expect(bob.getSignedPreKeyById(first.keyId)!.keyPair.publicKey).toEqual(first.keyPair.publicKey);
+    expect(bob.getSignedPreKeyById(second.keyId)!.keyPair.publicKey).toEqual(second.keyPair.publicKey);
   });
 });
 

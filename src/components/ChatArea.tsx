@@ -4,6 +4,8 @@ import { TopBar } from './TopBar';
 import { MessageList } from './MessageList';
 import { MessageInput } from './MessageInput';
 import { SettingsPanel } from './SettingsPanel';
+import { ChatSearch } from './ChatSearch';
+import { PinnedBar } from './PinnedBar';
 
 export function ChatArea({ showContacts: _showContacts, isMobile, onBack }: { showContacts: boolean; isMobile?: boolean; onBack?: () => void }) {
   const { state, t, loadOlderMessages } = useConnection();
@@ -16,6 +18,7 @@ export function ChatArea({ showContacts: _showContacts, isMobile, onBack }: { sh
   const fontSizeClass = state.settings.fontSize === 'small' ? 'text-[13px]'
     : state.settings.fontSize === 'large' ? 'text-[17px]'
     : 'text-[15px]';
+  const pinned = state.pinned[state.activeChannel] || [];
 
   const handleLoadOlder = async () => {
     if (loadingOlder) return;
@@ -35,8 +38,20 @@ export function ChatArea({ showContacts: _showContacts, isMobile, onBack }: { sh
   return (
     <div className="flex-1 flex flex-col min-h-0">
       <TopBar onSettingsClick={() => setShowSettings(true)} isMobile={isMobile} onBack={onBack} />
-      <MessageList key={state.activeChannel} messages={currentMessages} fontSizeClass={fontSizeClass} t={t}
-        hasMore={window_?.hasMore !== false} loadingOlder={loadingOlder} onLoadMore={handleLoadOlder} />
+      {state.searchOpen && <ChatSearch />}
+      {pinned.length > 0 && !state.searchOpen && <PinnedBar channel={state.activeChannel} messages={pinned} />}
+      <MessageList
+        key={state.activeChannel}
+        messages={currentMessages}
+        fontSizeClass={fontSizeClass}
+        t={t}
+        hasMore={window_?.hasMore !== false}
+        loadingOlder={loadingOlder}
+        onLoadMore={handleLoadOlder}
+        jumpToMessageId={state.jumpToMessageId}
+        pinnedIds={pinned.map((m) => m.id)}
+        channel={state.activeChannel}
+      />
       <div className="border-t border-border-default">
         <MessageInput />
       </div>

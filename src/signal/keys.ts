@@ -11,9 +11,20 @@ export function generateKeyPair(): KeyPair {
   return { privateKey, publicKey };
 }
 
+/**
+ * The identifier a bundle is published under.
+ *
+ * Never zero: it is what tells one bundle from another in the protocol, so a zero would be
+ * indistinguishable from "not set" and is avoided rather than merely being unlikely.
+ */
+function randomRegistrationId(): number {
+  const n = randomUint16();
+  return n === 0 ? 1 : n;
+}
+
 export function generateIdentityKeyPair(): IdentityKeyPair {
   const kp = generateKeyPair();
-  const registrationId = randomUint16();
+  const registrationId = randomRegistrationId();
   const ed25519KP = ed25519.keygen();
   return {
     ...kp,

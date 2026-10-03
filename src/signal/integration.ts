@@ -23,6 +23,18 @@ export function flushSignalState(): void {
   try { preKeyManager.flush?.(); } catch { /* as above */ }
 }
 
+/**
+ * Moves both stores onto a new account password.
+ *
+ * Every piece of state this device holds that is keyed by the password has to move at once. Doing it for
+ * the sessions alone would leave the prekeys under the old one, and then the next launch could open one
+ * store and not the other - which reads as a corrupt install rather than as a bad password.
+ */
+export async function rekeySignalState(newPassword: string): Promise<void> {
+  await sessionManager.rekey(newPassword);
+  await preKeyManager.rekey(newPassword);
+}
+
 /** Installs the listeners. Called once, after the managers are ready. */
 export function installSignalFlushHandlers(): () => void {
   if (typeof window === 'undefined') return () => {};
@@ -213,6 +225,15 @@ export function createSessionWithRemote(
   };
 }
 
+/**
+ * A one-time prekey borrowed for a handshake that has not authenticated yet.
+ *
+ * Held here rather than spent on arrival, because spending it is irreversible: a body that turns out to
+ * be forged must not cost the account a key. `commitResponderPreKey` spends it, and it is only called
+ * once the first message has actually opened.
+ */
+let pendingOneTimePreKeyId: number | null = null;
+
 export function createResponderSession(
   myId: string,
   remoteId: string,
@@ -220,17 +241,26 @@ export function createResponderSession(
   aliceRatchetPublicKey: Uint8Array
 ): boolean {
   const ik = preKeyManager.getIdentityKeyPair();
-  const spk = preKeyManager.getSignedPreKey();
-  if (!ik || !spk) return false;
+  if (!ik) return false;
+
+  // the key the handshake was actually built against, which is not necessarily the current one: a
+  // rotation between the bundle being fetched and this arriving would otherwise produce a secret
+  // neither end shares, and the conversation would be dead on arrival
+  const spkRecord = preKeyManager.getSignedPreKeyById(x3dhMessage.signedPreKey?.keyId);
+  if (!spkRecord) return false;
 
   const identityKey: KeyPair = { privateKey: ik.privateKey, publicKey: ik.publicKey };
-  const signedPreKey: KeyPair = { privateKey: spk.keyPair.privateKey, publicKey: spk.keyPair.publicKey };
+  const signedPreKey: KeyPair = {
+    privateKey: spkRecord.keyPair.privateKey,
+    publicKey: spkRecord.keyPair.publicKey,
+  };
 
   let oneTimePreKey: KeyPair | null = null;
   if (x3dhMessage.oneTimePreKey) {
-    const consumed = preKeyManager.consumeOneTimePreKey(x3dhMessage.oneTimePreKey.keyId);
-    if (consumed) {
-      oneTimePreKey = { privateKey: consumed.keyPair.privateKey, publicKey: consumed.keyPair.publicKey };
+    const borrowed = preKeyManager.peekOneTimePreKey(x3dhMessage.oneTimePreKey.keyId);
+    if (borrowed) {
+      oneTimePreKey = { privateKey: borrowed.keyPair.privateKey, publicKey: borrowed.keyPair.publicKey };
+      pendingOneTimePreKeyId = borrowed.keyId;
     }
   }
 
@@ -247,6 +277,34 @@ export function createResponderSession(
   );
 
   return true;
+}
+
+/**
+ * Spends the borrowed one-time prekey, now that a message has opened under it.
+ *
+ * Until this runs the key is still in the account's supply, so a server replaying captured handshakes
+ * gains nothing: each replay borrows a key, fails to produce a message that opens, and gives it back.
+ */
+export function commitResponderPreKey(): void {
+  if (pendingOneTimePreKeyId == null) return;
+  const id = pendingOneTimePreKeyId;
+  pendingOneTimePreKeyId = null;
+  preKeyManager.consumeOneTimePreKey(id);
+}
+
+/** Gives a borrowed key back when the handshake it was borrowed for did not open. */
+export function releaseResponderPreKey(): void {
+  pendingOneTimePreKeyId = null;
+}
+
+export function getRemoteIdentityStatus(sessionId: string, identityKey: Uint8Array | null | undefined): 'ok' | 'unknown' | 'changed' {
+  return sessionManager.checkRemoteIdentity(sessionId, identityKey);
+}
+
+/** The identity key the far end was pinned to when this session was created, if there is one. */
+export function getPinnedIdentityKey(sessionId: string): Uint8Array | null {
+  const pinned = sessionManager.getSession(sessionId)?.state.remoteIdentityKey;
+  return pinned ? pinned.slice() : null;
 }
 
 export function getSessionId(userId1: string, userId2: string): string {

@@ -20,7 +20,7 @@ describe('the safety number', () => {
   it('is sixty hex characters in twelve groups', async () => {
     const n = await generateSafetyNumber(mine, theirs);
     expect(n).toMatch(/^[0-9A-F]{8}( [0-9A-F]{8}){5}$/);
-    expect(n.split(' ')).toHaveLength(6);
+    expect(n!.split(' ')).toHaveLength(6);
   });
 
   it('comes out the same on both screens without an agreed order', async () => {
@@ -38,13 +38,14 @@ describe('the safety number', () => {
     expect(await generateSafetyNumber(mine, theirs)).not.toBe(await generateSafetyNumber(other, theirs));
   });
 
-  it('still produces something for your own account', async () => {
-    // There is no peer to compare against on your own profile, so this is the one you would read aloud
-    // to a new contact, who reads theirs.
-    const solo = await generateSafetyNumber(mine);
-    expect(solo).toMatch(/^[0-9A-F]{8}( [0-9A-F]{8}){5}$/);
-    expect(solo).toBe(await generateSafetyNumber(mine, null));
-    expect(solo).toBe(await generateSafetyNumber(mine, undefined));
+  it('produces nothing without the other side to compare against', async () => {
+    // With one key there is nothing to check. A number derived from our key alone can never match what
+    // the other person sees, so putting one on screen is not a weaker check - it is a false alarm on the
+    // one check people are told to trust, which is how people learn to wave it through.
+    expect(await generateSafetyNumber(mine)).toBeNull();
+    expect(await generateSafetyNumber(mine, null)).toBeNull();
+    expect(await generateSafetyNumber(mine, undefined)).toBeNull();
+    expect(await generateSafetyNumber(mine, '')).toBeNull();
   });
 
   it('does not depend on the order the two keys happen to have', async () => {

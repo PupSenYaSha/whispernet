@@ -1,9 +1,8 @@
 import { WebSocket } from 'ws';
 import { issueUploadToken } from './uploadTokens.js';
-import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundlesByIds, getIdentityKeyB64, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, updateEncryptedMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, setUserAvatar, removeUserAvatar, getAvatarDir, getDataDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, StoredSession, getChannelMediaKey } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundlesByIds, getIdentityKeyB64, setIdentityKeyB64, getIdentityKeysByIds, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, updateEncryptedMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, setUserAvatar, removeUserAvatar, getAvatarDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, StoredSession, getChannelMediaKey } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import { appendFileSync, mkdirSync } from 'fs';
 import fs from 'fs';
 import path from 'path';
 import { nextMondayMidnightMSK } from './time.js';
@@ -31,14 +30,27 @@ import {
   AVATAR_CHANGE_INTERVAL_MS,
 } from './constants.js';
 
-const SECURITY_LOG = () => path.join(getDataDir(), 'security.log');
+import { pseudonymizeAddress, coarsenDeviceLabel, appendSecurityLine } from './privacy.js';
 
+/**
+ * One line in the security log.
+ *
+ * The address is a daily-rotating pseudonym and the device string is a coarse label, both applied here
+ * rather than at each call site. That module existed and was described in the documentation, but
+ * nothing called it: every entry went to disk with the caller's real address in it and the full user
+ * agent stored beside it, which is the largest map of who used this server and from where an operator
+ * could ask for. Applied once, here, it cannot be forgotten at a new call site.
+ */
 function logSecurity(event: string, details: Record<string, any>) {
-  const entry = `[${new Date().toISOString()}] ${event} ${JSON.stringify(details)}\n`;
+  const safe: Record<string, any> = {};
+  for (const [key, value] of Object.entries(details)) {
+    if (key === 'ip') safe[key] = pseudonymizeAddress(String(value ?? ''));
+    else if (key === 'deviceInfo') safe[key] = coarsenDeviceLabel(value);
+    else safe[key] = value;
+  }
+  const entry = `[${new Date().toISOString()}] ${event} ${JSON.stringify(safe)}\n`;
   try {
-    const file = SECURITY_LOG();
-    try { mkdirSync(path.dirname(file), { recursive: true }); } catch {}
-    appendFileSync(file, entry);
+    appendSecurityLine(entry);
   } catch (e) {
     console.error('Failed to write security log:', (e as Error).message);
   }
@@ -83,21 +95,47 @@ async function ensureSessionRegistry(): Promise<void> {
 
 
 
+/**
+ * Only fills in a record for a device that has none.
+ *
+ * This used to re-register anything that was missing or marked revoked, with `revoked: false`. That
+ * meant a revocation the owner had just made could be undone by any later call from any account on the
+ * server, which is not what "revoke" is supposed to mean.
+ */
 function reconcileActiveSessions(): void {
   for (const client of clients.values()) {
     const m = sessionRecords.get(client.userId);
     const rec = m?.get(client.deviceId);
-    if (!rec || rec.revoked) {
-      registerSession({ userId: client.userId, deviceId: client.deviceId, nickname: client.nickname, deviceInfo: client.deviceInfo || '', firstSeen: rec?.firstSeen || client.lastHeartbeat, lastActive: client.lastHeartbeat, revoked: false });
-    }
+    if (rec) continue;
+    registerSession({
+      userId: client.userId,
+      deviceId: client.deviceId,
+      nickname: client.nickname,
+      deviceInfo: client.deviceInfo || '',
+      firstSeen: client.lastHeartbeat,
+      lastActive: client.lastHeartbeat,
+      revoked: false,
+    });
   }
 }
 
+/**
+ * Records a device, keeping the two fields a fresh sign-in must not overwrite.
+ *
+ * `firstSeen` is when the device was added to the account, which is what the owner reads in Settings to
+ * decide which session to revoke - resetting it on every login made every device look new. And a
+ * revoked device stays revoked: revocation is the one thing in this table that a later login by the
+ * same account must not undo.
+ */
 function registerSession(record: StoredSession): void {
   let m = sessionRecords.get(record.userId);
   if (!m) { m = new Map(); sessionRecords.set(record.userId, m); }
-  m.set(record.deviceId, record);
-  void upsertSession(record).catch(() => {});
+  const existing = m.get(record.deviceId);
+  const merged: StoredSession = existing
+    ? { ...record, firstSeen: existing.firstSeen, revoked: existing.revoked }
+    : record;
+  m.set(record.deviceId, merged);
+  void upsertSession(merged).catch(() => {});
 }
 
 function sessionLastActive(userId: string, deviceId: string, ts: number): void {
@@ -340,6 +378,43 @@ function recordRegistration(ip: string): void {
   registrationsByIp.set(ip, recent);
 }
 
+/** How many reports one account may file in the window, and why the ceiling exists. */
+const MAX_REPORTS_PER_USER = 10;
+const REPORT_WINDOW_MS = 60 * 60 * 1000;
+const reportsByUser = new Map<string, number[]>();
+
+/** How many prekey fetches one account may make in the window, and why the ceiling exists. */
+const MAX_PREKEY_FETCHES = 300;
+const PREKEY_FETCH_WINDOW_MS = 60 * 60 * 1000;
+const preKeyFetches = new Map<string, number[]>();
+
+function preKeyFetchAllowed(userId: string): boolean {
+  if (rateLimitsDisabled()) return true;
+  const now = Date.now();
+  const since = now - PREKEY_FETCH_WINDOW_MS;
+  const recent = (preKeyFetches.get(userId) || []).filter((t) => t > since);
+  if (recent.length >= MAX_PREKEY_FETCHES) {
+    preKeyFetches.set(userId, recent);
+    return false;
+  }
+  recent.push(now);
+  preKeyFetches.set(userId, recent);
+  return true;
+}
+
+function reportAllowed(userId: string): boolean {
+  const now = Date.now();
+  const since = now - REPORT_WINDOW_MS;
+  const recent = (reportsByUser.get(userId) || []).filter((t) => t > since);
+  if (recent.length >= MAX_REPORTS_PER_USER) {
+    reportsByUser.set(userId, recent);
+    return false;
+  }
+  recent.push(now);
+  reportsByUser.set(userId, recent);
+  return true;
+}
+
 interface ServerMessage {
   type: string;
   payload: any;
@@ -362,12 +437,24 @@ function normalizeIp(raw: unknown): string {
   return ip.replace(/^::ffff:/, '');
 }
 
-function isPrivatePeer(ip: string): boolean {
-  if (ip === 'unknown' || ip === '::1' || ip === '127.0.0.1') return true;
-  if (ip.startsWith('10.') || ip.startsWith('192.168.') || ip.startsWith('169.254.')) return true;
-  if (/^172\.(1[6-9]|2\d|3[01])\./.test(ip)) return true;
-  if (/^(fc|fd|fe80)/.test(ip)) return true;
-  return false;
+/** Read once at load: the flag is process configuration, not something a request can move. */
+const TRUST_PROXY_ENABLED = /^(1|true|yes)$/i.test(process.env.TRUST_PROXY || '');
+
+/**
+ * Whether a forwarding header may be believed.
+ *
+ * Behind a tunnel every socket arrives from the proxy itself, so the address was identical for all
+ * users and they shared one rate limit bucket - which is why the header is read at all. Reading it
+ * unconditionally is just as bad in the other direction: an instance bound to a network address is
+ * reachable by anyone on it, and every one of those clients could put an arbitrary address in the
+ * header and walk past the per-address auth limit, the per-address registration limit and the
+ * connection cap. So the header is only honoured when the operator has said there is a proxy, or when
+ * the immediate peer is loopback - which is a tunnel on this machine and nothing else.
+ */
+function proxyHeadersTrusted(socketIp: string): boolean {
+  if (TRUST_PROXY_ENABLED) return true;
+  return socketIp === 'unknown' || socketIp === '::1' || socketIp === '127.0.0.1'
+    || socketIp === '::ffff:127.0.0.1' || socketIp.startsWith('127.');
 }
 
 function getClientIp(ws: WebSocket, upgradeRequest?: any): string {
@@ -375,17 +462,13 @@ function getClientIp(ws: WebSocket, upgradeRequest?: any): string {
   // the ws socket itself does not keep it, so the forwarded headers are only reachable from here
   const req = upgradeRequest || (ws as any).req || (ws as any)._req;
   const socketIp = normalizeIp(req?.socket?.remoteAddress || (ws as any)._socket?.remoteAddress);
+  if (!proxyHeadersTrusted(socketIp)) return socketIp;
   const headers = req?.headers || {};
   const forwarded = headers['x-forwarded-for'];
   const first = Array.isArray(forwarded) ? forwarded[0] : typeof forwarded === 'string' ? forwarded.split(',')[0] : '';
   const realIp = typeof headers['x-real-ip'] === 'string' ? headers['x-real-ip'] : '';
-  // behind a tunnel or reverse proxy every socket arrives from the proxy itself, so the address
-  // was identical for all users and they shared one rate limit bucket. Trust the forwarding
-  // header only when the direct peer is private, otherwise anyone could spoof their way past it.
-  if ((first || realIp) && isPrivatePeer(socketIp)) {
-    const candidate = normalizeIp(first || realIp);
-    if (candidate !== 'unknown') return candidate;
-  }
+  const candidate = normalizeIp(first || realIp);
+  if (candidate !== 'unknown') return candidate;
   return socketIp;
 }
 
@@ -520,6 +603,31 @@ function preKeyBundleDiagnostics(bundle: any): Record<string, any> {
   };
 }
 
+/**
+ * Records one device's prekey material, and its account-level identity key.
+ *
+ * Two different keys with two different jobs. The identity key is what a safety number is computed from,
+ * so it belongs to the account and has to be identical on every device - a number that changed per
+ * device would prove nothing. The bundle's own keys are per device, because a ratchet session is
+ * between two devices and sharing it across three of them would put one device's chain keys on the
+ * others. The first sign-in establishes the account key and later ones leave it alone: it is the one
+ * piece of key material here that must not move under a conversation that was pinned to it.
+ */
+async function storePreKeys(userId: string, deviceId: string | null | undefined, payload: any): Promise<void> {
+  if (isValidPreKeyBundle(payload?.preKeyBundle) && deviceId) {
+    await setPreKeyBundle(userId, deviceId, payload.preKeyBundle);
+  }
+  const accountKey = payload?.identityKey;
+  if (isValidIdentityKey(accountKey) && !(await getIdentityKeyB64(userId))) {
+    await setIdentityKeyB64(userId, accountKey);
+  }
+}
+
+/** A base64 public key of the size the identity keys actually are, and nothing longer. */
+function isValidIdentityKey(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0 && value.length <= 512 && /^[A-Za-z0-9+/=_-]+$/.test(value);
+}
+
 function isValidPreKeyBundle(bundle: any): boolean {
   if (typeof bundle !== 'object' || bundle === null) return false;
   const MAX_BUNDLE_SIZE = 10000;
@@ -551,6 +659,120 @@ function isValidPublicKey(key: any): boolean {
   if (key.alg !== 'RSA-OAEP' && key.alg !== 'RSA-OAEP-256') return false;
   if (typeof key.n !== 'string' || typeof key.e !== 'string') return false;
   return true;
+}
+
+/**
+ * The ceiling on one encrypted body.
+ *
+ * The websocket frame is four megabytes, and whatever arrives in it goes straight into a column. A
+ * client that ignored the shape check used to be able to file a four-megabyte "message" per send, which
+ * is a cheap way to fill somebody's disk. A real body is a few hundred bytes of text plus one wrapped
+ * key per recipient, so this is generous by an order of magnitude.
+ */
+const MAX_ENCRYPTED_BODY_BYTES = 64 * 1024;
+const MAX_FILE_KEY_ENTRIES = 512;
+
+/** How many devices one message may carry a body for. Three is the session cap, plus headroom. */
+const MAX_DEVICE_BODIES = 8;
+
+function isValidEncryptedBody(body: any): boolean {
+  if (typeof body !== 'object' || body === null || Array.isArray(body)) return false;
+  if (hasUnsafeOwnKeys(body)) return false;
+  let size: number;
+  try {
+    size = JSON.stringify(body).length;
+  } catch {
+    return false;
+  }
+  if (size > MAX_ENCRYPTED_BODY_BYTES) return false;
+  if (typeof body.ciphertext !== 'string' || body.ciphertext.length === 0) return false;
+  if (body.iv !== undefined && typeof body.iv !== 'string') return false;
+  if (body.encryptedKeys !== undefined) {
+    if (typeof body.encryptedKeys !== 'object' || body.encryptedKeys === null || Array.isArray(body.encryptedKeys)) return false;
+    if (hasUnsafeOwnKeys(body.encryptedKeys)) return false;
+    if (Object.keys(body.encryptedKeys).length > MAX_FILE_KEY_ENTRIES) return false;
+    for (const value of Object.values(body.encryptedKeys)) {
+      if (typeof value !== 'string' || value.length > 4096) return false;
+    }
+  }
+  // the ratchet header travels beside the body and is bounded the same way
+  if (body.ratchetPublicKey !== undefined) {
+    if (typeof body.ratchetPublicKey !== 'string' || body.ratchetPublicKey.length > 512) return false;
+  }
+  if (body.messageNumber !== undefined && !Number.isInteger(body.messageNumber)) return false;
+  if (body.messageNumber !== undefined && (body.messageNumber as number) < 0) return false;
+  return true;
+}
+
+/**
+ * The device fan-out: one sealed body per device the conversation reaches.
+ *
+ * A shape of `{ kind: 'devices', bodies: [{ deviceId, body }] }` rather than a bare body, and the
+ * distinction is checked rather than assumed - a sender on an older build sends the bare form and must
+ * still be able to reach somebody. Everything inside is validated exactly as a single body would be, so
+ * the wrapper cannot be used to smuggle something past the size limit or to carry a key where a
+ * ciphertext belongs.
+ */
+function isValidDeviceBodies(value: any): value is { kind: 'devices'; bodies: { deviceId: string; body: any }[] } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  if (value.kind !== 'devices') return false;
+  if (!Array.isArray(value.bodies) || value.bodies.length === 0 || value.bodies.length > MAX_DEVICE_BODIES) return false;
+  let size = 0;
+  const seen = new Set<string>();
+  for (const entry of value.bodies) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) return false;
+    if (typeof entry.deviceId !== 'string' || entry.deviceId.length === 0 || entry.deviceId.length > 128) return false;
+    // one body per device: a duplicate would be a second copy of the same words for no gain
+    if (seen.has(entry.deviceId)) return false;
+    seen.add(entry.deviceId);
+    if (!isValidEncryptedBody(entry.body)) return false;
+    try {
+      size += JSON.stringify(entry.body).length;
+    } catch {
+      return false;
+    }
+  }
+  // the total, not each body alone: eight legal bodies are still one oversized frame
+  return size <= MAX_ENCRYPTED_BODY_BYTES;
+}
+
+function isValidDmEncryptedPayload(value: any): boolean {
+  return isValidEncryptedBody(value) || isValidDeviceBodies(value);
+}
+
+/**
+ * The one body out of a stored fan-out that this device is meant to open.
+ *
+ * A bare body passes through untouched, so a conversation with a single device on each side is stored
+ * and served exactly as it always was. A fan-out with no body for this device yields null, which the
+ * client shows as a message it cannot read - and it is still counted, still reacted to and still
+ * deletable, because a message nobody can open is not a message that did not happen.
+ */
+function bodyForDevice(stored: any, deviceId?: string | null): any {
+  if (!isValidDeviceBodies(stored)) return stored || null;
+  if (!deviceId) return null;
+  return stored.bodies.find((entry) => entry.deviceId === deviceId)?.body ?? null;
+}
+
+function isValidFileKeyMap(fileKey: any): boolean {
+  if (typeof fileKey !== 'object' || fileKey === null || Array.isArray(fileKey)) return false;
+  if (hasUnsafeOwnKeys(fileKey)) return false;
+  const entries = Object.entries(fileKey);
+  if (entries.length > MAX_FILE_KEY_ENTRIES) return false;
+  // each entry is "<iv>:<wrapped key>" and both halves are base64
+  return entries.every(([, value]) =>
+    typeof value === 'string' && value.length > 0 && value.length <= 4096 && value.includes(':')
+  );
+}
+
+/** How big a rejected payload was, for the log - the value itself is never worth keeping. */
+function safeJsonLength(value: unknown): number {
+  try {
+    const s = JSON.stringify(value);
+    return typeof s === 'string' ? s.length : -1;
+  } catch {
+    return -1;
+  }
 }
 
 function send(ws: WebSocket, message: ServerMessage): void {
@@ -689,6 +911,12 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
           send(ws, { type: 'heartbeat_ack', payload: {}, timestamp: Date.now() });
         }
         break;
+      case 'typing':
+        if (userId) await handleTyping(userId, ws, message.payload);
+        break;
+      case 'dm_read':
+        if (userId) await handleDmRead(userId, ws, message.payload);
+        break;
       case 'get_sessions':
         if (userId) handleGetSessions(userId, ws, currentDeviceId);
         break;
@@ -816,16 +1044,16 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     claimConnection(connectionKey, MAX_CONNECTIONS_PER_USER);
 
     const now = Date.now();
-    registerSession({ userId: user.id, deviceId, nickname: user.nickname, deviceInfo: typeof payload?.deviceInfo === 'string' ? payload.deviceInfo.slice(0, 60) : '', firstSeen: now, lastActive: now, revoked: false });
+    registerSession({ userId: user.id, deviceId, nickname: user.nickname, deviceInfo: coarsenDeviceLabel(payload?.deviceInfo), firstSeen: now, lastActive: now, revoked: false });
     currentUserId = user.id;
     currentDeviceId = deviceId;
-    registerDevice(deviceId, { deviceId, ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip, deviceInfo: typeof payload?.deviceInfo === 'string' ? payload.deviceInfo.slice(0, 60) : '' });
+    registerDevice(deviceId, { deviceId, ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip, deviceInfo: coarsenDeviceLabel(payload?.deviceInfo) });
 
+// Stored before the sign-in reply, not after. The reply carries this account's own identity key, so a
+    // client that published its first one here would otherwise be told it has none and would show an
+    // unverifiable contact until the next sign-in.
+    await storePreKeys(user.id, deviceId, payload);
     await onAuthenticated(user.id, user.nickname, ws, deviceId);
-    // The bundle is refreshed on every sign-in, so a client whose keys were rotated while it was
-    // away does not go on advertising the old ones.
-    if (isValidPreKeyBundle(payload?.preKeyBundle)) await setPreKeyBundle(user.id, payload.preKeyBundle);
-
   }
 
   async function handleAuthRegister(ws: WebSocket, payload: { nickname: string; password: string; publicKey?: any; preKeyBundle?: any; deviceId?: string; deviceInfo?: string }): Promise<void> {
@@ -901,23 +1129,43 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
 
     const deviceId = typeof payload.deviceId === 'string' && payload.deviceId.length > 0 && payload.deviceId.length <= 64
       ? payload.deviceId : crypto.randomUUID();
-    registerSession({ userId: user.id, deviceId, nickname: user.nickname, deviceInfo: typeof payload?.deviceInfo === 'string' ? payload.deviceInfo.slice(0, 60) : '', firstSeen: Date.now(), lastActive: Date.now(), revoked: false });
+    registerSession({ userId: user.id, deviceId, nickname: user.nickname, deviceInfo: coarsenDeviceLabel(payload?.deviceInfo), firstSeen: Date.now(), lastActive: Date.now(), revoked: false });
     releaseConnectionKey(connectionKey);
     connectionKey = 'user:' + user.id;
     claimConnection(connectionKey, MAX_CONNECTIONS_PER_USER);
     currentUserId = user.id;
     currentDeviceId = deviceId;
-    registerDevice(deviceId, { deviceId, ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip, deviceInfo: typeof payload?.deviceInfo === 'string' ? payload.deviceInfo.slice(0, 60) : '' });
+    registerDevice(deviceId, { deviceId, ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip, deviceInfo: coarsenDeviceLabel(payload?.deviceInfo) });
 
+    // Same ordering as sign-in: the account's identity key has to be recorded before the reply that
+    // reports it back, or a brand new account reads as having none.
+    await storePreKeys(user.id, deviceId, payload);
     await onAuthenticated(user.id, user.nickname, ws, deviceId);
   }
 
   async function onAuthenticated(userId: string, nickname: string, ws: WebSocket, deviceId?: string): Promise<void> {
-    const publicKeys = await getAllPublicKeys();
+    // Only this account's own key, not the whole directory.
+    //
+    // Signing in used to hand every client the RSA public key of every account on the server. Nothing
+    // needed it: a peer's key arrives with the conversation it belongs to (`dm_contacts`,
+    // `dm_history`) or in a `public_key_updated` when it changes. Beyond being a directory of every
+    // account handed to every account on every sign-in, it was one more thing standing between a private
+    // message and being wrapped to a stranger.
+    const me = await getUserById(userId);
+    const publicKeys: Record<string, any> = {};
+    if (me?.publicKey) publicKeys[userId] = me.publicKey;
     const userMeta = await buildAvatarInfoMap();
-    // Handed over on sign-in so key verification never needs a second round trip: the identity keys a
-    // safety number is computed from travel with the rest of the directory.
-    const identityKeys = await getPreKeyBundlesByIds([userId]);
+    // This account's own prekey material, one entry per device it has signed in. A client needs its own
+    // devices listed for a reason the recipient cannot supply: to seal a copy of each outgoing message
+    // to the account's other devices, which is what makes a conversation readable on a second screen.
+    // Without that fan-out there is no way to sync, and the alternative is the long-lived envelope this
+    // replaced.
+    const preKeyBundles = await getPreKeyBundlesByIds([userId]);
+    // The account-level identity key, which is what a safety number is derived from, so it is handed
+    // over on sign-in rather than costing a round trip later.
+    const identityKeys: Record<string, string> = {};
+    const myIdentityKey = await getIdentityKeyB64(userId);
+    if (myIdentityKey) identityKeys[userId] = myIdentityKey;
 
     const seen = new Set<string>();
     const onlineUsers: { id: string; nickname: string; avatar: AvatarInfo | null }[] = [];
@@ -925,7 +1173,7 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       if (!seen.has(c.userId)) { seen.add(c.userId); onlineUsers.push({ id: c.userId, nickname: c.nickname, avatar: avatarInfo(userMeta.get(c.userId)) }); }
     }
 
-    send(ws, { type: 'auth_success', payload: { userId, nickname, deviceId, uploadToken: issueUploadToken(userId), publicKeys, identityKeys, preKeyBundles: identityKeys, onlineUsers, role: await isAdminNickname(nickname) ? 'admin' : 'user', channelMediaKey: await getChannelMediaKey() }, timestamp: Date.now() });
+    send(ws, { type: 'auth_success', payload: { userId, nickname, deviceId, uploadToken: issueUploadToken(userId), publicKeys, identityKeys, preKeyBundles, onlineUsers, role: await isAdminNickname(nickname) ? 'admin' : 'user', channelMediaKey: await getChannelMediaKey() }, timestamp: Date.now() });
 
     const history = await getRecentMessages(100);
     const reactionsById = await getReactionsForMessages(history.map((m) => m.id));
@@ -961,10 +1209,19 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
   /** Older pages of the general chat, so the client is not limited to the newest hundred messages. */
   async function handleChatHistory(userId: string, ws: WebSocket, payload: { before?: number; limit?: number }): Promise<void> {
     const before = Number.isFinite(payload?.before) ? Number(payload?.before) : undefined;
-    if (before !== undefined && before <= 0) return;
     const limit = Math.min(Math.max(Number(payload?.limit) || 50, 1), 100);
+    // An empty or nonsensical slice is still answered, and answered as a page. Returning nothing left the
+    // client waiting on a request that was never going to be answered, and left "load earlier" on screen
+    // for good because the paging window was never told there was nothing older.
+    if (before !== undefined && before <= 0) {
+      send(ws, { type: 'chat_history_page', payload: { channel: 'general', messages: [], hasMore: false }, timestamp: Date.now() });
+      return;
+    }
     const history = await getRecentMessages(limit, 'general', before);
-    if (history.length === 0) return;
+    if (history.length === 0) {
+      send(ws, { type: 'chat_history_page', payload: { channel: 'general', messages: [], hasMore: false }, timestamp: Date.now() });
+      return;
+    }
     const userMeta = await buildAvatarInfoMap();
     const reactionsById = await getReactionsForMessages(history.map((m) => m.id));
     const messages = history.map((m) => ({
@@ -1023,12 +1280,10 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
 
     const messageId = crypto.randomUUID();
     const timestamp = Date.now();
-    const fileKey = payload?.fileKey && typeof payload.fileKey === 'object' ? payload.fileKey : undefined;
+    const fileKey = isValidFileKeyMap(payload?.fileKey) ? payload.fileKey : undefined;
     const expiresAt = resolveExpiry(payload?.ttl, timestamp);
-    const quoted = payload?.quoted && typeof payload.quoted === 'object' && typeof payload.quoted.sender === 'string'
-      ? { id: String(payload.quoted.id || ''), text: sanitizeText(String(payload.quoted.text || '')).slice(0, MAX_MESSAGE_CHARS), sender: sanitizeText(payload.quoted.sender).slice(0, 64) }
-      : null;
-    await saveMessage(messageId, senderId, sender.nickname, text, timestamp, undefined, 'general', fileKey, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined);
+    const quoted = await resolveQuote(senderId, payload?.quoted, 'general');
+    await saveMessage(messageId, senderId, sender.nickname, text, timestamp, undefined, 'general', fileKey, quoted ? quoted.id : undefined, undefined, expiresAt, (quoted ? quoted.text : undefined) ?? undefined, (quoted ? quoted.sender : undefined) ?? undefined);
 
     const messagePayload = {
       id: messageId,
@@ -1041,8 +1296,8 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       fileKey,
       expiresAt,
       quotedMessageId: quoted?.id,
-      quotedMessageText: quoted?.text,
-      quotedMessageSender: quoted?.sender,
+      quotedMessageText: quoted?.text ?? undefined,
+      quotedMessageSender: quoted?.sender ?? undefined,
       reactions: await getReactionsForMessage(messageId),
     };
 
@@ -1068,20 +1323,27 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       return;
     }
 
-    
-    
-    
     let recipientUser: any = null;
-    if (payload?.toKey && typeof payload.toKey === 'object' && payload.toKey.kty) {
+    if (payload?.to && typeof payload.to === 'string') {
+      // Named directly, which is one row to read rather than the whole key table. The full row is
+      // needed, not the summary one: the key has to be here to be checked against the key that came
+      // with the message.
+      recipientUser = await getUserByNickname(payload.to) || (await getUserById(payload.to));
+      if (recipientUser && payload?.toKey && typeof payload.toKey === 'object' && payload.toKey.kty) {
+        if (canonicalJwk(payload.toKey) !== canonicalJwk(recipientUser.publicKey)) {
+          send(ws, { type: 'error', payload: { code: 'STALE_KEY', message: 'Recipient key changed, reopen the chat and send again' }, timestamp: Date.now() });
+          logSecurity('DM_STALE_KEY', { from: senderId, to: recipientUser.id });
+          return;
+        }
+      }
+    }
+    if (!recipientUser && payload?.toKey && typeof payload.toKey === 'object' && payload.toKey.kty) {
+      // Only for a client that names the recipient by key alone. Bounded, because it walks the table.
       const keysMap = await getAllPublicKeys();
       const keyStr = canonicalJwk(payload.toKey);
-      let rid: string | null = null;
       for (const [uid, jwk] of Object.entries(keysMap)) {
-        if (jwk && canonicalJwk(jwk) === keyStr) { rid = uid; break; }
+        if (uid !== senderId && jwk && canonicalJwk(jwk) === keyStr) { recipientUser = { id: uid, nickname: '', publicKey: jwk }; break; }
       }
-      if (rid) recipientUser = { id: rid, nickname: '', publicKey: null };
-    } else if (payload?.to) {
-      recipientUser = await getUserByNickname(payload.to) || (await getAllUsers()).find(u => u.id === payload.to);
     }
     if (recipientUser && recipientUser.id === senderId) {
       send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Cannot message yourself' }, timestamp: Date.now() });
@@ -1109,12 +1371,10 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     const channelId = getDmChannelId(senderId, recipientUser.id);
     const messageId = crypto.randomUUID();
     const timestamp = Date.now();
-    const fileKey = payload?.fileKey && typeof payload.fileKey === 'object' ? payload.fileKey : undefined;
-    const isEncrypted = !!payload?.encrypted;
+    const fileKey = isValidFileKeyMap(payload?.fileKey) ? payload.fileKey : undefined;
+    const isEncrypted = isValidDmEncryptedPayload(payload?.encrypted);
     const expiresAt = resolveExpiry(payload?.ttl, timestamp);
-    const quoted = payload?.quoted && typeof payload.quoted === 'object' && typeof payload.quoted.sender === 'string'
-      ? { id: String(payload.quoted.id || ''), text: sanitizeText(String(payload.quoted.text || '')).slice(0, MAX_MESSAGE_CHARS), sender: sanitizeText(payload.quoted.sender).slice(0, 64) }
-      : null;
+    const quoted = await resolveQuote(senderId, payload?.quoted, channelId);
 
     // the sender cannot decrypt its own ratchet ciphertext, so the client tags the message with an
     // id of its own and recognises the echo and the history entry by it
@@ -1122,10 +1382,10 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
 
     if (!isEncrypted) {
       send(ws, { type: 'error', payload: { code: 'ENCRYPTION_REQUIRED', message: 'Direct messages must be encrypted' }, timestamp: Date.now() });
-      logSecurity('PLAINTEXT_DM_REJECTED', { from: senderId, to: recipientUser.id });
+      logSecurity('PLAINTEXT_DM_REJECTED', { from: senderId, to: recipientUser.id, bytes: safeJsonLength(payload?.encrypted) });
       return;
     }
-    await saveMessage(messageId, senderId, sender.nickname, '', timestamp, payload.encrypted, channelId, fileKey, quoted ? quoted.id : undefined, undefined, expiresAt, quoted ? quoted.text : undefined, quoted ? quoted.sender : undefined, clientId);
+    await saveMessage(messageId, senderId, sender.nickname, '', timestamp, payload.encrypted, channelId, fileKey, quoted ? quoted.id : undefined, undefined, expiresAt, (quoted ? quoted.text : undefined) ?? undefined, (quoted ? quoted.sender : undefined) ?? undefined, clientId);
 
     const dmPayload = {
       id: messageId,
@@ -1139,24 +1399,82 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       fileKey,
       expiresAt,
       quotedMessageId: quoted?.id,
-      quotedMessageText: quoted?.text,
-      quotedMessageSender: quoted?.sender,
+      quotedMessageText: quoted?.text ?? undefined,
+      quotedMessageSender: quoted?.sender ?? undefined,
       clientId,
       reactions: await getReactionsForMessage(messageId),
     };
-    for (const dev of recipientDevices) {
-      send(dev.ws, { type: 'dm_message', payload: { ...dmPayload, isOwn: false }, timestamp });
-    }
-    send(ws, { type: 'dm_message', payload: { ...dmPayload, isOwn: true }, timestamp });
-    for (const dev of senderDevices) {
-      if (dev.ws === ws || dev.ws.readyState !== WebSocket.OPEN) continue;
-      send(dev.ws, { type: 'dm_message', payload: { ...dmPayload, isOwn: true }, timestamp });
+    if (isValidDeviceBodies(payload.encrypted)) {
+      // Routed by the device each body was sealed for, rather than broadcast.
+      //
+      // Two reasons, and the first is the important one: a device that receives a body meant for another
+      // device learns that the message exists twice over and has to try to open something it cannot,
+      // and every one of those failures is a place where the app's only honest answer is "encrypted".
+      // The second is that the same routing delivers a sender's copy to the sender's own other devices,
+      // which is how a conversation reaches a second screen without any shared key material.
+      //
+      // Every device is told the message arrived, with the bodies it alone can open. A device left out of
+      // the loop entirely would show a conversation that silently stops rather than one that says it
+      // cannot read this, which is the difference between a key problem and a delivery problem.
+      const byDevice = new Map(payload.encrypted.bodies.map((e) => [e.deviceId, e.body]));
+      for (const dev of recipientDevices) {
+        send(dev.ws, { type: 'dm_message', payload: { ...dmPayload, encrypted: byDevice.get(dev.deviceId) ?? null, isOwn: false }, timestamp });
+      }
+      for (const dev of senderDevices) {
+        if (dev.ws.readyState !== WebSocket.OPEN) continue;
+        send(dev.ws, { type: 'dm_message', payload: { ...dmPayload, encrypted: byDevice.get(dev.deviceId) ?? null, isOwn: true }, timestamp });
+      }
+      } else {
+      for (const dev of recipientDevices) {
+        send(dev.ws, { type: 'dm_message', payload: { ...dmPayload, isOwn: false }, timestamp });
+      }
+      send(ws, { type: 'dm_message', payload: { ...dmPayload, isOwn: true }, timestamp });
+      for (const dev of senderDevices) {
+        if (dev.ws === ws || dev.ws.readyState !== WebSocket.OPEN) continue;
+        send(dev.ws, { type: 'dm_message', payload: { ...dmPayload, isOwn: true }, timestamp });
+      }
     }
   }
 
 function resolveExpiry(ttl: unknown, timestamp: number): number | undefined {
-  if (typeof ttl !== 'number' || !DM_TTL_ALLOWED_MS[ttl]) return undefined;
-  return timestamp + DM_TTL_ALLOWED_MS[ttl];
+  // Only the three durations the interface offers, looked up through the prototype chain rather than
+  // indexed directly: a plain object literal answers to `constructor` and `toString`, so `ttl` of
+  // "toString" would otherwise be a duration of NaN milliseconds in the past.
+  if (typeof ttl !== 'number' || !Number.isFinite(ttl)) return undefined;
+  const allowed = DM_TTL_ALLOWED_MS[ttl as unknown as number];
+  return typeof allowed === 'number' && allowed > 0 ? timestamp + allowed : undefined;
+}
+
+/**
+ * The quote a message carries, resolved from what is actually stored.
+ *
+ * The client used to send the quoted words and the quoted sender's name alongside the id, and the server
+ * took them at face value. Anybody could therefore post a message showing a quote bubble reading
+ * "@admin: give me the money" attributed to a conversation that never happened - the words came from the
+ * sender, not from the row they claim to be quoting. Only the id is trusted now; the words and the name
+ * are read back off the message being quoted, and a quote of something the sender cannot see is dropped
+ * rather than invented.
+ *
+ * A quote of a private message carries the name and the id but no words, because a private message is
+ * stored as ciphertext and there is nothing here to read. The client resolves those from the
+ * conversation it already has; that is the right place for it, since only the two ends can read it.
+ */
+async function resolveQuote(
+  userId: string,
+  quoted: any,
+  fallbackChannel: string
+): Promise<{ id: string; text: string | null; sender: string | null } | null> {
+  if (!quoted || typeof quoted !== 'object') return null;
+  const id = typeof quoted.id === 'string' ? quoted.id : '';
+  if (!id || id.length > 64) return null;
+  const target = await getMessageById(id);
+  if (!target || !canAccessMessage(userId, target)) return null;
+  if (fallbackChannel === 'general' && target.channel !== 'general') return null;
+  const text = sanitizeText(target.text || '').slice(0, MAX_MESSAGE_CHARS);
+  const sender = sanitizeText(String(target.senderNickname || '')).slice(0, 64);
+  // an empty string would be stored as null anyway, and telling the client there are no words is not the
+  // same as telling it there are empty words
+  return { id, text: text || null, sender: sender || null };
 }
 
 function isValidEmoji(emoji: unknown): emoji is string {
@@ -1213,45 +1531,97 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
     void (async () => {
       const target = await getMessageById(messageId);
       if (!target) return;
-      if (!target.channel || target.channel === 'general') {
-        broadcast(message, actorUserId);
-        for (const dev of devicesForUser(actorUserId)) send(dev.ws, message);
-        return;
-      }
-      const parts = target.channel.split(':');
-      for (const participantId of parts) {
-        for (const dev of devicesForUser(participantId)) {
-          if (dev.ws.readyState === WebSocket.OPEN) dev.ws.send(JSON.stringify(message));
-        }
-      }
+      deliverToChannel(target.channel, actorUserId, message);
     })();
   }
 
+  /**
+   * Hands a frame to exactly the accounts a channel belongs to.
+   *
+   * A direct channel is a pair of ids joined by a colon, and only that pair. Splitting it without
+   * checking there are exactly two halves would let a malformed channel name fan a private message out
+   * to accounts it has nothing to do with, so the shape is checked rather than assumed.
+   */
+  function deliverToChannel(channel: string | null | undefined, actorUserId: string, message: ServerMessage): void {
+    if (!channel || channel === 'general') {
+      broadcast(message, actorUserId);
+      for (const dev of devicesForUser(actorUserId)) send(dev.ws, message);
+      return;
+    }
+    const parts = channel.split(':');
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+      // a channel that is not a recognisable pair is not relayed to anybody
+      return;
+    }
+    for (const participantId of parts) {
+      for (const dev of devicesForUser(participantId)) {
+        if (dev.ws.readyState !== WebSocket.OPEN) continue;
+        dev.ws.send(JSON.stringify(routeForDevice(message, dev.deviceId)));
+      }
+    }
+  }
+
+  /**
+   * Hands a device the one body out of a fan-out that it can open.
+   *
+   * An edit and a deletion both go out over the same audience as the message they act on, and a corrected
+   * private message is now sealed per device like any other. So a device has to be given its own copy
+   * rather than the whole set: every body in it but one is bytes this device cannot read, and handing
+   * those out on a broadcast is how a phone learns what a laptop was sent.
+   *
+   * The stored row keeps the whole fan-out, because the next sign-in of any device still has to find its
+   * own copy in history.
+   */
+  function routeForDevice(message: ServerMessage, deviceId: string): ServerMessage {
+    const payload = message.payload as any;
+    if (!payload || !isValidDeviceBodies(payload.encrypted)) return message;
+    return { ...message, payload: { ...payload, encrypted: bodyForDevice(payload.encrypted, deviceId) } };
+  }
+
   async function handleDmHistory(userId: string, ws: WebSocket, payload: { with: string; before?: number; limit?: number }): Promise<void> {
-  if (!payload?.with || typeof payload.with !== 'string') return;
-  if (payload.with === userId) return;
-  const channel = getDmChannelId(userId, payload.with);
-  const parts = channel.split(':');
-  if (parts.length !== 2 || (parts[0] !== userId && parts[1] !== userId)) return;
-const before = Number.isFinite(payload.before) ? Number(payload.before) : undefined;
-    const limit = Math.min(Math.max(Number(payload.limit) || 50, 1), 100);
+    const before = Number.isFinite(payload?.before) ? Number(payload?.before) : undefined;
+    const limit = Math.min(Math.max(Number(payload?.limit) || 50, 1), 100);
+    if (!payload?.with || typeof payload.with !== 'string' || payload.with === userId) {
+      // answered as an empty conversation rather than ignored, so the client clears the chat it asked
+      // about instead of showing whatever was there before
+      send(ws, {
+        type: before === undefined ? 'dm_history' : 'dm_history_page',
+        payload: { channel: getDmChannelId(userId, String(payload?.with || userId)), with: payload?.with, publicKeys: {}, hasMore: false, messages: [] },
+        timestamp: Date.now(),
+      });
+      return;
+    }
+    const channel = getDmChannelId(userId, payload.with);
+    const parts = channel.split(':');
+    if (parts.length !== 2 || (parts[0] !== userId && parts[1] !== userId)) return;
     const messages = await getDmHistory(userId, payload.with, limit, before);
     const publicKeys = await getPublicKeysByIds([userId, payload.with]);
     const userMeta = await buildAvatarInfoMap();
     const page = {
-   channel,
-   with: payload.with,
-   publicKeys,
-   hasMore: messages.length === limit,
-   messages: await handleDmHistoryMessages(userId, messages, userMeta),
-   };
+      channel,
+      with: payload.with,
+      publicKeys,
+      // a short page means the beginning has been reached, which is the only way the client learns to
+      // stop offering "load earlier" on a conversation that will never have more
+      hasMore: messages.length === limit,
+      // history is filtered for the asking device, for the same reason the live frame is: a stored
+      // fan-out carries one body per device of both accounts, and handing a phone the copies sealed for a
+      // laptop tells it things about the account it has no way to learn and gives it bytes it can only
+      // fail to open
+      messages: await handleDmHistoryMessages(userId, messages, userMeta, currentDeviceId),
+    };
     // An older slice has to be announced as a page. Answering it with the plain type made the client
     // replace the whole conversation with this slice, and an empty page blanked the chat entirely.
     send(ws, { type: before === undefined ? 'dm_history' : 'dm_history_page', payload: page, timestamp: Date.now() });
   }
 
   
-  async function handleDmHistoryMessages(userId: string, messages: any[], userMeta: Map<string, { avatarExt: string | null; avatarUpdatedAt: number | null }>): Promise<any[]> {
+  async function handleDmHistoryMessages(
+    userId: string,
+    messages: any[],
+    userMeta: Map<string, { avatarExt: string | null; avatarUpdatedAt: number | null }>,
+    deviceId?: string | null,
+  ): Promise<any[]> {
     const reactionsById = await getReactionsForMessages(messages.map((m) => m.id));
     return messages.map(m => ({
       id: m.id,
@@ -1259,7 +1629,7 @@ const before = Number.isFinite(payload.before) ? Number(payload.before) : undefi
       senderNickname: m.senderNickname,
       senderAvatar: avatarInfo(userMeta.get(m.senderId)),
    text: m.text || '',
-   encrypted: m.encrypted || null,
+   encrypted: bodyForDevice(m.encrypted, deviceId),
       timestamp: m.timestamp,
       isOwn: m.senderId === userId,
       fileKey: m.fileKey || null,
@@ -1315,10 +1685,20 @@ const before = Number.isFinite(payload.before) ? Number(payload.before) : undefi
       send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'messageId required' }, timestamp: Date.now() });
       return;
     }
+    // Only somebody who can see the message may hear that it went. Announcing a deletion to the whole
+    // server handed every connected user the id and the fact of a private message nobody had any
+    // business knowing existed.
+    const target = await getMessageById(payload.messageId);
+    if (!target || !canAccessMessage(userId, target)) {
+      send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
+      return;
+    }
     const deleted = await deleteMessage(payload.messageId, userId);
     if (deleted) {
-      send(ws, { type: 'message_deleted', payload: { messageId: payload.messageId }, timestamp: Date.now() });
-      broadcast({ type: 'message_deleted', payload: { messageId: payload.messageId }, timestamp: Date.now() }, userId);
+      const notice = { type: 'message_deleted', payload: { messageId: payload.messageId }, timestamp: Date.now() };
+      // the row is gone by now, so the channel it belonged to is the one captured above
+      deliverToChannel(target.channel, userId, notice);
+      send(ws, notice);
     } else {
       send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
     }
@@ -1340,7 +1720,10 @@ const before = Number.isFinite(payload.before) ? Number(payload.before) : undefi
     // than as words. The server checks that the account wrote the message and swaps the body; it never
     // sees either version of the text.
     if (target.encrypted) {
-      if (!payload.encrypted || typeof payload.encrypted !== 'object' || typeof payload.encrypted.ciphertext !== 'string' || !payload.encrypted.ciphertext) {
+      // Either shape, because a correction is now sealed per device like any other message - and a
+      // server that rejected the fan-out would push clients back to the long-lived envelope, which is
+      // the thing that had to go
+      if (!isValidDmEncryptedPayload(payload.encrypted)) {
         send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'An encrypted message must be edited as ciphertext' }, timestamp: Date.now() });
         return;
       }
@@ -1379,11 +1762,18 @@ const before = Number.isFinite(payload.before) ? Number(payload.before) : undefi
     }
   }
 
-  async function handleAuthUpdateKey(userId: string, ws: WebSocket, payload: { publicKey: any }): Promise<void> {
+  async function handleAuthUpdateKey(userId: string, ws: WebSocket, payload: { publicKey: any; preKeyBundle?: any; deviceId?: string; identityKey?: string }): Promise<void> {
     if (payload?.publicKey && isValidPublicKey(payload.publicKey)) {
       await updatePublicKey(userId, payload.publicKey);
       send(ws, { type: 'key_updated', payload: {}, timestamp: Date.now() });
       broadcast({ type: 'public_key_updated', payload: { userId, publicKey: payload.publicKey }, timestamp: Date.now() }, userId);
+    }
+    // A client whose identity changed is not just republishing an RSA key: it has new ratchet material
+    // and possibly a new account key, and a peer holding the old ones has to hear about it rather than
+    // keep sending into a session that can never open again.
+    await storePreKeys(userId, currentDeviceId, payload);
+    if (isValidPreKeyBundle(payload?.preKeyBundle)) {
+      broadcast({ type: 'prekeys_changed', payload: { userId }, timestamp: Date.now() }, userId);
     }
   }
 
@@ -1394,9 +1784,13 @@ const before = Number.isFinite(payload.before) ? Number(payload.before) : undefi
    * wrong type used to be bound straight into the column, which threw inside the driver and lost the
    * message.
    */
-  async function handlePreKeyUpload(userId: string, ws: WebSocket, payload: { bundle: any }): Promise<void> {
+  async function handlePreKeyUpload(userId: string, ws: WebSocket, payload: { bundle: any; deviceId?: string }): Promise<void> {
     if (payload?.bundle && isValidPreKeyBundle(payload.bundle)) {
-      await setPreKeyBundle(userId, payload.bundle);
+      // Against the uploading device, not the account: two devices of one account hold different ratchet
+      // keys, and a row keyed on the account alone would mean the second upload silently replaced the
+      // first and every message would stop reaching it.
+      const deviceId = typeof payload.deviceId === 'string' && payload.deviceId.length > 0 ? payload.deviceId : currentDeviceId;
+      if (deviceId) await setPreKeyBundle(userId, deviceId, payload.bundle);
       send(ws, { type: 'prekey_uploaded', payload: {}, timestamp: Date.now() });
     } else {
       logSecurity('PREKEY_REJECTED', { userId, ...preKeyBundleDiagnostics(payload?.bundle) });
@@ -1404,14 +1798,29 @@ const before = Number.isFinite(payload.before) ? Number(payload.before) : undefi
     }
   }
 
-  /** Fetches the bundles a conversation needs, capped so one frame cannot ask for the whole table. */
+  /**
+   * Fetches the bundles a conversation needs, capped so one frame cannot ask for the whole table.
+   *
+   * Also metered, because a bundle is public material for anybody who asks: unbounded, this is a way to
+   * walk the whole user table - who has a published key at all, and since when - one hundred ids at a
+   * time, from an account that registered for nothing else. A few hundred fetches an hour is far more
+   * than a client needs to keep its conversations current.
+   */
   async function handlePreKeyFetch(userId: string, ws: WebSocket, payload: { userIds?: string[] }): Promise<void> {
+    if (!preKeyFetchAllowed(userId)) {
+      send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down. Try again shortly.' }, timestamp: Date.now() });
+      return;
+    }
     if (!payload?.userIds || !Array.isArray(payload.userIds) || payload.userIds.length === 0) {
       send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'userIds array required' }, timestamp: Date.now() });
       return;
     }
-    const bundles = await getPreKeyBundlesByIds(payload.userIds.filter(id => typeof id === 'string').slice(0, 100));
-    send(ws, { type: 'prekey_bundles', payload: { bundles }, timestamp: Date.now() });
+    const ids = payload.userIds.filter(id => typeof id === 'string').slice(0, 100);
+    const bundles = await getPreKeyBundlesByIds(ids);
+    // Account identity keys ride along with the fetch, because a safety number needs the peer's and
+    // asking for it separately would be one more round trip for something that changes once in years.
+    const identityKeys = await getIdentityKeysByIds(ids);
+    send(ws, { type: 'prekey_bundles', payload: { bundles, identityKeys }, timestamp: Date.now() });
   }
 
   async function handleProfileGet(userId: string, ws: WebSocket, payload: { userId?: string }): Promise<void> {
@@ -1509,6 +1918,47 @@ const before = Number.isFinite(payload.before) ? Number(payload.before) : undefi
     }
   }
 }
+
+  /**
+   * Relays "still typing" to whoever is in the conversation.
+   *
+   * Nothing is stored. The signal is only interesting while it is fresh, so keeping it would mean
+   * holding a record of who was in which conversation and when, for no reason - the frame goes to the
+   * other end and expires on a timer there.
+   */
+  async function handleTyping(userId: string, ws: WebSocket, payload: { channel?: string }): Promise<void> {
+    const channel = typeof payload?.channel === 'string' ? payload.channel : 'general';
+    if (channel === 'general') {
+      broadcast({ type: 'typing', payload: { channel: 'general', userId }, timestamp: Date.now() }, userId);
+      return;
+    }
+    // only a direct channel this account is actually one end of may be named
+    const parts = channel.split(':');
+    if (parts.length !== 2 || (parts[0] !== userId && parts[1] !== userId)) return;
+    const otherId = parts[0] === userId ? parts[1] : parts[0];
+    const frame = { type: 'typing', payload: { channel, userId, peerId: otherId }, timestamp: Date.now() };
+    for (const dev of devicesForUser(otherId)) send(dev.ws, frame);
+  }
+
+  /**
+   * Relays "I have read up to here" to the other end of a conversation.
+   *
+   * Deliberately not written down anywhere. A read receipt is a fact about one device, and the person
+   * reading it only cares whether the conversation they are looking at has been seen; persisting it
+   * would turn a convenience into a durable record of how far each conversation had been read, which is
+   * exactly the sort of thing this server tries not to hold. Each of the reader's other devices says so
+   * for itself.
+   */
+  async function handleDmRead(userId: string, ws: WebSocket, payload: { channel?: string; upTo?: number }): Promise<void> {
+    const channel = typeof payload?.channel === 'string' ? payload.channel : '';
+    const upTo = Number(payload?.upTo);
+    if (!channel || !Number.isFinite(upTo) || upTo <= 0) return;
+    const parts = channel.split(':');
+    if (parts.length !== 2 || (parts[0] !== userId && parts[1] !== userId)) return;
+    const otherId = parts[0] === userId ? parts[1] : parts[0];
+    const frame = { type: 'dm_read', payload: { channel, userId, peerId: otherId, upTo }, timestamp: Date.now() };
+    for (const dev of devicesForUser(otherId)) send(dev.ws, frame);
+  }
 
   async function handleGetSessions(userId: string, ws: WebSocket, currentDeviceId: string | null): Promise<void> {
     await ensureSessionRegistry();
@@ -1637,6 +2087,13 @@ const before = Number.isFinite(payload.before) ? Number(payload.before) : undefi
       send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Invalid report' }, timestamp: Date.now() });
       return;
     }
+    // The report table is capped, and the cap evicts the oldest row. One account filing a thousand
+    // reports in a second therefore pushed out every genuine one a moderator had not read yet, which
+    // makes the cap a weapon rather than a bound. A reporter gets a handful an hour.
+    if (!reportAllowed(userId)) {
+      send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Too many reports, try again later' }, timestamp: Date.now() });
+      return;
+    }
     const source: 'profile' | 'message' = payload?.source === 'profile' ? 'profile' : 'message';
     const reporter = clients.get([...userDevices.get(userId) || []][0] || '') || null;
     const reporterNick = reporter ? reporter.nickname : 'unknown';
@@ -1743,21 +2200,48 @@ export function startHeartbeatCheck(): void {
     }
   }, HEARTBEAT_INTERVAL);
 
+  // Every one of these tables is keyed by something a stranger controls - an address, an account id - so
+  // none of them can be swept on disconnect alone. They used to be pruned only where a failure happened
+  // to check, which left the registration table, the report table and the connection table growing for
+  // as long as the process ran.
   setInterval(() => {
     const now = Date.now();
     for (const [ip, entry] of authAttempts) {
       if (now > entry.resetAt) authAttempts.delete(ip);
     }
-    for (const [ip, last] of lastMessageTime) {
-      if (now - last > RATE_LIMIT_WINDOW) lastMessageTime.delete(ip);
+    for (const [key, last] of lastMessageTime) {
+      if (now - last > RATE_LIMIT_WINDOW) lastMessageTime.delete(key);
     }
     for (const [key, entry] of failedLogins) {
       if (entry.lockedUntil > 0 && now > entry.lockedUntil) failedLogins.delete(key);
     }
-   for (const [uid, last] of lastAvatarChange) {
-   if (now - last > AVATAR_CHANGE_INTERVAL_MS) lastAvatarChange.delete(uid);
-   }
-   }, RATE_LIMIT_WINDOW);
+    for (const [key, entry] of nicknameFailures) {
+      if (entry.lockedUntil > 0 && now > entry.lockedUntil) nicknameFailures.delete(key);
+    }
+    for (const [uid, last] of lastAvatarChange) {
+      if (now - last > AVATAR_CHANGE_INTERVAL_MS) lastAvatarChange.delete(uid);
+    }
+    for (const [ip, times] of registrationsByIp) {
+      const recent = times.filter((t) => now - t <= REGISTRATION_WINDOW_MS);
+      if (recent.length === 0) registrationsByIp.delete(ip);
+      else registrationsByIp.set(ip, recent);
+    }
+    for (const [uid, times] of reportsByUser) {
+      const recent = times.filter((t) => now - t <= REPORT_WINDOW_MS);
+      if (recent.length === 0) reportsByUser.delete(uid);
+      else reportsByUser.set(uid, recent);
+    }
+    for (const [uid, times] of preKeyFetches) {
+      const recent = times.filter((t) => now - t <= PREKEY_FETCH_WINDOW_MS);
+      if (recent.length === 0) preKeyFetches.delete(uid);
+      else preKeyFetches.set(uid, recent);
+    }
+    // a slot is only released on disconnect, so anything still at zero belongs to a socket that has
+    // gone away without the release running
+    for (const [key, count] of connectionCounts) {
+      if (count <= 0) connectionCounts.delete(key);
+    }
+  }, RATE_LIMIT_WINDOW);
 
   scheduleWeeklyCleanup();
 }

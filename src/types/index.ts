@@ -40,7 +40,17 @@ export interface Message {
   quotedMessageText?: string;
   quotedMessageSender?: string;
   editedAt?: number;
-expiresAt?: number;
+  expiresAt?: number;
+  /**
+   * The sealed body, for a private message.
+   *
+   * Carried on the message rather than only on the server row because a correction arrives as a new
+   * ciphertext: the reducer swaps it in, and the bubble opens it again. Without it a corrected private
+   * message had no text to show and rendered blank until the page was reloaded.
+   */
+  encrypted?: any;
+  /** The sender's own stamp on an outgoing direct message, used to match the local copy of the text. */
+  clientId?: string;
 }
 
 export interface Contact {
@@ -77,10 +87,29 @@ export interface AppSettings {
   language: 'en' | 'ru';
   notifications: boolean;
   soundEnabled: boolean;
+  /**
+   * Whether a notification shows the words of the message.
+   *
+   * Off means a notification says who wrote and nothing else. Worth having as a setting rather than a
+   * default: a notification is one of the few places a private message leaves the app, and it is rendered
+   * by the operating system, where anything else running may be able to read it.
+   */
+  notificationPreview: boolean;
   fontSize: 'small' | 'normal' | 'large';
   compactMode: boolean;
   disappearingTTL: 'off' | '24h' | '7d' | '30d';
   screenshotProtection: boolean;
+  /**
+   * Whether a passcode is asked for before the conversation is shown.
+   *
+   * About the device, not the account: it is for an unattended machine, it re-encrypts nothing, and it is
+   * forgotten by removing it in Settings, which takes the account password.
+   */
+  appLockEnabled: boolean;
+  /** Milliseconds of doing nothing before the app covers itself. Zero means only on launch. */
+  appLockAutoLockMs: number;
+  /** Milliseconds between echoes of a conversation being read, if the reader ever looks away. */
+  readReceiptsDelayMs: number;
 }
 
 

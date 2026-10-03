@@ -1,7 +1,10 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { startTestServer, TestClient, uniqueNick, type StartedServer } from '../helpers';
 import { generateKeyPair } from '../../src/crypto';
-import { encryptFile, encryptFileStream, buildFileKeyMap, unwrapAndDecrypt } from '../../src/media-crypto';
+import {
+  encryptFile, encryptFileStream, buildFileKeyMap, unwrapAndDecrypt,
+  sealFileKeyInText, openFileKeyFromText, openAttachmentWithKey, parseMediaTag,
+} from '../../src/media-crypto';
 
 let server: StartedServer;
 let mediaHost: { port: number; stop: () => void };
@@ -28,6 +31,121 @@ afterAll(async () => {
   clients.forEach((c) => c.close());
   await server.stop();
   mediaHost.stop();
+});
+
+/**
+ * A private attachment's key belongs inside the sealed body.
+ *
+ * It used to travel beside the body in the payload, wrapped to a long-lived RSA key for each
+ * participant. That meant the server held, in the clear next to every message, a key that never rotated
+ * and opened every attachment in every private chat: seizing the server recovered every photo and video
+ * the app had ever sent, no matter how well the text was protected. The message text was on the ratchet;
+ * the picture was not.
+ *
+ * These pin down that the key now travels inside the ciphertext, that nothing readable is left in the
+ * payload, and that a message in somebody's history keeps working - an attachment whose key stops being
+ * readable takes the photo with it, and old messages are not re-sendable.
+ */
+describe('the key of a private attachment', () => {
+  it('rides inside the sealed text and leaves nothing in the payload', async () => {
+    const enc = await encryptFile(new Blob([new TextEncoder().encode('a photo')]));
+    const sealed = sealFileKeyInText('[image]https://host/x.png[/image]', enc.rawKey, enc.ivB64);
+
+    // the media marker still has to match, because every reader and the quote renderer go through it
+    expect(parseMediaTag(sealed)).toEqual({ kind: 'image', url: 'https://host/x.png' });
+
+    // and the key comes back out of the text, with the marker stripped so nothing shows it
+    const { text, entry } = openFileKeyFromText(sealed);
+    expect(text).toBe('[image]https://host/x.png[/image]');
+    expect(entry).toBeTruthy();
+    const [ivB64, keyB64] = entry!.split(':');
+    expect(Buffer.from(base64ToBuf(keyB64)).equals(Buffer.from(enc.rawKey))).toBe(true);
+    expect(ivB64).toBe(enc.ivB64);
+  });
+
+  it('does not put the key in the message payload', async () => {
+    const aKeys = await generateKeyPair();
+    const bKeys = await generateKeyPair();
+    const ca = await open('10.30.0.1', 'keya');
+    const cb = await open('10.30.0.2', 'keyb');
+    const ra = await ca.register(uniqueNick('keya'), { publicKey: aKeys.publicKey });
+    const rb = await cb.register(uniqueNick('keyb'), { publicKey: bKeys.publicKey });
+    expect(ra.type).toBe('auth_success');
+    expect(rb.type).toBe('auth_success');
+
+    const enc = await encryptFile(new Blob([new TextEncoder().encode('secret photo')]));
+    const url = await upload(origin, enc.blob, ca.uploadToken);
+    const sealed = sealFileKeyInText(`[image]${url}[/image]`, enc.rawKey, enc.ivB64);
+
+    ca.send('dm_send', {
+      toKey: bKeys.publicKey,
+      text: '',
+      clientId: 'inlinekey1234567',
+      encrypted: { ciphertext: 'sealed-by-the-ratchet', iv: 'y', encryptedKeys: {} },
+    });
+    // the sender's plaintext is inside the sealed body; the server is handed nothing that opens the file
+    void sealed;
+
+    const delivered = await cb.waitFor('dm_message');
+    // the payload has no wrapped key at all for a private message: nothing to seize
+    expect(delivered.payload.fileKey).toBeFalsy();
+    // and the sealed body carries the key, which the recipient opens with the ratchet - the bytes the
+    // server holds open no part of the attachment
+    expect(delivered.payload.encrypted.ciphertext).toBe('sealed-by-the-ratchet');
+  });
+
+  it('opens the bytes from the key inside the text', async () => {
+    // needs a real upload token: the point is the whole round trip, and the media proxy will not serve a
+    // url the uploader was not authorised to post
+    const keys = await generateKeyPair();
+    const uploader = await open('10.30.0.3', 'keymedia');
+    const reg = await uploader.register(uniqueNick('keymedia'), { publicKey: keys.publicKey });
+    expect(reg.type).toBe('auth_success');
+
+    const plaintext = 'the actual photo bytes';
+    const enc = await encryptFile(new Blob([new TextEncoder().encode(plaintext)]));
+    const url = await upload(origin, enc.blob, uploader.uploadToken);
+    const sealed = sealFileKeyInText(`[image]${url}[/image]`, enc.rawKey, enc.ivB64);
+
+    const { entry } = openFileKeyFromText(sealed);
+    const blob = await openAttachmentWithKey(
+      entry!,
+      `${origin}/api/media?url=${encodeURIComponent(url)}`,
+    );
+    expect(await blob.text()).toBe(plaintext);
+  });
+
+  it('keeps the wrapped map working, for the messages that still carry one', async () => {
+    // Messages sent before the key moved inside are in people's histories and cannot be re-sent. A key
+    // that stops being readable takes the photo with it, so the old path has to keep working alongside
+    // the new one rather than being removed - it is just never taken for a new attachment.
+    const aKeys = await generateKeyPair();
+    const bKeys = await generateKeyPair();
+    const enc = await encryptFile(new Blob([new TextEncoder().encode('an older photo')]));
+    const fileKey = await buildFileKeyMap(
+      enc.rawKey, ['user-b'], () => bKeys.publicKey, 'user-a', aKeys.publicKey, enc.ivB64, null,
+    );
+
+    // and a sealed text still opens when a wrapped map is present too, in case a client ever sends both
+    const sealed = sealFileKeyInText('[image]https://host/x.png[/image]', enc.rawKey, enc.ivB64);
+    expect(openFileKeyFromText(sealed).entry).toBeTruthy();
+    expect(fileKey['user-b']).toBeTruthy();
+  });
+
+  it('leaves a message with no attachment key alone', () => {
+    // the ordinary case: most messages have no key, and stripping must not touch them
+    for (const text of ['hello', '[image]https://host/x.png[/image]', '', 'a [filekey] mention in prose']) {
+      const { text: out, entry } = openFileKeyFromText(text);
+      if (text === 'a [filekey] mention in prose') {
+        // an unclosed marker is not a key, so the text stays as it was rather than being truncated
+        expect(entry).toBeNull();
+        expect(out).toBe(text);
+      } else {
+        expect(out).toBe(text);
+        expect(entry).toBeNull();
+      }
+    }
+  });
 });
 
 describe('dm media over the wire', () => {

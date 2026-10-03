@@ -82,15 +82,22 @@ export async function decryptMessage(
  * agreed order. A server that handed each of them a different key would produce a different number on
  * each side, which is the entire point of putting it on screen: it is the one check that does not depend
  * on the server being honest.
+ *
+ * It needs both keys. With only ours there is nothing to compare against, so no number is produced at
+ * all - a solo digest used to be shown instead, and since it is derived from one key alone the two sides
+ * could never match it. That is a false alarm on the one check people are told to trust, which teaches
+ * them to wave it through. Better to say the number is not available yet.
  */
-export async function generateSafetyNumber(selfIdentityB64: string, peerIdentityB64?: string | null): Promise<string> {
+export async function generateSafetyNumber(
+  selfIdentityB64: string,
+  peerIdentityB64?: string | null
+): Promise<string | null> {
+  if (!peerIdentityB64) return null;
   const self = base64ToU8(selfIdentityB64);
-  const data = peerIdentityB64
-    ? (() => {
-        const peer = base64ToU8(peerIdentityB64);
-        return byteCompare(self, peer) <= 0 ? concatBytes(self, peer) : concatBytes(peer, self);
-      })()
-    : self;
+  if (self.length === 0) return null;
+  const peer = base64ToU8(peerIdentityB64);
+  if (peer.length === 0) return null;
+  const data = byteCompare(self, peer) <= 0 ? concatBytes(self, peer) : concatBytes(peer, self);
   const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', data as unknown as ArrayBuffer));
   const groups: string[] = [];
   for (let i = 0; i < 24; i += 4) {

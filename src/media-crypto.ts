@@ -328,6 +328,15 @@ export async function wrapFileKeyForChannel(
   return bufToBase64(ct);
 }
 
+/**
+ * The wrapped-key map, for the public channel only.
+ *
+ * A `#general` attachment is not encrypted and cannot be: there is nobody to encrypt it to. The channel
+ * has one symmetric key, the server hands it to signed-in clients, and the wrapped key travels beside
+ * the file. That is a deliberate property of a public room rather than a private-message shortcut, which
+ * is why this function is no longer called for direct messages at all — a private attachment's key goes
+ * inside the sealed body instead.
+ */
 export async function buildFileKeyMap(
   rawKey: ArrayBuffer,
   recipientIds: string[],
@@ -359,6 +368,62 @@ export async function buildFileKeyMap(
   return map;
 }
 
+/**
+ * Packs the attachment key into the message text, which is then sealed with everything else.
+ *
+ * This is the whole reason a private attachment can be opened. The alternative - which is what this app
+ * used to do - was to wrap the file key to a long-lived RSA key for each participant and put the wrapped
+ * copies in the message payload, outside the ciphertext. That put every attachment's key on the server
+ * under a key that never rotated: seizing the server opened every photo and video ever sent in every
+ * private chat, no matter how well the message text itself was protected.
+ *
+ * Putting the key inside the sealed body removes the long-lived key from the path entirely. The
+ * attachment now travels exactly as the words do: one sealed copy per device, forward secrecy, and
+ * nothing on the server that opens it.
+ *
+ * The key is carried as `<iv>:<key>` in base64, in a marker the reader strips before showing anything.
+ */
+const FILE_KEY_MARKER = '[filekey]';
+const FILE_KEY_MARKER_END = '[/filekey]';
+
+/** Wraps a file key into the message text that gets sealed. */
+export function sealFileKeyInText(text: string, rawKey: ArrayBuffer, ivB64: string): string {
+  const packed = `${FILE_KEY_MARKER}${ivB64}:${bufToBase64(rawKey)}${FILE_KEY_MARKER_END}`;
+  // appended rather than prepended, so the media marker at the start of the line keeps matching the way
+  // every reader and the quote renderer already expect
+  return `${text}\n${packed}`;
+}
+
+/**
+ * Pulls the attachment key back out and returns the text without it.
+ *
+ * Returns null when there is no key in the text, which is the ordinary case for anything that is not a
+ * private attachment and for every attachment sent before this change.
+ */
+export function openFileKeyFromText(text: string): { text: string; entry: string | null } {
+  const start = text.indexOf(FILE_KEY_MARKER);
+  if (start < 0) return { text, entry: null };
+  const end = text.indexOf(FILE_KEY_MARKER_END, start);
+  if (end < 0) return { text, entry: null };
+  const entry = text.slice(start + FILE_KEY_MARKER.length, end);
+  return { text: text.slice(0, start).replace(/\n$/, ''), entry: entry || null };
+}
+
+/** Opens an attachment from a key that came out of the sealed message body. */
+export async function openAttachmentWithKey(entry: string, url: string): Promise<Blob> {
+  const [ivB64, keyB64] = entry.split(':');
+  if (!ivB64 || !keyB64) throw new Error('Malformed file key');
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`Fetch failed: ${res.status}`);
+  return openStreamedAttachment(res, base64ToBuf(keyB64), ivB64);
+}
+
+/**
+ * Opens an attachment from the old wrapped-key map, for messages sent before the key moved inside.
+ *
+ * Kept because those messages are still in people's histories and are not re-sendable: a key that stops
+ * being readable takes a photo with it. New messages never come through here.
+ */
 export async function unwrapAndDecrypt(
   entry: string,
   url: string,

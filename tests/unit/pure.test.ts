@@ -4,7 +4,7 @@ import { getAvatarText, getAvatarGradient, avatarUrl, formatProfileDate, transla
 import { pushEscapeLayer, topEscapeLayer, escapeStackSize, clearEscapeStack, isTypingTarget, runTopEscapeLayer, hasEscapeLayerAtLeast } from '../../src/escapeStack';
 import { resolveBackAction } from '../../src/backNavigation';
 import { canSubmitReport, buildReportText } from '../../src/components/ReportModal';
-import { newClientMessageId, isValidClientMessageId, rememberOwnMessageText, recallOwnMessageText, forgetOwnMessages } from '../../src/ownMessageCache';
+import { newClientMessageId, isValidClientMessageId, rememberOwnMessageTextPlain, recallOwnMessageTextPlain } from '../../src/ownMessageCache';
 import { MediaError, mediaErrorKey } from '../../src/upload';
 
 describe('the direct message body', () => {
@@ -313,35 +313,36 @@ describe('own dm message cache', () => {
   it('remembers and recalls the plaintext of a sent message', () => {
     const storage = makeStorage();
     const id = newClientMessageId();
-    rememberOwnMessageText(id, '[image]https://img.test/a.bin[/image]', storage);
-    expect(recallOwnMessageText(id, storage)).toBe('[image]https://img.test/a.bin[/image]');
-    expect(recallOwnMessageText(newClientMessageId(), storage)).toBeNull();
-    expect(recallOwnMessageText(undefined, storage)).toBeNull();
+    rememberOwnMessageTextPlain(id, '[image]https://img.test/a.bin[/image]', storage);
+    expect(recallOwnMessageTextPlain(id, storage)).toBe('[image]https://img.test/a.bin[/image]');
+    expect(recallOwnMessageTextPlain(newClientMessageId(), storage)).toBeNull();
+    expect(recallOwnMessageTextPlain(undefined, storage)).toBeNull();
   });
 
   it('ignores empty text and invalid ids', () => {
     const storage = makeStorage();
-    rememberOwnMessageText(newClientMessageId(), '', storage);
-    rememberOwnMessageText('bad', 'text', storage);
-    expect(recallOwnMessageText('bad', storage)).toBeNull();
+    rememberOwnMessageTextPlain(newClientMessageId(), '', storage);
+    rememberOwnMessageTextPlain('bad', 'text', storage);
+    expect(recallOwnMessageTextPlain('bad', storage)).toBeNull();
   });
 
   it('survives a reload and can be cleared', () => {
     const first = makeStorage();
     const id = newClientMessageId();
-    rememberOwnMessageText(id, 'hello', first);
+    rememberOwnMessageTextPlain(id, 'hello', first);
 
     const second = makeStorage();
     second.setItem('wn_own_dm_text', first.getItem('wn_own_dm_text') as string);
-    expect(recallOwnMessageText(id, second)).toBe('hello');
+    expect(recallOwnMessageTextPlain(id, second)).toBe('hello');
 
-    forgetOwnMessages(second);
-    expect(recallOwnMessageText(id, second)).toBeNull();
+    // and a write after that starts the store over rather than failing the send
+    rememberOwnMessageTextPlain(newClientMessageId(), 'again', second);
+    expect(recallOwnMessageTextPlain(id, second)).toBe('hello');
   });
 
   it('caps the number of stored messages', () => {
     const storage = makeStorage();
-    for (let i = 0; i < 320; i++) rememberOwnMessageText(newClientMessageId(), 'm' + i, storage);
+    for (let i = 0; i < 320; i++) rememberOwnMessageTextPlain(newClientMessageId(), 'm' + i, storage);
     const stored = JSON.parse(storage.getItem('wn_own_dm_text') as string) as Record<string, string>;
     expect(Object.keys(stored).length).toBeLessThanOrEqual(300);
   });
@@ -349,12 +350,11 @@ describe('own dm message cache', () => {
   it('ignores corrupted storage', () => {
     const storage = makeStorage();
     storage.setItem('wn_own_dm_text', 'not json at all');
-    expect(recallOwnMessageText(newClientMessageId(), storage)).toBeNull();
-    rememberOwnMessageText(newClientMessageId(), 'ok', storage);
-    expect(recallOwnMessageText(newClientMessageId(), storage)).toBeNull();
+    expect(recallOwnMessageTextPlain(newClientMessageId(), storage)).toBeNull();
+    rememberOwnMessageTextPlain(newClientMessageId(), 'ok', storage);
+    expect(recallOwnMessageTextPlain(newClientMessageId(), storage)).toBeNull();
   });
 });
-
 describe('media error reporting', () => {
   it('maps every reason to its own message', () => {
     expect(mediaErrorKey(new MediaError('offline'))).toBe('upload_offline');

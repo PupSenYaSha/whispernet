@@ -5,6 +5,7 @@ import type { KeyPair, PreKeyBundle, SignalPreKeyMessage } from './types';
 import { generateKeyPair } from './keys';
 
 const INFO_X3DH = new TextEncoder().encode('WhisperNetX3DH');
+const INFO_TRANSCRIPT = new TextEncoder().encode('WhisperNetX3DHTranscript');
 
 export interface X3DHResult {
   sharedSecret: Uint8Array;
@@ -99,6 +100,49 @@ function deriveX3DHSecret(
   input.set(dh4, dh1.length + dh2.length + dh3.length);
 
   return hkdf(sha256, input, new Uint8Array(32), INFO_X3DH, 32);
+}
+
+function lengthPrefixed(...parts: (Uint8Array | null | undefined)[]): Uint8Array<ArrayBuffer> {
+  const present = parts.filter((p): p is Uint8Array => !!p && p.length > 0);
+  let total = 0;
+  for (const p of present) total += 4 + p.length;
+  const out = new Uint8Array(total);
+  let at = 0;
+  for (const p of present) {
+    new DataView(out.buffer).setUint32(at, p.length, false);
+    at += 4;
+    out.set(p, at);
+    at += p.length;
+  }
+  return out;
+}
+
+/**
+ * A digest of everything the handshake was built out of, which both ends compute the same way.
+ *
+ * The initiator knows all of it before it sends anything; the responder has all of it in the message it
+ * was sent. Binding it into every message afterwards means a ciphertext is only ever accepted inside
+ * the conversation it was made for - it cannot be lifted into another one, and it cannot be presented as
+ * the opening message of a handshake that never happened.
+ */
+export function x3dhTranscriptHash(
+  initiatorIdentityKey: Uint8Array,
+  responderIdentityKey: Uint8Array,
+  baseKey: Uint8Array,
+  signedPreKey: Uint8Array | null | undefined,
+  oneTimePreKey: Uint8Array | null | undefined
+): Uint8Array {
+  const body = new Uint8Array([
+    ...INFO_TRANSCRIPT,
+    ...lengthPrefixed(
+      initiatorIdentityKey,
+      responderIdentityKey,
+      baseKey,
+      signedPreKey ?? null,
+      oneTimePreKey ?? null
+    ),
+  ]);
+  return sha256(body);
 }
 
 function deriveMessageKeys(sharedSecret: Uint8Array): Uint8Array[] {

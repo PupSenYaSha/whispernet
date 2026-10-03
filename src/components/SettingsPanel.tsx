@@ -1,9 +1,14 @@
-﻿import { useState, useEffect, useMemo, useCallback } from 'react';
-import type { AccentColor } from '../types';
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import type { AccentColor, Session } from '../types';
 import { useConnection } from '../context';
 import { cn } from '../utils';
 import { Avatar } from './Avatar';
 import { useEscapeKey } from '../useEscapeKey';
+import { isAppLockSet, setAppLockCode, clearAppLockCode } from '../appLock';
+import { readStoredAuth } from '../device-crypto';
+import { resetEncryptionIdentity } from '../dmCrypto';
+import { clearVerification } from '../verification';
+import { ChangePasswordModal } from './ChangePasswordModal';
 
 declare const __APP_VERSION__: string;
 
@@ -90,6 +95,152 @@ function PrivacyNotice() {
 
 
 
+/**
+ * Turning the passcode on and off.
+ *
+ * Establishing one asks for it twice, because a mistyped code nobody can see is a lock somebody cannot
+ * open. Turning it off asks for the account password, not the code: the point of the code is to stop
+ * somebody who does not have the account password, and a way to remove it that only needs the code makes
+ * it decoration.
+ */
+function AppLockSection() {
+  const { state, updateSettings, t } = useConnection();
+  const [code, setCode] = useState('');
+  const [repeat, setRepeat] = useState('');
+  const [current, setCurrent] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [confirm, setConfirm] = useState<'set' | 'remove' | null>(null);
+
+  const enabled = state.settings.appLockEnabled && isAppLockSet();
+
+  const establish = async () => {
+    setError(null);
+    if (code !== repeat) { setError(t('app_lock_mismatch')); return; }
+    setBusy(true);
+    const result = await setAppLockCode(code);
+    setBusy(false);
+    if (!result.ok) { setError(result.reason); return; }
+    updateSettings({ appLockEnabled: true });
+    setCode(''); setRepeat(''); setConfirm(null);
+  };
+
+  const remove = async () => {
+    setError(null);
+    if (!current) return;
+    setBusy(true);
+    // the account password, checked against the same blob sign-in uses
+    const ok = await verifyAccountPassword(state.nickname, current);
+    setBusy(false);
+    if (!ok) { setError(t('app_lock_wrong_password')); return; }
+    await clearAppLockCode();
+    updateSettings({ appLockEnabled: false });
+    setCurrent(''); setConfirm(null);
+  };
+
+  return (
+    <div className="py-3.5 px-4 hover:bg-bg-tertiary/40 transition-colors space-y-2">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="w-9 h-9 rounded-2xl bg-gradient-to-br from-bg-tertiary to-bg-tertiary/60 border border-border-default flex items-center justify-center text-fg-muted flex-shrink-0">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
+            </svg>
+          </div>
+          <span className="text-[15px] text-fg-primary">{t('app_lock')}</span>
+        </div>
+        <Toggle
+          checked={enabled}
+          onChange={(v) => {
+            setError(null);
+            setConfirm(v ? 'set' : 'remove');
+          }}
+        />
+      </div>
+
+      {confirm === 'set' && (
+        <div className="pt-2 space-y-2">
+          <p className="text-[11.5px] text-fg-muted leading-relaxed">{t('app_lock_desc')}</p>
+          <input type="password" inputMode="numeric" autoComplete="new-password" value={code}
+            onChange={(e) => setCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 12))}
+            placeholder={t('app_lock_new')}
+            aria-label={t('app_lock_new')}
+            className="w-full px-3 py-2.5 rounded-xl bg-bg-tertiary border border-border-default text-[15px] tracking-[0.3em] text-fg-primary placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary" />
+          <input type="password" inputMode="numeric" autoComplete="new-password" value={repeat}
+            onChange={(e) => setRepeat(e.target.value.replace(/[^0-9]/g, '').slice(0, 12))}
+            placeholder={t('app_lock_repeat')}
+            aria-label={t('app_lock_repeat')}
+            className="w-full px-3 py-2.5 rounded-xl bg-bg-tertiary border border-border-default text-[15px] tracking-[0.3em] text-fg-primary placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary" />
+          <div className="flex gap-2">
+            <button onClick={establish} disabled={busy || !code || !repeat}
+              className="flex-1 py-2.5 rounded-xl bg-accent-primary text-accent-text text-[13px] font-semibold hover:opacity-90 transition-opacity disabled:opacity-40">
+              {t('app_lock_set')}
+            </button>
+            <button onClick={() => { setConfirm(null); setError(null); }}
+              className="px-4 py-2.5 rounded-xl border border-border-default text-fg-primary text-[13px] font-medium hover:bg-bg-tertiary transition-colors">
+              {t('cancel')}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {confirm === 'remove' && (
+        <div className="pt-2 space-y-2">
+          <p className="text-[11.5px] text-fg-muted leading-relaxed">{t('app_lock_remove_desc')}</p>
+          <input type="password" autoComplete="current-password" value={current}
+            onChange={(e) => setCurrent(e.target.value)}
+            placeholder={t('password')}
+            aria-label={t('password')}
+            className="w-full px-3 py-2.5 rounded-xl bg-bg-tertiary border border-border-default text-[15px] text-fg-primary placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary" />
+          <div className="flex gap-2">
+            <button onClick={remove} disabled={busy || !current}
+              className="flex-1 py-2.5 rounded-xl border border-status-error/40 text-status-error text-[13px] font-semibold hover:bg-status-error/10 transition-colors disabled:opacity-40">
+              {t('app_lock_remove')}
+            </button>
+            <button onClick={() => { setConfirm(null); setError(null); }}
+              className="px-4 py-2.5 rounded-xl border border-border-default text-fg-primary text-[13px] font-medium hover:bg-bg-tertiary transition-colors">
+              {t('cancel')}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {error && <p className="text-[12px] text-status-error" role="alert">{error}</p>}
+
+      {enabled && confirm === null && (
+        <div className="pt-2 space-y-2">
+          <Option label={t('app_lock_auto')} stacked icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" /></svg>}>
+            <Segmented
+              value={String(state.settings.appLockAutoLockMs)}
+              onChange={(v) => updateSettings({ appLockAutoLockMs: Number(v) })}
+              options={[
+                { value: '0', label: t('app_lock_never') },
+                { value: '60000', label: t('app_lock_1m') },
+                { value: '300000', label: t('app_lock_5m') },
+                { value: '900000', label: t('app_lock_15m') },
+              ]}
+            />
+          </Option>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Whether this is the account password.
+ *
+ * Checked against the same blob sign-in uses, which is already on this device under a non-extractable
+ * key. It is a local comparison rather than a round trip to the server, because a lock that could be
+ * removed by anybody who can reach the network is not a lock.
+ */
+async function verifyAccountPassword(nickname: string, password: string): Promise<boolean> {
+  const stored = await readStoredAuth();
+  if (!stored || !stored.password) return false;
+  if (nickname && stored.nickname && stored.nickname.toLowerCase() !== nickname.toLowerCase()) return false;
+  return stored.password === password;
+}
+
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="space-y-0">
@@ -147,12 +298,23 @@ function ConfirmModal({ title, message, confirmLabel, cancelLabel, danger, onCon
 }
 
 export function SettingsPanel({ onClose, closing, inline }: { onClose: () => void; closing?: boolean; inline?: boolean }) {
-  const { state, updateSettings, logout, sessions, requestSessions, isAdmin, reports, adminReports, adminBan, adminUnban, bannedUsers, adminGetBanned, adminError, dismissAdminError, revokeSession: revoke, openProfile, openDm, t } = useConnection();
-  const [confirmAction, setConfirmAction] = useState<'logout' | 'adminBan' | 'adminUnban' | null>(null);
+  const { state, updateSettings, logout, sessions, requestSessions, isAdmin, reports, adminReports, adminBan, adminUnban, bannedUsers, adminGetBanned, adminError, dismissAdminError, revokeSession: revoke, openProfile, openDm, exportKeys, t } = useConnection();
+  /**
+   * What the open confirmation is about.
+   *
+   * An object rather than a tag because revoking a session needs to say which one; a bare string would
+   * either have to ask again or guess, and guessing here means signing somebody out by accident.
+   */
+  const [confirmAction, setConfirmAction] = useState<
+    { kind: 'logout' } | { kind: 'adminBan' } | { kind: 'adminUnban' } | { kind: 'resetKeys' } |
+    { kind: 'revokeSession'; session: Session } | null
+  >(null);
   const [banNick, setBanNick] = useState('');
   const [pendingBan, setPendingBan] = useState<string | null>(null);
   const [banListOpen, setBanListOpen] = useState(false);
-const screenshotProt = state.settings.screenshotProtection;
+  const [keysNotice, setKeysNotice] = useState<string | null>(null);
+  const [passwordOpen, setPasswordOpen] = useState(false);
+  const screenshotProt = state.settings.screenshotProtection;
 const setScreenshotProt = useCallback((v: boolean) => {
   updateSettings({ screenshotProtection: v });
 }, [updateSettings]);
@@ -246,8 +408,14 @@ const setScreenshotProt = useCallback((v: boolean) => {
       </Section>
 
       <Section title={t('sec_notifications')}>
-        <Option label={t('enable_notifications')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 0 1-3.46 0" /></svg>}>
+        <Option label={t('enable_notifications')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a3 3 0 0 1-3.46 0" /></svg>}>
           <Toggle checked={state.settings.notifications} onChange={(v) => updateSettings({ notifications: v })} />
+        </Option>
+        <Option label={t('notification_preview')} stacked icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7z" /><circle cx="12" cy="12" r="3" /></svg>}>
+          <div className="space-y-2">
+            <Toggle checked={state.settings.notificationPreview} onChange={(v) => updateSettings({ notificationPreview: v })} />
+            <p className="text-[11.5px] text-fg-muted leading-relaxed">{t('notification_preview_desc')}</p>
+          </div>
         </Option>
         <Option label={t('message_sound')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" /><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07" /></svg>}>
           <Toggle checked={state.settings.soundEnabled} onChange={(v) => updateSettings({ soundEnabled: v })} />
@@ -273,6 +441,52 @@ const setScreenshotProt = useCallback((v: boolean) => {
         <PrivacyNotice />
       </Section>
 
+      <Section title={t('sec_keys')}>
+        <AppLockSection />
+        <Option label={t('export_keys')} stacked icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" /><polyline points="17 8 12 3 7 8" /><line x1="12" y1="3" x2="12" y2="15" /></svg>}>
+          <div className="space-y-2">
+            <button
+              onClick={async () => {
+                try {
+                  await exportKeys();
+                  setKeysNotice(t('keys_exported'));
+                } catch {
+                  setKeysNotice(t('keys_export_failed'));
+                }
+                setTimeout(() => setKeysNotice(null), 2500);
+              }}
+              className="w-full py-2.5 rounded-xl border border-border-default text-fg-primary text-[13px] font-medium hover:bg-bg-tertiary transition-colors"
+            >
+              {t('export_keys_action')}
+            </button>
+            <p className="text-[11.5px] text-fg-muted leading-relaxed">{t('export_keys_desc')}</p>
+            {keysNotice && <p className="text-[12px] text-accent-primary">{keysNotice}</p>}
+          </div>
+        </Option>
+        <Option label={t('change_password')} stacked icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="3" y="11" width="18" height="10" rx="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" /></svg>}>
+          <div className="space-y-2">
+            <p className="text-[11.5px] text-fg-muted leading-relaxed">{t('change_password_desc')}</p>
+            <button
+              onClick={() => setPasswordOpen(true)}
+              className="w-full py-2.5 rounded-xl border border-border-default text-fg-primary text-[13px] font-medium hover:bg-bg-tertiary transition-colors"
+            >
+              {t('change_password_action')}
+            </button>
+          </div>
+        </Option>
+        <Option label={t('reset_encryption')} stacked icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 1 0 3-6.7L3 8" /><polyline points="3 3 3 8 8 8" /></svg>}>
+          <div className="space-y-2">
+            <p className="text-[11.5px] text-fg-muted leading-relaxed">{t('reset_encryption_desc')}</p>
+            <button
+              onClick={() => setConfirmAction({ kind: 'resetKeys' })}
+              className="w-full py-2.5 rounded-xl border border-status-error/40 text-status-error text-[13px] font-medium hover:bg-status-error/10 transition-colors"
+            >
+              {t('reset_encryption_action')}
+            </button>
+          </div>
+        </Option>
+      </Section>
+
       <Section title={t('sessions')}>
         <div className="px-4 py-3 space-y-2">
           <p className="text-[12px] text-fg-muted leading-relaxed">{t('sessions_note')}</p>
@@ -284,15 +498,15 @@ const setScreenshotProt = useCallback((v: boolean) => {
                 <div className="min-w-0">
                   <div className="flex items-center gap-2 min-w-0">
                     <span className={cn('w-2 h-2 rounded-full flex-shrink-0', s.online === false ? 'bg-fg-muted/50' : 'bg-status-success')} />
-                    <span className="text-[13px] text-fg-primary truncate">{s.name || `вЂ¦${s.id.slice(-6)}`}</span>
+                    <span className="text-[13px] text-fg-primary truncate">{s.name || `??${s.id.slice(-6)}`}</span>
                     {s.current && (
                       <span className="flex-shrink-0 px-2 py-0.5 rounded-full bg-accent-primary/15 text-accent-primary text-[10px] font-bold">{t('current_session')}</span>
                     )}
                   </div>
-                  <span className="text-[11px] text-fg-muted block mt-0.5">{new Date(s.lastActive).toLocaleString()}{s.online === false ? ` В· ${t('offline')}` : ''}</span>
+                  <span className="text-[11px] text-fg-muted block mt-0.5">{new Date(s.lastActive).toLocaleString()}{s.online === false ? ` � ${t('offline')}` : ''}</span>
                 </div>
                 {!s.current && (
-                  <button onClick={() => revoke(s.id)}
+                  <button onClick={() => setConfirmAction({ kind: 'revokeSession', session: s })}
                     className="flex-shrink-0 px-2.5 py-1.5 rounded-lg border border-border-default text-fg-muted text-[11px] font-medium hover:text-status-error hover:border-status-error/40 transition-colors">
                     {t('revoke')}
                   </button>
@@ -309,7 +523,7 @@ const setScreenshotProt = useCallback((v: boolean) => {
             {adminError && (
               <div className="flex items-center justify-between gap-2 px-3 py-2 rounded-xl bg-status-error/10 border border-status-error/30 text-status-error text-[12px]">
                 <span className="min-w-0 leading-relaxed">{adminError}</span>
-                <button onClick={dismissAdminError} className="flex-shrink-0 text-status-error/70 hover:text-status-error text-[16px] leading-none px-1" aria-label="Dismiss">вњ•</button>
+                <button onClick={dismissAdminError} className="flex-shrink-0 text-status-error/70 hover:text-status-error text-[16px] leading-none px-1" aria-label="Dismiss">?</button>
               </div>
             )}
 
@@ -323,7 +537,7 @@ const setScreenshotProt = useCallback((v: boolean) => {
                   maxLength={16}
                   className="flex-1 min-w-[140px] px-3.5 py-2.5 rounded-xl bg-bg-tertiary border border-border-default text-[14px] text-fg-primary placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary" />
                 <button
-                  onClick={() => { if (banNick.trim()) { setPendingBan(banNick.trim()); setConfirmAction('adminBan'); } }}
+                  onClick={() => { if (banNick.trim()) { setPendingBan(banNick.trim()); setConfirmAction({ kind: 'adminBan' }); } }}
                   disabled={!banNick.trim()}
                   className="flex-shrink-0 px-4 py-2.5 rounded-xl bg-status-error text-white text-[13px] font-semibold hover:brightness-110 transition-all disabled:opacity-40">
                   {t('admin_ban')}
@@ -360,7 +574,7 @@ const setScreenshotProt = useCallback((v: boolean) => {
                           <div className="text-[11px] text-fg-muted">{new Date(u.bannedAt).toLocaleString()}</div>
                         </div>
                         <button
-                          onClick={() => { setPendingBan(u.nickname); setConfirmAction('adminUnban'); }}
+                          onClick={() => { setPendingBan(u.nickname); setConfirmAction({ kind: 'adminUnban' }); }}
                           className="flex-shrink-0 px-2.5 py-1.5 rounded-lg bg-accent-primary/15 text-accent-primary text-[12px] font-semibold hover:bg-accent-primary/25 transition-colors">
                           {t('admin_unblock')}
                         </button>
@@ -395,7 +609,7 @@ const setScreenshotProt = useCallback((v: boolean) => {
                         </button>
                         {g.count > 1 && (
                           <span className="ml-auto flex-shrink-0 px-2 py-0.5 rounded-full bg-status-error/15 text-status-error text-[10.5px] font-bold">
-                            Г—{g.count}
+                            ?{g.count}
                           </span>
                         )}
                       </div>
@@ -415,7 +629,7 @@ const setScreenshotProt = useCallback((v: boolean) => {
                       </div>
                       <div className="flex gap-2">
                         <button
-                          onClick={() => { if (g.targetNick) { setPendingBan(g.targetNick); setConfirmAction('adminBan'); } }}
+                          onClick={() => { if (g.targetNick) { setPendingBan(g.targetNick); setConfirmAction({ kind: 'adminBan' }); } }}
                           className="px-3 py-1.5 rounded-lg bg-status-error/10 text-status-error text-[12px] font-semibold hover:bg-status-error/20 transition-colors">
                           {t('admin_ban')} @{g.targetNick}
                         </button>
@@ -458,7 +672,7 @@ const setScreenshotProt = useCallback((v: boolean) => {
         {content}
 
         <div className="p-4 border-t border-border-default space-y-2.5 pb-safe">
-          <button onClick={() => setConfirmAction('logout')}
+          <button onClick={() => setConfirmAction({ kind: 'logout' })}
             className="w-full py-3 rounded-2xl border border-border-default text-fg-primary text-[15px] hover:bg-bg-tertiary transition-colors font-medium flex items-center justify-center gap-2">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" />
@@ -470,6 +684,44 @@ const setScreenshotProt = useCallback((v: boolean) => {
               device was gone. Removed rather than gated, because a button that destroys an account's
               history is not something to keep around in a menu. */}
         </div>
+
+        {/* The confirmation used to be rendered only in the desktop panel, so on a phone - where this
+            panel is the only settings there is - the button signed you out on the first tap with no
+            question asked. Same dialog, same place, both layouts. */}
+        {confirmAction?.kind === 'logout' && (
+          <ConfirmModal title={t('confirm_logout')} message={t('confirm_logout_desc')} confirmLabel={t('logout')} cancelLabel={t('cancel')} danger
+            onConfirm={() => { logout(); onClose(); }} onCancel={() => setConfirmAction(null)} />
+        )}
+        {confirmAction?.kind === 'resetKeys' && (
+          <ConfirmModal title={t('reset_encryption')} message={t('reset_encryption_confirm')} confirmLabel={t('reset_encryption_action')} cancelLabel={t('cancel')} danger
+            onConfirm={() => { setConfirmAction(null); resetEncryptionIdentity(); window.location.reload(); }}
+            onCancel={() => setConfirmAction(null)} />
+        )}
+        {passwordOpen && (
+          <ChangePasswordModal
+            onCancel={() => setPasswordOpen(false)}
+            onChanged={() => {
+              setPasswordOpen(false);
+              setKeysNotice(t('password_changed'));
+            }}
+          />
+        )}
+        {confirmAction?.kind === 'revokeSession' && (
+          <ConfirmModal
+            title={t('confirm_revoke_title')}
+            message={`${t('confirm_revoke_desc')} ${confirmAction.session.name || `📱${confirmAction.session.id.slice(-6)}`}`}
+            confirmLabel={t('revoke')}
+            cancelLabel={t('cancel')}
+            danger
+            onConfirm={() => {
+              const id = confirmAction.session.id;
+              setConfirmAction(null);
+              revoke(id);
+              void clearVerification(id);
+            }}
+            onCancel={() => setConfirmAction(null)}
+          />
+        )}
       </div>
     );
   }
@@ -499,7 +751,7 @@ const setScreenshotProt = useCallback((v: boolean) => {
         {content}
 
         <div className="p-4 border-t border-border-default space-y-2.5 pb-safe">
-          <button onClick={() => setConfirmAction('logout')}
+          <button onClick={() => setConfirmAction({ kind: 'logout' })}
             className="w-full py-3 rounded-2xl border border-border-default text-fg-primary text-[15px] hover:bg-bg-tertiary transition-colors font-medium flex items-center justify-center gap-2">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" /><polyline points="16 17 21 12 16 7" /><line x1="21" y1="12" x2="9" y2="12" />
@@ -509,19 +761,29 @@ const setScreenshotProt = useCallback((v: boolean) => {
         </div>
       </div>
 
-      {confirmAction === 'logout' && (
+      {confirmAction?.kind === 'logout' && (
         <ConfirmModal title={t('confirm_logout')} message={t('confirm_logout_desc')} confirmLabel={t('logout')} cancelLabel={t('cancel')} danger
           onConfirm={() => { logout(); onClose(); }} onCancel={() => setConfirmAction(null)} />
       )}
-      {confirmAction === 'adminBan' && pendingBan && (
+      {confirmAction?.kind === 'adminBan' && pendingBan && (
         <ConfirmModal title={t('admin_confirm_ban')} message={`@${pendingBan}`} confirmLabel={t('admin_ban')} cancelLabel={t('cancel')} danger
           onConfirm={() => { adminBan(pendingBan); setConfirmAction(null); setPendingBan(null); setBanNick(''); }}
           onCancel={() => { setConfirmAction(null); setPendingBan(null); }} />
       )}
-      {confirmAction === 'adminUnban' && pendingBan && (
+      {confirmAction?.kind === 'adminUnban' && pendingBan && (
         <ConfirmModal title={t('admin_confirm_unban')} message={`@${pendingBan}`} confirmLabel={t('admin_unban')} cancelLabel={t('cancel')}
           onConfirm={() => { adminUnban(pendingBan); setConfirmAction(null); setPendingBan(null); setBanNick(''); }}
           onCancel={() => { setConfirmAction(null); setPendingBan(null); }} />
+      )}
+      {confirmAction?.kind === 'resetKeys' && (
+        <ConfirmModal title={t('reset_encryption')} message={t('reset_encryption_confirm')} confirmLabel={t('reset_encryption_action')} cancelLabel={t('cancel')} danger
+          onConfirm={async () => {
+            setConfirmAction(null);
+            resetEncryptionIdentity();
+            // the identity is new, so it has to be published before anybody can open a conversation again
+            window.location.reload();
+          }}
+          onCancel={() => setConfirmAction(null)} />
       )}
     </>
   );
