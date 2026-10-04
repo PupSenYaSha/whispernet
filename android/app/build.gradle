@@ -1,4 +1,4 @@
-﻿apply plugin: 'com.android.application'
+apply plugin: 'com.android.application'
 
 // one source of truth for the version: package.json. Bumping it there is enough, and a frozen
 // versionCode made a rebuilt APK impossible to install over the one already on the phone.

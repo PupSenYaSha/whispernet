@@ -1,4 +1,4 @@
-﻿import { useState } from 'react';
+import { useState } from 'react';
 import { useConnection } from '../context';
 import { TopBar } from './TopBar';
 import { MessageList } from './MessageList';

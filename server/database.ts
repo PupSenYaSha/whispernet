@@ -1,4 +1,4 @@
-﻿import path from 'path';
+import path from 'path';
 import { fileURLToPath } from 'url';
 import { mkdirSync, existsSync } from 'fs';
 import fs from 'fs';

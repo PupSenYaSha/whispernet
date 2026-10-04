@@ -151,7 +151,9 @@ jobs:
         # Without this the assets directory is never created, and the `update` step that follows then fails
         # on a generated file it cannot find — which is what this job did on the first run after the client
         # stopped being committed.
-        run: npm run build:client
+        run: |
+          node scripts/strip-bom.js
+          npm run build:client
       - name: Sync Capacitor
         run: node node_modules/@capacitor/cli/bin/capacitor sync android
       - uses: gradle/actions/setup-gradle@v4

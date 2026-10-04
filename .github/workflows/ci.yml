@@ -25,6 +25,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # A byte order mark is invisible in an editor and harmless in most tools, which is why it survives
+      # until the strictest one in the chain meets it: Gradle read `build.gradle` as `?apply plugin` and
+      # failed with a parse error at line 1 column 1, three bytes before anything it could name. Caught
+      # here rather than in the release build, which is where it was caught.
+      - name: Strip stray byte order marks
+        run: node scripts/strip-bom.js
+
       - name: Typecheck
         # one script, so client, server and tests are all covered; re-listing the projects here is
         # how tests/ quietly stopped being checked
