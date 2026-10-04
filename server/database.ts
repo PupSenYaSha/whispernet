@@ -303,6 +303,15 @@ function syncFtsInsert(rowid: number, text: string): void {
   }
 }
 
+/**
+ * How many expired rows one pass removes.
+ *
+ * Sized against the write lock rather than against speed. `busy_timeout` is five seconds, so anything that
+ * holds the write lock for longer than that does not queue — it fails, and it fails for whoever happened to
+ * be sending a message at the time, which is the worst possible moment to hand somebody an error.
+ */
+const CLEANUP_BATCH = 250;
+
 function ftsDropRowids(rowids: number[], texts: string[]): void {
   if (!ftsAvailable || rowids.length === 0) return;
   const del = getDb().prepare(`INSERT INTO ${FTS_TABLE} (${FTS_TABLE}, rowid, text) VALUES ('delete', ?, ?)`);
@@ -349,15 +358,6 @@ function syncFtsDeleteByChannel(channel: string): void {
   }
 }
 
-function syncFtsDeleteExpired(cutoff: number): void {
-  if (!ftsAvailable) return;
-  try {
-    const rows = getDb().prepare('SELECT rowid AS rid, text FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?').all(cutoff) as { rid: number; text: string }[];
-    ftsDropRowids(rows.map(r => r.rid), rows.map(r => r.text));
-  } catch (e) {
-    console.warn('[db] FTS expired delete failed:', (e as Error).message);
-  }
-}
 
 
 function legacyJsonFileNames(): string[] {
@@ -963,13 +963,43 @@ export async function deleteGeneralMessages(): Promise<number> {
   return (res as any).changes;
 }
 
+/**
+ * Removes expired messages in bounded slices.
+ *
+ * This used to be three unbounded statements: a delete of every expired reaction, a delete of every expired
+ * message, and a search-index sync that read the text of every expired message into memory at once. On a
+ * server that had been running long enough for that to be a lot of rows, the middle statement held the write
+ * lock for the whole delete — long past the five seconds a waiting writer is prepared to wait — so the
+ * people who got errors were the ones sending messages, and they got them at cleanup time rather than at
+ * any fault of their own.
+ *
+ * So each pass takes a bounded slice of ids, deletes exactly that slice, and hands the event loop back
+ * before the next one. The lock is released between passes, the peak memory is one batch of message bodies
+ * rather than all of them, and a cleanup that takes a minute holds the lock for a few milliseconds at a
+ * time. It is still the same delete, just not all at once.
+ */
 export async function cleanupExpiredMessages(): Promise<number> {
-  const cutoff = Date.now();
   const d = getDb();
-  d.prepare(`DELETE FROM reactions WHERE message_id IN (SELECT id FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?)`).run(cutoff);
-  const res = d.prepare('DELETE FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ?').run(cutoff);
-  syncFtsDeleteExpired(cutoff);
-  return (res as any).changes;
+  const cutoff = Date.now();
+  const take = d.prepare(
+    `SELECT id, rowid AS rid, text FROM messages WHERE expires_at IS NOT NULL AND expires_at <= ? ORDER BY expires_at LIMIT ?`
+  );
+  let removed = 0;
+
+  for (;;) {
+    const rows = take.all(cutoff, CLEANUP_BATCH) as { id: string; rid: number; text: string }[];
+    if (rows.length === 0) break;
+    const ids = rows.map((r) => r.id);
+    const holes = ids.map(() => '?').join(',');
+    d.prepare(`DELETE FROM reactions WHERE message_id IN (${holes})`).run(...ids);
+    ftsDropRowids(rows.map((r) => r.rid), rows.map((r) => r.text));
+    const res = d.prepare(`DELETE FROM messages WHERE id IN (${holes})`).run(...ids);
+    removed += (res as any).changes;
+    if (rows.length < CLEANUP_BATCH) break;
+    // give the socket handlers and the next writer a turn rather than holding the loop for the whole sweep
+    await new Promise((r) => setImmediate(r));
+  }
+  return removed;
 }
 
 export async function startCleanupJobs(): Promise<void> {

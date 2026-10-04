@@ -275,11 +275,19 @@ composer starts — is not end-to-end encrypted, so a "the words never hit the w
 switch channels is testing the wrong channel; the assertion passed for entirely the wrong reason until it
 was pointed at a real conversation.
 
-The tests that do *not* reach the app: `password-change.test.ts` fails intermittently under the load of a
-full run while passing in isolation and while `tests/unit` runs clean on its own — so it needs the
-integration suite present to reproduce. It is not a wall-clock assertion, and lowering the PBKDF2 cost by
-six hundred times (`WN_PBKDF2_ITERATIONS=1000`, four consecutive clean runs) did not make it go away, so CPU
-starvation from key derivation is not the cause. The failing assertion is still not captured.
+The tests that do *not* reach the app: `password-change.test.ts` fails intermittently in a full run while
+passing in isolation and while `tests/unit` runs clean on its own — so it needs the integration suite present
+to reproduce. Two obvious explanations have been checked and ruled out rather than assumed:
+
+- **Not a shared database file.** It is a unit test with an in-memory `localStorage` mock. It never opens
+  SQLite, so contention over a test database cannot be reaching it.
+- **Not a stray async write racing the cleanup.** Every `SessionManager` and `PreKeyManager` is tracked in
+  an array and `destroy()`d in `afterEach`, and `destroy()` clears both the debounced save and the six-hour
+  rotation interval.
+
+What remains is not narrowed down: lowering the PBKDF2 cost six hundred times did not stop it, which rules
+out key derivation as the CPU load that matters, and the failing assertion has never been captured. Guessing
+further would be less useful than recording it.
 
 `src/pbkdf2.ts` exists because of that experiment: the four cost figures now live in one place, the
 production numbers are asserted directly by `tests/unit/pbkdf2-iterations.test.ts`, and `npm test` refuses to
