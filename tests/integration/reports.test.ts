@@ -89,6 +89,81 @@ describe('reports', () => {
   });
 });
 
+/**
+ * An admin locking themselves out.
+ *
+ * This is not a hypothetical: it happened. A ban is checked at sign-in, the ban button sits in the same
+ * list as every other row, and nothing stopped the click from landing on the account doing the clicking.
+ * The result is an admin who cannot sign in, cannot unban themselves, and cannot re-register the name
+ * because it is reserved - so recovery needs a database edit.
+ *
+ * Refused by id and by nickname, because the handler takes either and a request can carry both.
+ */
+describe('an admin banning themselves', () => {
+  it('refuses it, and leaves the account usable', async () => {
+    const admin = await client('selfban-admin');
+    clients.push(admin);
+    const nick = uniqueNick('selfban');
+    const reg = await admin.register(nick);
+    expect(reg.type, JSON.stringify(reg.payload)).toBe('auth_success');
+    const adminId = reg.payload.userId;
+
+    // by id, which is what the settings panel sends
+    admin.clear();
+    admin.send('admin_ban', { key: ADMIN_KEY, userId: adminId });
+    const byId = await admin.waitFor('error', 4000);
+    expect(byId.payload.code).toBe('FORBIDDEN');
+    expect(byId.payload.message).toMatch(/own account/i);
+
+    // by nickname, which is what the older path sends
+    admin.clear();
+    admin.send('admin_ban', { key: ADMIN_KEY, nickname: nick });
+    const byNick = await admin.waitFor('error', 4000);
+    expect(byNick.payload.code).toBe('FORBIDDEN');
+
+    // the connection was not dropped, and signing in again still works
+    admin.clear();
+    const again = await admin.login(nick);
+    expect(again.type, 'the account was banned by its own administrator').toBe('auth_success');
+  });
+
+  it('refuses it when the id and the nickname disagree', async () => {
+    // The handler uses the id when there is one and the nickname otherwise, so a request carrying an id
+    // that resolves to nothing beside its own nickname would otherwise fall through to the nickname branch
+    // and ban the admin while looking like it targeted somebody else.
+    const admin = await client('selfban-mixed');
+    clients.push(admin);
+    const nick = uniqueNick('mixed');
+    await admin.register(nick);
+
+    admin.clear();
+    admin.send('admin_ban', { key: ADMIN_KEY, userId: 'no-such-user-at-all', nickname: nick });
+    const err = await admin.waitFor('error', 4000);
+    expect(err.payload.code).toBe('FORBIDDEN');
+  });
+
+  it('still bans somebody else', async () => {
+    // the guard has to be narrow, or it is a ban button that does nothing
+    const admin = await client('selfban-other');
+    clients.push(admin);
+    await admin.register(uniqueNick('otheradmin'));
+    const target = await client('selfban-target');
+    clients.push(target);
+    const reg = await target.register(uniqueNick('othertarget'));
+    expect(reg.type).toBe('auth_success');
+
+    admin.clear();
+    admin.send('admin_ban', { key: ADMIN_KEY, userId: reg.payload.userId });
+    const done = await admin.waitFor('admin_action', 4000);
+    expect(done.payload.action).toBe('ban');
+
+    // and the target is now locked out, which is the point of the button
+    target.clear();
+    const refused = await target.login('othertarget').catch(() => null);
+    expect(refused === null || refused.type === 'auth_failure').toBeTruthy();
+  });
+});
+
 describe('admin nicknames', () => {
   it('refuses to register a reserved admin nickname in any case', async () => {
     const c = new TestClient(server.url, 'admin-nick');

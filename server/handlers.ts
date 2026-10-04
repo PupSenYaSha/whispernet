@@ -2134,7 +2134,39 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
     const targetId = (typeof payload?.userId === 'string'
       ? payload.userId
       : (payload?.nickname ? (await getUserByNickname(sanitize(payload.nickname)))?.id : null)) || null;
-    const ok = await setUserBannedByIdent(targetId, typeof payload?.nickname === 'string' ? payload.nickname : null, true);
+
+    // An admin may not ban their own account.
+    //
+    // This is not a hypothetical guard. A ban is checked at sign-in and an admin reaches the ban button
+    // through the same report list as everybody else, so one click on the wrong row - or a client that
+    // sends the acting admin as the target - locks the only account that can lift it. There is no way back
+    // through the interface: you cannot sign in to unban yourself, and the nickname is reserved so you
+    // cannot simply register again. Recovering needs a database edit.
+    //
+    // Checked by id *and* by nickname, because the two are used interchangeably below and a request can
+    // carry an id that resolves to nothing beside the nickname that resolves to the admin - in which case
+    // the nickname branch is what would do the damage.
+    //
+    // The name arm compares against the acting account's own nickname, which is not the same thing as the
+    // identity string above: with ADMIN_KEY and no session, `adminIdentity` answers with the role name
+    // "admin" whether or not the caller is that account. Comparing against it would refuse banning anybody
+    // called admin while letting a real admin ban themselves.
+    //
+    // With ADMIN_KEY and no session there is no way to tell who the caller is, so only the id arm applies.
+    // That is not a hole in the guard — it is the reason the id arm exists.
+    const targetNickname = typeof payload?.nickname === 'string' ? payload.nickname : null;
+    const actingNickname = userId
+      ? ((userDevices.get(userId) ? clients.get([...userDevices.get(userId)!][0] || '') : null)?.nickname ?? null)
+      : null;
+    const selfById = !!targetId && !!userId && targetId === userId;
+    const selfByName = !!targetNickname && !!actingNickname && targetNickname.toLowerCase() === actingNickname.toLowerCase();
+    if (selfById || selfByName) {
+      logSecurity('ADMIN_BAN_SELF_REFUSED', { admin, target: payload?.userId || payload?.nickname });
+      send(ws, { type: 'error', payload: { code: 'FORBIDDEN', message: 'You cannot ban your own account' }, timestamp: Date.now() });
+      return;
+    }
+
+    const ok = await setUserBannedByIdent(targetId, targetNickname, true);
     if (!ok) {
       send(ws, { type: 'error', payload: { code: 'USER_NOT_FOUND', message: 'User not found' }, timestamp: Date.now() });
       return;
