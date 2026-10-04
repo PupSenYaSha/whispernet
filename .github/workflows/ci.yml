@@ -14,7 +14,7 @@ jobs:
         node-version: [22]
 
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: Install the desktop build's system libraries
         # Tauri's Linux build links against webkit2gtk and friends, and `cargo check` runs their build
