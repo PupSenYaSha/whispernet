@@ -17,6 +17,12 @@ updates:
         dependency-type: production
       build-dependencies:
         dependency-type: development
+    ignore:
+      # Dependabot's first act here was to propose TypeScript 7, which typescript-eslint does not support
+      # yet, so the install fails and the PR is unmergeable by construction. Declining it by hand every
+      # few weeks trains everyone to dismiss the bot; this is the same decision, written down once.
+      - dependency-name: typescript
+        update-types: ["version-update:semver-major"]
 
   # The Rust side of the desktop build. Tauri pulls in a lot, and a CVE in it is as real as one in npm.
   - package-ecosystem: cargo

@@ -46,6 +46,12 @@ jobs:
       - name: Tests
         run: npm test
 
+      - name: Check the desktop crate
+        # The Rust side was never compiled by CI, so a change that broke the Tauri build still went green.
+        # That is not hypothetical: it is why the cargo updates Dependabot opened on its first run could
+        # not be merged on the strength of a passing check.
+        run: cargo check --manifest-path src-tauri/Cargo.toml
+
       - name: Browser tests
         # The one job that renders anything. Everything above tests modules, which is how a React effect
         # that never fires, or a message sealed correctly and then displayed from the wrong field, passes
