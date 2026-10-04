@@ -733,7 +733,13 @@ export async function getIdentityKeysByIds(ids: string[]): Promise<Record<string
  * a session against material the owner has already replaced.
  */
 export async function cleanupExpiredPreKeys(maxAgeMs: number): Promise<number> {
-  const res = getDb().prepare('DELETE FROM prekeys WHERE created_at < ?').run(Date.now() - maxAgeMs);
+  const d = getDb();
+  const res = d.prepare('DELETE FROM prekeys WHERE created_at < ?').run(Date.now() - maxAgeMs);
+  // the record of what was spent from a bundle that no longer exists refers to keys nobody will be handed,
+  // so it is not a protection against anything — it is only a table that grows
+  try {
+    d.prepare('DELETE FROM prekey_issued WHERE NOT EXISTS (SELECT 1 FROM prekeys WHERE prekeys.user_id = prekey_issued.user_id AND prekeys.device_id = prekey_issued.device_id)').run();
+  } catch { /* a missing table is a fresh database, which has nothing to clean */ }
   return (res as any).changes;
 }
 

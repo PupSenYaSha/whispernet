@@ -410,6 +410,8 @@ function ConnectionProvider({ children }: { children: ReactNode }) {
   }));
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+/** Republishes this device's bundle, so a connection that never closes does not age out of the directory. */
+const bundleKeepAliveRef = useRef<NodeJS.Timeout | null>(null);
   const heartbeatWsRef = useRef<WebSocket | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const authRef = useRef<{ nickname: string; password: string; isRegister: boolean } | null>(null);
@@ -1216,6 +1218,27 @@ const connect = useCallback((nickname: string, password: string, isRegister: boo
               heartbeatIntervalRef.current = setInterval(() => {
                 if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'heartbeat', payload: {} }));
               }, 15000);
+
+              // Keep the published bundle alive while this device stays connected.
+              //
+              // The server drops a bundle thirty days after it was uploaded, so a device that publishes
+              // once at sign-in and then runs for months — a desktop that is simply never closed, which
+              // is the ordinary case — goes dark while still connected. Senders find no bundle, build no
+              // ratchet session, and every message to it degrades to the long-lived envelope. Re-uploading
+              // on a heartbeat moves the clock without needing a separate timer to be torn down, and a
+              // device that has actually gone offline obviously stops doing it.
+              bundleKeepAliveRef.current = setInterval(() => {
+                void (async () => {
+                  if (ws.readyState !== WebSocket.OPEN || !authRef.current?.password) return;
+                  try {
+                    const bundle = await publishBundle();
+                    if (bundle) {
+                      ws.send(JSON.stringify({ type: 'prekey_upload', payload: { bundle, deviceId: getDeviceId(), identityKey: accountIdentityKeyBase64() } }));
+                    }
+                  } catch { /* a missed refresh is not worth interrupting anything over */ }
+                })();
+              }, 60 * 60 * 1000);
+
               ws.send(JSON.stringify({ type: 'dm_contacts', payload: {} }));
               // messages that arrived while this device was closed, so they are not only ever seen live
               break;
@@ -1504,6 +1527,8 @@ dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
         if (heartbeatWsRef.current === ws) {
           if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
           heartbeatIntervalRef.current = null;
+          if (bundleKeepAliveRef.current) clearInterval(bundleKeepAliveRef.current);
+          bundleKeepAliveRef.current = null;
           heartbeatWsRef.current = null;
         }
         if (wsRef.current === ws) {
@@ -1581,6 +1606,8 @@ dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
     if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
     if (heartbeatIntervalRef.current) clearInterval(heartbeatIntervalRef.current);
     heartbeatIntervalRef.current = null;
+    if (bundleKeepAliveRef.current) clearInterval(bundleKeepAliveRef.current);
+    bundleKeepAliveRef.current = null;
     heartbeatWsRef.current = null;
     authRef.current = null;
     credentialsRef.current = null;
