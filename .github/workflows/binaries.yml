@@ -72,13 +72,20 @@ jobs:
           $ver = "${{ needs.verify.outputs.version }}"
           Compress-Archive -Path "src-tauri\target\release\whispernet.exe" `
                             -DestinationPath "dist\build\WhisperNet_${ver}_x64-portable.zip" -Force
+          # The updater refuses a build with no published digest, so the digest is published beside it.
+          # Without these files every in-app update is refused, which is the whole point of the check:
+          # a checksum nobody publishes is a checksum nobody can check against.
+          Get-ChildItem dist\build -File | ForEach-Object {
+            $hash = (Get-FileHash -Algorithm SHA256 $_.FullName).Hash.ToLower()
+            "$hash  $($_.Name)" | Set-Content -Path "$($_.FullName).sha256" -NoNewline -Encoding ascii
+          }
           Get-ChildItem dist\build | Select-Object Name, Length
       - name: Upload assets
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "$TAG" dist/build/*.exe dist/build/*.zip --clobber
+          gh release upload "$TAG" dist/build/*.exe dist/build/*.zip dist/build/*.sha256 --clobber
 
   linux:
     needs: verify
@@ -100,11 +107,20 @@ jobs:
           workspaces: src-tauri
       - name: Package Linux .deb (Tauri)
         run: npm run tauri build -- --bundles deb
+      - name: Publish the digest beside the package
+        # The updater's check is that a published checksum exists and matches; a package with no digest
+        # beside it cannot be verified by anybody, which is the same for a .deb as for the zip.
+        run: |
+          set -euo pipefail
+          for f in src-tauri/target/release/bundle/deb/*.deb; do
+            sha256sum "$f" > "$f.sha256"
+            cat "$f.sha256"
+          done
       - name: Upload asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "$TAG" src-tauri/target/release/bundle/deb/*.deb --clobber
+          gh release upload "$TAG" src-tauri/target/release/bundle/deb/*.deb src-tauri/target/release/bundle/deb/*.deb.sha256 --clobber
 
   android:
     needs: verify
@@ -130,6 +146,12 @@ jobs:
         run: |
           SDKMGR=$(ls -d "${ANDROID_HOME:-$ANDROID_SDK_ROOT}"/cmdline-tools/*/bin/sdkmanager | tail -1)
           "$SDKMGR" "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+      - name: Build the web client
+        # `cap copy` copies `webDir` out of the build output, so the output has to exist before it runs.
+        # Without this the assets directory is never created, and the `update` step that follows then fails
+        # on a generated file it cannot find — which is what this job did on the first run after the client
+        # stopped being committed.
+        run: npm run build:client
       - name: Sync Capacitor
         run: node node_modules/@capacitor/cli/bin/capacitor sync android
       - uses: gradle/actions/setup-gradle@v4
@@ -158,4 +180,5 @@ jobs:
         run: |
           set -euo pipefail
           cp android/app/build/outputs/apk/release/app-release.apk WhisperNet.apk
-          gh release upload "$TAG" WhisperNet.apk --clobber
+          sha256sum WhisperNet.apk > WhisperNet.apk.sha256
+          gh release upload "$TAG" WhisperNet.apk WhisperNet.apk.sha256 --clobber

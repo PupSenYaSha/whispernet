@@ -156,10 +156,15 @@ Pre-built binaries on [Releases](https://github.com/PupSenYaSha/whispernet/relea
 | Linux | `WhisperNet_1.0.0_amd64.deb` |
 | Android | `WhisperNet.apk` |
 
-The Windows build is signed with the release key on CI. Android release builds need the
-`ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` and
-`ANDROID_KEY_PASSWORD` secrets; without them the workflow refuses to publish rather than shipping a
-debug-signed APK.
+The Windows build is **unsigned**. CI builds it with certificate auto-discovery switched off, so the
+installer carries no Authenticode signature and Windows SmartScreen will warn on first run — which is the
+same warning an unsigned build has always given, but it is stated here rather than implied away. Signing
+it needs a code-signing certificate and the CI secret to hold it.
+
+Android release builds need the `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
+`ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD` secrets; without them the workflow refuses to publish
+rather than shipping a debug-signed APK. That refusal is deliberate and it fails the whole run, so an
+Android build is all-or-nothing: no keystore means no APK, not a debug one.
 
 ### The in-app updater
 
