@@ -276,8 +276,15 @@ switch channels is testing the wrong channel; the assertion passed for entirely 
 was pointed at a real conversation.
 
 The tests that do *not* reach the app: `password-change.test.ts` fails intermittently under the load of a
-full run — roughly one run in four — while passing in isolation. It is not known why, and it is not a
-wall-clock assertion, so it is recorded here rather than papered over with a longer timeout.
+full run while passing in isolation and while `tests/unit` runs clean on its own — so it needs the
+integration suite present to reproduce. It is not a wall-clock assertion, and lowering the PBKDF2 cost by
+six hundred times (`WN_PBKDF2_ITERATIONS=1000`, four consecutive clean runs) did not make it go away, so CPU
+starvation from key derivation is not the cause. The failing assertion is still not captured.
+
+`src/pbkdf2.ts` exists because of that experiment: the four cost figures now live in one place, the
+production numbers are asserted directly by `tests/unit/pbkdf2-iterations.test.ts`, and `npm test` refuses to
+run with the override set — so nothing can quietly derive keys a thousand times and still be called a
+passing run.
 
 ## License
 

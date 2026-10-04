@@ -1,3 +1,4 @@
+import { iterationsFor } from './pbkdf2';
 /**
  * A key that belongs to this browser profile and cannot be read out of it.
  *
@@ -136,7 +137,7 @@ export async function deviceKeyAvailable(): Promise<boolean> {
   return (await deviceKey()) !== null;
 }
 
-const PBKDF2_ITER = 100_000;
+const PBKDF2_ITER = iterationsFor('deviceCredentials');
 
 function bufToBase64(buf: ArrayBuffer): string {
   const bytes = new Uint8Array(buf);

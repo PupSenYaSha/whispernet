@@ -1,4 +1,5 @@
-const PBKDF2_ITERATIONS = 600_000;
+import { iterationsFor } from './pbkdf2';
+const PBKDF2_ITERATIONS = iterationsFor('localStore');
 const SALT_LEN = 16;
 const IV_LEN = 12;
 

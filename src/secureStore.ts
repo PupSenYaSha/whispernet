@@ -1,3 +1,4 @@
+import { iterationsFor } from './pbkdf2';
 /**
  * A small encrypted box in the browser, keyed by the account password.
  *
@@ -12,7 +13,7 @@
  * than the private key sitting beside it, and it is unusable without the password.
  */
 
-const PBKDF2_ITER = 600_000;
+const PBKDF2_ITER = iterationsFor('localStore');
 const SALT_BYTES = 16;
 const IV_BYTES = 12;
 
@@ -31,6 +32,26 @@ function base64ToBuf(b64: string): ArrayBuffer {
   const buf = new Uint8Array(bin.length);
   for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i);
   return buf.buffer;
+}
+
+/**
+ * Overwrites a buffer that is finished with.
+ *
+ * Worth being exact about what this does and does not buy. The keys themselves are `CryptoKey` objects
+ * marked `extractable: false`, so there is no key material here to wipe — that part of the concern does
+ * not apply to this codebase and no amount of zeroing would change it.
+ *
+ * What *is* here is the plaintext of the box, briefly, in a typed array. Zeroing it means a later heap dump
+ * cannot read it back out of a buffer that happened to survive, and it is free. What it cannot do is reach
+ * the copies the engine made on its own: `bufToBase64` above builds an ordinary JavaScript string, strings
+ * are immutable and cannot be wiped, and V8 is free to copy a buffer while working with it. So this is
+ * hygiene, not a boundary. The boundary is that the box is sealed under the account password and the
+ * process has to be unlocked to derive anything at all.
+ */
+function wipe(buf: ArrayBuffer | Uint8Array): void {
+  try {
+    (buf instanceof Uint8Array ? buf : new Uint8Array(buf)).fill(0);
+  } catch { /* a detached buffer is already gone, which is the outcome being asked for */ }
 }
 
 type Storage = Pick<globalThis.Storage, 'getItem' | 'setItem' | 'removeItem'>;
@@ -71,10 +92,17 @@ function keyFor(storage: Storage, password: string, key: string): Promise<Crypto
   const existing = derived.get(cacheKey);
   if (existing) return existing;
   const salt = saltFor(storage, key);
-  const promise = (async () => {
-    const passKey = await crypto.subtle.importKey(
-      'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']
-    );
+const promise = (async () => {
+    // the account password, in a typed array, for as short a time as the import allows. This is the most
+    // sensitive buffer in the file: everything else here is either ciphertext or the plaintext of something
+    // already sealed under this password, while this *is* the password.
+    const passBytes = new TextEncoder().encode(password);
+    let passKey: CryptoKey;
+    try {
+      passKey = await crypto.subtle.importKey('raw', passBytes, 'PBKDF2', false, ['deriveKey']);
+    } finally {
+      wipe(passBytes);
+    }
     return crypto.subtle.deriveKey(
       { name: 'PBKDF2', salt: salt as unknown as ArrayBuffer, iterations: PBKDF2_ITER, hash: 'SHA-256' },
       passKey, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
@@ -98,12 +126,16 @@ export function forgetSecureKeys(): void {
 export async function secureSet(key: string, password: string, value: unknown): Promise<void> {
   const storage = safeStorage();
   if (!storage || !password) return;
-  try {
+try {
     const cryptoKey = await keyFor(storage, password, key);
     const iv = crypto.getRandomValues(new Uint8Array(IV_BYTES));
-    const data = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv }, cryptoKey, new TextEncoder().encode(JSON.stringify(value))
-    );
+    const encoded = new TextEncoder().encode(JSON.stringify(value));
+    let data: ArrayBuffer;
+    try {
+      data = await crypto.subtle.encrypt({ name: 'AES-GCM', iv }, cryptoKey, encoded);
+    } finally {
+      wipe(encoded);
+    }
     storage.setItem(key, JSON.stringify({ v: 1, iv: bufToBase64(iv.buffer), data: bufToBase64(data) }));
   } catch {
     /* a storage failure must not break sending */
@@ -119,12 +151,21 @@ export async function secureGet<T>(key: string, password: string): Promise<T | n
   try {
     const parsed = JSON.parse(raw);
     if (!parsed || parsed.v !== 1 || typeof parsed.iv !== 'string' || typeof parsed.data !== 'string') return null;
-    const cryptoKey = await keyFor(storage, password, key);
-    const plaintext = await crypto.subtle.decrypt(
-      { name: 'AES-GCM', iv: new Uint8Array(base64ToBuf(parsed.iv)) },
-      cryptoKey,
-      base64ToBuf(parsed.data)
-    );
+const cryptoKey = await keyFor(storage, password, key);
+    const dataBuf = base64ToBuf(parsed.data);
+    let plaintext: ArrayBuffer;
+    try {
+      plaintext = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: new Uint8Array(base64ToBuf(parsed.iv)) },
+        cryptoKey,
+        dataBuf
+      );
+    } finally {
+      wipe(dataBuf);
+    }
+    // decoded and parsed before the wipe rather than after: the decoded string is a copy that zeroing the
+    // buffer cannot reach, so there is nothing to be gained by holding the plaintext bytes longer than the
+    // parse takes
     return JSON.parse(new TextDecoder().decode(plaintext)) as T;
   } catch {
     return null;

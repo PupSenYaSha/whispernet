@@ -1,3 +1,4 @@
+import { iterationsFor } from './pbkdf2';
 /**
  * The passcode that has to be entered before the conversation is shown.
  *
@@ -16,7 +17,7 @@
  * is not a preference.
  */
 
-const PBKDF2_ITER = 310_000;
+const PBKDF2_ITER = iterationsFor('appLock');
 const SALT_BYTES = 16;
 const MAX_ATTEMPTS = 10;
 const LOCKOUT_MS = 60_000;
