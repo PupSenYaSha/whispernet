@@ -156,6 +156,18 @@ Pre-built binaries on [Releases](https://github.com/PupSenYaSha/whispernet/relea
 | Linux | `WhisperNet_1.0.0_amd64.deb` |
 | Android | `WhisperNet.apk` |
 
+Every asset is published with a `.sha256` beside it, and you are worth checking it:
+
+```
+sha256sum WhisperNet_1.0.0_x64-portable.zip
+# compare against WhisperNet_1.0.0_x64-portable.zip.sha256
+```
+
+The in-app updater does exactly this and refuses to install anything that does not match, so a release
+without a digest produces no updates at all. That is deliberate: a checksum nobody publishes is a checksum
+nobody can check against. It is still only a checksum — it proves the file arrived intact, not who published
+it, since the digest sits next to the file it describes.
+
 The Windows build is **unsigned**. CI builds it with certificate auto-discovery switched off, so the
 installer carries no Authenticode signature and Windows SmartScreen will warn on first run — which is the
 same warning an unsigned build has always given, but it is stated here rather than implied away. Signing
