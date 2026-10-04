@@ -68,13 +68,24 @@ class ByteReader {
     return out;
   }
 
-  /** Whatever is left, which for a chunked body means everything that has not been read yet. */
-  async takeAll(): Promise<Uint8Array<ArrayBuffer>> {
-    while (!this.done) await this.fill(this.buf.length + 1);
-    const out = this.buf;
-    this.buf = new Uint8Array(0);
-    return out;
+  /**
+ * Everything the stream has left, refusing to go past a ceiling.
+ *
+ * The bound is not an optimisation. This reads until the stream ends, so a host that never ends it would
+ * grow this without limit, and a caller that only wants the next few bytes would be no protection —
+ * `tryTake` hands back what it could read once the peer stops sending, which for a lying length is
+ * nothing until the memory is already gone.
+ */
+async takeAll(limit: number): Promise<Uint8Array<ArrayBuffer>> {
+  while (!this.done) {
+    if (this.buf.length > limit) throw new Error('Attachment too large');
+    await this.fill(this.buf.length + 1);
   }
+  if (this.buf.length > limit) throw new Error('Attachment too large');
+  const out = this.buf;
+  this.buf = new Uint8Array(0);
+  return out;
+}
 
   cancel(): void { try { this.reader.cancel(); } catch { /* the stream is already gone */ } }
 }
@@ -242,11 +253,45 @@ async function tryReadHeader(
   return { legacyStart: joined };
 }
 
+/** GCM's authentication tag, which every chunk carries on top of its plaintext. */
+const GCM_TAG_BYTES = 16;
 /**
- * Reads a chunked attachment a chunk at a time. The plaintext parts are handed to a Blob as they are
- * produced rather than being concatenated into one buffer, so the file never occupies the heap.
+ * The largest a chunk may claim to be.
+ *
+ * The length is a bare uint32 in front of the ciphertext and is *not* authenticated — GCM authenticates
+ * the ciphertext, and by the time a tag can be checked the bytes have already been read into memory. So
+ * this is the bound that has to exist here rather than being taken on trust from whoever wrote the number.
+ *
+ * Without it, whoever controls the media host declares a four-gigabyte chunk and the client sits there
+ * accumulating it before the decryption that would have rejected it ever runs. The media host is a third
+ * party, so that number is genuinely not ours to trust: the honest answer to a length that large is that
+ * the body is not one of ours, which is exactly what refusing says.
+ */
+const MAX_CHUNK_CIPHERTEXT = CHUNK_BYTES + GCM_TAG_BYTES;
+
+/** The ceiling on a whole attachment, matching what the server will accept on the way in. */
+const MAX_ATTACHMENT_BYTES = 1024 * 1024 * 1024;
+
+/**
+ * Reads a chunked attachment a chunk at a time.
+ *
+ * Each chunk is authenticated by GCM before its plaintext is kept — `crypto.subtle.decrypt` throws on a
+ * bad tag and nothing is pushed, so a tampered chunk cannot reach the result. That is the property the
+ * whole format rests on, and it is why a doctored media stream cannot smuggle anything into a viewer.
+ *
+ * What is *not* true is the older claim in this comment that the file never occupies the heap. On the way
+ * out the writer is genuinely streaming: one chunk at a time, and the plaintext is never whole. On the way
+ * in it cannot be — a browser has no place to stream a file to — so the plaintext parts are held until
+ * they are handed to a Blob. The bounds below are therefore not a nicety: they are what stops a hostile
+ * or broken host from turning that into an allocation it chooses.
  */
 async function decryptChunkedBody(reader: ByteReader, aesKey: CryptoKey, header: MediaHeader): Promise<Blob> {
+  // the declared length is unauthenticated too, so it is checked against the ceiling before anything is
+  // allocated on the strength of it
+  if (!Number.isFinite(header.size) || header.size < 0 || header.size > MAX_ATTACHMENT_BYTES) {
+    throw new Error('Attachment too large');
+  }
+
   const parts: BlobPart[] = [];
   let produced = 0;
   for (;;) {
@@ -254,16 +299,21 @@ async function decryptChunkedBody(reader: ByteReader, aesKey: CryptoKey, header:
     if (!b) break; // end of the body
     const len = new DataView(b.buffer, b.byteOffset, 4).getUint32(0, false);
     if (len === 0) break;
+    if (len > MAX_CHUNK_CIPHERTEXT) throw new Error('Attachment chunk implausible');
+    // checked against the running total before the chunk is read, so a stream of chunks that each claim
+    // to be legal cannot add up past the declared size either
+    if (produced + len - GCM_TAG_BYTES > header.size) throw new Error('Attachment truncated');
     const chunkIv = await reader.tryTake(12);
     const ct = await reader.tryTake(len);
     if (!chunkIv || !ct) throw new Error('Attachment truncated');
+    // throws on a bad tag, so a chunk that does not authenticate never reaches `parts`
     const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: chunkIv }, aesKey, ct);
     parts.push(new Uint8Array(plain));
     produced += plain.byteLength;
   }
-  // a body that stopped early produces a shorter file, which the length catches. The length itself
-  // is not authenticated, but every chunk is, so the worst a dishonest server can do is refuse to
-  // hand over the file at all.
+  // a body that stopped early produces a shorter file, which the length catches. The length itself is
+  // not authenticated, but every chunk is, so the worst a dishonest server can do is refuse to hand over
+  // the file at all — and the size it claims is now bounded before it is believed.
   if (produced !== header.size) throw new Error('Attachment truncated');
   return new Blob(parts);
 }
@@ -296,7 +346,13 @@ export async function openStreamedAttachment(
     legacyStart = attempt.legacyStart;
   }
 
-  const rest = await reader.takeAll();
+  // The one-AES-message format, which is read whole because it has to be decrypted whole.
+  //
+  // This is the only path where an unbounded body is taken into memory, so the bound goes here rather
+  // than trusting whatever the host says it is sending: `takeAll` reads until the stream ends, and the
+  // media host is a third party that could otherwise hand over as much as it liked. The ceiling is the
+  // same one the server enforces on the way in, plus a wrapper's worth of slack.
+  const rest = await reader.takeAll(MAX_ATTACHMENT_BYTES + PNG_PREFIX.length + MAX_HEADER_BYTES);
   const whole = new Uint8Array(legacyStart.length + rest.length);
   whole.set(legacyStart, 0);
   whole.set(rest, legacyStart.length);
