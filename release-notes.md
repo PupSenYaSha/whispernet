@@ -56,9 +56,9 @@
 | Платформа | Файл | Размер |
 |---|---|---|
 | Windows | `WhisperNet_1.0.0_x64-setup.exe` (установщик) | 2.5 MB |
-| Windows | `WhisperNet_1.0.0_x64-portable.zip` (используется автообновлением) | 2.5 MB |
+| Windows | `WhisperNet_1.0.0_x64-portable.zip` (используется автообновлением) | 3.5 MB |
 | Linux | `WhisperNet_1.0.0_amd64.deb` | 3.8 MB |
-| Android | `WhisperNet.apk` | 4.2 MB |
+| Android | `WhisperNet.apk` | 3.2 MB |
 
 ### Установка
 - **Windows (.exe)**: запустить, SmartScreen → «Подробнее» → «Выполнить в любом случае»
