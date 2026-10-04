@@ -46,6 +46,25 @@ jobs:
       - name: Tests
         run: npm test
 
+      - name: Browser tests
+        # The one job that renders anything. Everything above tests modules, which is how a React effect
+        # that never fires, or a message sealed correctly and then displayed from the wrong field, passes
+        # three hundred module tests and ships broken. Two accounts in two real browser contexts run the
+        # X3DH handshake and the decrypt for real.
+        run: |
+          npx playwright install --with-deps chromium
+          npm run build:client
+          npm run test:e2e
+
+      - name: Upload browser test traces
+        # only ever present on failure, and useless without being kept
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: test-results/
+          retention-days: 7
+
       - name: Audit shipped dependencies
         # Only what actually gets shipped and runs on a server or a phone. A DoS in a glob parser that
         # only ever sees patterns from this repository, at build time, on a maintainer's machine, is not

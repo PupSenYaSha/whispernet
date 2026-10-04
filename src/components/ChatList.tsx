@@ -116,6 +116,7 @@ export function ChatList({ onSelect }: { onSelect?: () => void }) {
 
       <div className="px-3 py-2.5">
         <input
+          data-testid="user-search"
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -239,6 +240,7 @@ function ChatRow({ nickname, subtitle, online, unread, active, onClick, avatar, 
   const strong = unread > 0;
   return (
     <button
+      data-testid="chat-row"
       onClick={onClick}
       className={cn(
         'w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left',

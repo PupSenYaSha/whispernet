@@ -43,12 +43,12 @@ export function LoginScreen() {
         </div>
 
         <div className="flex gap-1 p-1 bg-bg-tertiary rounded-2xl mb-5">
-          <button type="button" onClick={() => setIsRegister(false)}
+          <button type="button" data-testid="auth-mode-login" onClick={() => setIsRegister(false)}
             className={cn('flex-1 py-3 rounded-xl text-[15px] font-semibold transition-all duration-200',
               !isRegister ? 'bg-accent-primary text-accent-text shadow-sm' : 'text-fg-muted hover:text-fg-primary')}>
             {t('login')}
           </button>
-          <button type="button" onClick={() => setIsRegister(true)}
+          <button type="button" data-testid="auth-mode-register" onClick={() => setIsRegister(true)}
             className={cn('flex-1 py-3 rounded-xl text-[15px] font-semibold transition-all duration-200',
               isRegister ? 'bg-accent-primary text-accent-text shadow-sm' : 'text-fg-muted hover:text-fg-primary')}>
             {t('register')}
@@ -58,14 +58,14 @@ export function LoginScreen() {
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
             <label className="block text-[13px] font-medium text-fg-secondary mb-2">{t('nickname')}</label>
-            <input ref={nicknameRef} type="text" value={nickname}
+            <input ref={nicknameRef} data-testid="auth-nickname" type="text" value={nickname}
               onChange={(e) => setNickname(e.target.value)}
               className="input" placeholder={t('nickname_placeholder')}
               autoComplete="username" maxLength={16} disabled={loading} />
           </div>
           <div>
             <label className="block text-[13px] font-medium text-fg-secondary mb-2">{t('password')}</label>
-            <input type="password" value={password}
+            <input data-testid="auth-password" type="password" value={password}
               onChange={(e) => setPassword(e.target.value)}
               className="input" placeholder={isRegister ? t('password_create') : t('password_enter')}
               autoComplete={isRegister ? 'new-password' : 'current-password'} maxLength={64} disabled={loading} />
@@ -77,7 +77,7 @@ export function LoginScreen() {
             </div>
           )}
 
-          <button type="submit" disabled={loading || !nickname.trim() || !password}
+          <button type="submit" data-testid="auth-submit" disabled={loading || !nickname.trim() || !password}
             className="btn-primary w-full py-3.5 text-[15px] mt-2">
             {loading ? (
               <span className="flex items-center justify-center gap-2">

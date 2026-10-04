@@ -25,3 +25,7 @@ site/downloads/
 google-services.json
 android/local.properties
 android/app/whispernet-release.jks
+test-results/
+playwright-report/
+blob-report/
+.playwright/

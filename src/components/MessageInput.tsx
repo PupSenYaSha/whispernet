@@ -232,6 +232,7 @@ export function MessageInput() {
           )}
         </button>
         <textarea
+          data-testid="composer"
           ref={textareaRef}
           onChange={(e) => onComposerChange(e.target.value)}
           onKeyDown={handleKeyDown}

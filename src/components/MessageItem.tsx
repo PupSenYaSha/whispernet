@@ -225,7 +225,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
                     onClick={() => { setLightbox({ url: proxyUrl, isVideo: false }); }} />
                 );
               }
-              return <p className="whitespace-pre-wrap break-words">{message.text}</p>;
+              return <p data-testid="message-text" className="whitespace-pre-wrap break-words">{message.text}</p>;
             })()}
           </div>
 

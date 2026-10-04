@@ -1,0 +1,38 @@
+# Because the audit step in CI went red three pushes in a row without anybody noticing, and the fix was a
+# transitive dependency of a multipart parser rather than anything anybody had touched.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: daily
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    labels: [dependencies, security]
+    groups:
+      # One noisy chain at a time. Individually these arrive as a dozen PRs a week, each one a merge
+      # decision nobody has the context for; grouped, it is one review of one transitive change.
+      production-dependencies:
+        dependency-type: production
+      build-dependencies:
+        dependency-type: development
+
+  # The Rust side of the desktop build. Tauri pulls in a lot, and a CVE in it is as real as one in npm.
+  - package-ecosystem: cargo
+    directory: "/src-tauri"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps"
+    labels: [dependencies, security]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "ci"
+    labels: [dependencies, ci]

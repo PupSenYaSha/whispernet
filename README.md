@@ -195,6 +195,29 @@ to be set deliberately.
 |-----|-----|
 | Messenger (Web app) | `https://rightfully-nice-ram.cloudpub.ru/` |
 
+## About the database
+
+SQLite, through Node's built-in `node:sqlite`. This is the right shape for a self-hosted messenger and it
+is worth being precise about why, because the usual advice is to abstract the database away before you need
+to.
+
+The concurrency problem people mean by "SQLite will become a bottleneck" is writers blocking each other, and
+it is already addressed: `PRAGMA journal_mode = WAL` and `PRAGMA busy_timeout = 5000` are set on open, so
+readers do not block the writer and a writer that arrives during a write waits instead of failing. The
+messages table is indexed on channel and timestamp, which is what both the history fetch and the paged
+backwards walk go through.
+
+There is no repository interface over it, deliberately. An abstraction introduced without a second
+implementation to validate it against is not portability, it is an untested second way to be wrong — the
+queries stop being checked against a real engine, and the bugs move rather than disappear. The honest version
+of that advice is: measure first. A messenger's write volume is bounded by its users, not by its features,
+and the thing that would actually force a change is a reader count where WAL plus a busy timeout is no
+longer enough — at which point the queries are known and the migration is a day's work.
+
+Worth stating plainly: moving to a client/server database would not improve the privacy properties
+described above. The server holds plaintext message bodies either way, and that is a property of the
+protocol rather than of the storage engine.
+
 ## Configuration
 
 Everything has a working default; nothing is required.
@@ -225,19 +248,36 @@ git, so a fresh clone simply has no marketing site — the messenger on `:50025`
 npm run typecheck   # client, server and test projects
 npm run lint
 npm test            # unit and integration, against a real server on a real socket
+npm run test:e2e    # browser tests: real Chromium, real server, two accounts
+npm run test:all    # everything, in order
 ```
 
 The integration tests exercise the actual client crypto against the actual server over a real websocket,
 because the failures worth catching in a messenger are almost never in the cipher — they are in how two
 sides disagree about which body a message carries.
 
-250 tests at the time of writing. Four of the bugs fixed in the current release were found by writing
-tests rather than by reading code, which is the argument for them existing at all: a password check that
-passed for any string, a ratchet session restarted by the second message in a conversation, an edit
-routed to every device of a conversation, and an attachment key sitting in the payload beside the message
-it opened.
+292 tests at the time of writing, and four of the bugs fixed in the current release were found by writing
+tests rather than by reading code: a password check that passed for any string, a ratchet session restarted
+by the second message in a conversation, an edit routed to every device of a conversation, and an
+attachment key sitting in the payload beside the message it opened.
 
-What the tests do not cover is the React layer that calls them. Nothing here has run the app.
+**What the module tests cannot reach, and the browser tests now do.** Everything above calls functions.
+That is a real hole and it is not a small one: the wiring between a React effect and the cryptography it
+calls had never once been executed, so an effect that never fires, a state write that never re-renders, or
+a message sealed correctly and then displayed from the wrong field would pass every one of them and ship
+broken. `tests/e2e/` therefore drives the built client in real Chromium against the real server, with two
+accounts in two browser contexts so the X3DH handshake and the decrypt actually run. It asserts that a
+private message is legible on both screens and that its body is on neither the websocket nor the console.
+
+Writing that test turned up two things reading the code would not have. Registration was refused until the
+password was given letters *and* digits, which no documentation mentioned. And `#general` — where the
+composer starts — is not end-to-end encrypted, so a "the words never hit the wire" test that forgets to
+switch channels is testing the wrong channel; the assertion passed for entirely the wrong reason until it
+was pointed at a real conversation.
+
+The tests that do *not* reach the app: `password-change.test.ts` fails intermittently under the load of a
+full run — roughly one run in four — while passing in isolation. It is not known why, and it is not a
+wall-clock assertion, so it is recorded here rather than papered over with a longer timeout.
 
 ## License
 
