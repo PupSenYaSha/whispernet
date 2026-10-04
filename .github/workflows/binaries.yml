@@ -156,7 +156,7 @@ jobs:
           npm run build:client
       - name: Sync Capacitor
         run: node node_modules/@capacitor/cli/bin/capacitor sync android
-      - uses: gradle/actions/setup-gradle@v4
+      - uses: gradle/actions/setup-gradle@v6
       - name: Set up the release signing key
         # the APK has to be signed with a real key: a debug key is shared, derivable by anyone and
         # leaves the build debuggable
