@@ -5,6 +5,7 @@ import { generateKeyPair, encryptMessage, decryptMessage } from './crypto';
 import { encryptPrivateKey, decryptPrivateKey, isEncryptedBundle, isKeyBackup, type KeyBackup } from './crypto-keys';
 import { storePassword, readStoredAuth, clearStoredAuth, retireLegacyFingerprint } from './device-crypto';
 import { uploadFile, uploadStream, MediaError, setUploadToken, mediaProxyUrl } from './upload';
+import { MediaCache } from './mediaCache';
 import {
   encryptFileStream, buildFileKeyMap, unwrapAndDecrypt, unwrapAndDecryptChannel,
   sealFileKeyInText, openFileKeyFromText, openAttachmentWithKey, parseMediaTag,
@@ -26,7 +27,7 @@ import { loadReadUpTo, saveReadUpTo, noteTyping, noteRead, TYPING_THROTTLE_MS } 
 declare const __APP_VERSION__: string;
 
 /** How many decrypted media blobs stay cached; anything beyond that is re-decrypted on demand. */
-const MEDIA_CACHE_LIMIT = 100;
+
 
 import { LoginScreen } from './components/LoginScreen';
 import { UpdateOverlay } from './components/UpdateOverlay';
@@ -1630,9 +1631,7 @@ dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
     }
     disconnect();
 
-    for (const url of decryptedMediaCacheRef.current.values()) { try { URL.revokeObjectURL(url); } catch {} }
     decryptedMediaCacheRef.current.clear();
-    decryptedMediaRefsRef.current.clear();
     dispatch({ type: 'RESET' });
     clearStoredAuth();
     // The device id stays. Signing out used to delete it, so the next sign-in arrived with a new one and
@@ -1663,12 +1662,11 @@ dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
   const getMyPublicKey = useCallback((): JsonWebKey | null => publicKeyRef.current, []);
   const getPublicKey = useCallback((userId: string): JsonWebKey | null => publicKeysRef.current[userId] || null, []);
 
-  const decryptedMediaCacheRef = useRef<Map<string, string>>(new Map());
-  const decryptedMediaRefsRef = useRef<Map<string, number>>(new Map());
+  const decryptedMediaCacheRef = useRef(new MediaCache());
   const channelMediaKeyRef = useRef<string | null>(null);
 
   const decryptMedia = useCallback(async (message: { id: string; text: string; fileKey?: Record<string, string> }): Promise<string | null> => {
-    const cached = decryptedMediaCacheRef.current.get(message.id);
+    const cached = decryptedMediaCacheRef.current.urlFor(message.id);
     if (cached) return cached;
 
     // The key may be inside the sealed text, which is where a private attachment has carried it since
@@ -1704,8 +1702,7 @@ dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
     if (!blob) return null;
     try {
       const objectUrl = URL.createObjectURL(blob);
-      decryptedMediaCacheRef.current.set(message.id, objectUrl);
-      evictDecryptedMedia();
+      decryptedMediaCacheRef.current.put(message.id, objectUrl, blob.size);
       return objectUrl;
     } catch (e) {
       console.error('Failed to create object URL:', (e as Error).message);
@@ -1713,34 +1710,14 @@ dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
     }
   }, []);
 
-  /**
-   * Object URLs are reference counted by the bubbles that show them. Dropping the oldest entry
-   * unconditionally blanked an image that was still on screen the moment the hundred-and-first media
-   * message arrived.
-   */
+  // the counting, the byte budget and the revocation all live in MediaCache, where they can be tested
+  // without rendering a single bubble
   function retainMedia(id: string): void {
-    decryptedMediaRefsRef.current.set(id, (decryptedMediaRefsRef.current.get(id) ?? 0) + 1);
+    decryptedMediaCacheRef.current.retain(id);
   }
 
   function releaseMedia(id: string): void {
-    const refs = decryptedMediaRefsRef.current.get(id);
-    if (refs === undefined) return;
-    // leave the entry at zero rather than removing it: a bubble whose effect re-runs releases and
-    // immediately retains, and a missing entry read as "nobody wants this" let the cache revoke a url
-    // that was still on screen
-    if (refs <= 1) decryptedMediaRefsRef.current.set(id, 0);
-    else decryptedMediaRefsRef.current.set(id, refs - 1);
-  }
-
-  function evictDecryptedMedia(): void {
-    if (decryptedMediaCacheRef.current.size <= MEDIA_CACHE_LIMIT) return;
-    // only entries nothing points at any more
-    for (const [id, url] of decryptedMediaCacheRef.current) {
-      if ((decryptedMediaRefsRef.current.get(id) ?? 0) > 0) continue;
-      decryptedMediaCacheRef.current.delete(id);
-      try { URL.revokeObjectURL(url); } catch { /* already gone */ }
-      if (decryptedMediaCacheRef.current.size <= MEDIA_CACHE_LIMIT) return;
-    }
+    decryptedMediaCacheRef.current.release(id);
   }
 
   /** Asks the server for the page of messages older than the oldest one we hold. */

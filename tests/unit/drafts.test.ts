@@ -134,3 +134,70 @@ describe('a draft', () => {
     expect(getDraft('alice')).toBe('typed before sign-in finished');
   });
 });
+
+/**
+ * Encrypting drafts protects new ones and does nothing at all for the ones already on disk.
+ *
+ * Everybody who used the app before the change still has their old `wn_draft_<channel>` entries, in the
+ * clear, and no code path was looking at them. So the fix would have been silent for exactly the people
+ * who had something to protect — which is a worse outcome than not shipping it, because it would have
+ * looked done.
+ */
+describe('drafts left behind by a build that kept them in the clear', () => {
+  /**
+   * A reload, honestly.
+   *
+   * `forgetDrafts` would not do: it deletes the encrypted box, which a page reload does not do. What a
+   * reload does is throw away the tab, so the module state goes and the storage stays.
+   */
+  const reload = async () => {
+    vi.resetModules();
+    return await import('../../src/drafts');
+  };
+
+  it('is taken into the box and deleted from where it was lying in the open', async () => {
+    store.set('wn_draft_alice', 'the password for the server is in the drawer');
+    store.set('wn_draft_general', 'does anyone still read the general channel');
+
+    setDraftsPassword(OLD);
+    await flushDrafts();
+
+    // rescued, not dropped: the user was typing these when they updated
+    expect(getDraft('alice')).toBe('the password for the server is in the drawer');
+    expect(getDraft('general')).toBe('does anyone still read the general channel');
+
+    // and nothing readable is left on disk for either
+    for (const [key, value] of store) {
+      expect(value, `${key} still holds a recovered draft in the clear`).not.toContain('drawer');
+      expect(value, `${key} still holds a recovered draft in the clear`).not.toContain('general channel');
+    }
+    for (const key of store.keys()) expect(key.startsWith('wn_draft_')).toBe(false);
+  });
+
+  it('survives a reload after being swept', async () => {
+    store.set('wn_draft_alice', 'written before the upgrade');
+    setDraftsPassword(OLD);
+    await flushDrafts();
+
+    const fresh = await reload();
+    fresh.setDraftsPassword(OLD);
+    await fresh.flushDrafts();
+
+    expect(fresh.getDraft('alice'), 'the recovered draft was dropped instead of rescued').toBe('written before the upgrade');
+  });
+
+  it('does not overwrite a draft that the encrypted box already had', async () => {
+    // a newer draft, written by a build that encrypted, is the one that should win
+    setDraftsPassword(OLD);
+    setDraft('alice', 'the newer one, already encrypted');
+    await flushDrafts();
+
+    store.set('wn_draft_alice', 'an older one left in the clear');
+    const fresh = await reload();
+    fresh.setDraftsPassword(OLD);
+    await fresh.flushDrafts();
+
+    expect(fresh.getDraft('alice')).toBe('the newer one, already encrypted');
+    expect(store.has('wn_draft_alice'), 'the stale plaintext copy was left behind').toBe(false);
+  });
+});

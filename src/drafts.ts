@@ -19,6 +19,8 @@
 import { secureGet, secureRemove, secureSet } from './secureStore';
 
 const STORAGE_KEY = 'wn_drafts';
+/** How the pre-encryption build spelled a draft's key. Still read once, then deleted. */
+const LEGACY_PREFIX = 'wn_draft_';
 
 type ChannelMap = Record<string, string>;
 
@@ -61,10 +63,59 @@ export function setDraftsPassword(next: string): void {
 
 async function hydrate(withPassword: string): Promise<void> {
   const stored = await secureGet<ChannelMap>(STORAGE_KEY, withPassword);
-  if (!stored) return;
-  for (const [channel, text] of Object.entries(stored)) {
-    if (typeof text === 'string') memory.set(channel, text);
+  if (stored) {
+    for (const [channel, text] of Object.entries(stored)) {
+      if (typeof text === 'string') memory.set(channel, text);
+    }
   }
+  // whatever was recovered has to be written into the box, or deleting the plaintext copy would throw the
+  // drafts away instead of rescuing them: a flag the user never sees is exactly what they expect a draft to
+  // survive without
+  if (sweepLegacyDrafts() > 0) {
+    dirty = true;
+    schedulePersist();
+  }
+}
+
+/**
+ * Takes the plaintext drafts every pre-encryption build left behind, and deletes them.
+ *
+ * Moving drafts into the box does nothing for the people who were already using the app: their old
+ * `wn_draft_<channel>` entries are still sitting in localStorage, in the clear, with nothing in the code
+ * ever looking at them again. They are the exact words the passcode lock claims to protect, on the
+ * machines of exactly the people who upgraded, and they would have stayed there forever.
+ *
+ * They are read in first so upgrading costs nobody a half-written message, then removed, because the
+ * point was never to keep a second copy of them in the clear. A draft already in the encrypted box wins:
+ * that copy was written by a build that took the trouble to encrypt it, and it is the more recent one.
+ */
+function sweepLegacyDrafts(): number {
+  // `localStorage` bare rather than through `window`, which is how the rest of the local material reaches
+  // it, and so it resolves in every environment the app and its tests actually run in
+  if (typeof localStorage === 'undefined' || !localStorage) return 0;
+  const store: Storage = localStorage;
+  const stale: string[] = [];
+  let recovered = 0;
+  try {
+    for (let i = 0; i < store.length; i++) {
+      const key = store.key(i);
+      if (!key || !key.startsWith(LEGACY_PREFIX)) continue;
+      const channel = key.slice(LEGACY_PREFIX.length);
+      if (!channel) continue;
+      // queued for deletion either way. Skipping the delete because a better copy exists would leave the
+      // plaintext sitting on disk, which is the thing this whole function is here to stop
+      stale.push(key);
+      // and only recovered when nothing better already has it
+      if (memory.has(channel)) continue;
+      const text = store.getItem(key);
+      if (typeof text === 'string' && text) { memory.set(channel, text); recovered++; }
+    }
+    for (const key of stale) store.removeItem(key);
+  } catch {
+    // a quota error or a private-mode refusal. Whatever was swept so far is already in memory and will
+    // reach the encrypted box on the next write, so the drafts are not lost by stopping here.
+  }
+  return recovered;
 }
 
 /**
