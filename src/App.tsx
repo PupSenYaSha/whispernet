@@ -11,6 +11,7 @@ import {
 } from './media-crypto';
 import { newClientMessageId, rememberOwnMessageText, recallOwnMessageText, forgetOwnMessages, setOwnMessageCachePassword, flushOwnMessageCache } from './ownMessageCache'
 import { changeAccountPassword } from './changePassword'
+import { setDraftsPassword, forgetDrafts, flushDrafts } from './drafts'
 import { getDeviceId, adoptServerDeviceId } from './deviceId'
 import {
   startRatchet, publishBundle, rememberBundles, rememberBundle,
@@ -843,6 +844,7 @@ useEffect(() => { stateRef.current = state; }, [state]);
     // from here the material is already under the new password; only the bookkeeping is left
     authRef.current = authRef.current ? { ...authRef.current, password: newPassword } : null;
     setOwnMessageCachePassword(newPassword);
+    setDraftsPassword(newPassword);
     const bundle = await encryptPrivateKey(privateKey, newPassword);
     bundle.publicKey = publicKey;
     localStorage.setItem(`wn_pk_${nick.toLowerCase()}`, JSON.stringify(bundle));
@@ -1200,7 +1202,10 @@ const connect = useCallback((nickname: string, password: string, isRegister: boo
               }
               // the cache of this account's own outgoing messages is written as an encrypted box under
               // the password, so signing in is what unlocks it
-              if (authRef.current?.password) setOwnMessageCachePassword(authRef.current.password);
+              if (authRef.current?.password) {
+      setOwnMessageCachePassword(authRef.current.password);
+      setDraftsPassword(authRef.current.password);
+    }
               if ('Notification' in window && Notification.permission === 'default') Notification.requestPermission();
               {
                 const nick = message.payload.nickname.toLowerCase();
@@ -1611,10 +1616,13 @@ dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
     // Settings stay too. Theme, language, font size and disappearing-message defaults belong to the
     // browser, not to the account, and losing them on every sign-out was pure annoyance.
     forgetOwnMessages();
+    forgetDrafts();
     setOwnMessageCachePassword('');
+    setDraftsPassword('');
     // and the write that may still be in flight is waited on, so a debounced store cannot land after
     // the clear and put the words back
     void flushOwnMessageCache();
+    void flushDrafts();
     // the decrypted key material does not outlive the session that unlocked it
     privateKeyRef.current = null;
     publicKeyRef.current = null;

@@ -17,23 +17,41 @@ let activeFile: string | null = null;
 let activeBytes = 0;
 
 /**
- * Addresses are not stored raw. A daily-rotating salt means an entry can still be correlated with
- * the connection it came from, but the same person cannot be tracked across days by grepping the
- * file, and nothing here survives long enough to be a durable identifier.
+ * Addresses are not stored raw, and the pseudonym is worth nothing the next day.
+ *
+ * This said "daily-rotating" for a long time and did not rotate at all: the salt was written once to
+ * `log-salt` and then read back for every day after, so one stable HMAC sat behind every entry the log
+ * would ever hold. An operator could grep a month of it and read one person's movement straight off,
+ * which is the exact thing the rotation was supposed to prevent — and the README claimed it happened.
+ *
+ * The salt is now per day and derived from nothing: a fresh `randomBytes` when the day changes, written
+ * over the old file so the previous day's key is gone. That matters in both directions — a leaked salt
+ * cannot be walked backwards to recover the addresses behind yesterday's entries, because the salt that
+ * hashed them no longer exists.
+ *
+ * A restart inside the same day reuses the file, and has to: without it two connections from one person
+ * on one day would not correlate, and correlating those is the log's entire remaining value.
  */
 function dailySalt(): Buffer {
   const day = new Date().toISOString().slice(0, 10);
   if (cachedSalt && cachedDay === day) return cachedSalt;
   const file = path.join(getDataDir(), SALT_FILE);
   try {
-    cachedSalt = fs.readFileSync(file);
-    cachedDay = day;
-    return cachedSalt;
+    const stored = JSON.parse(fs.readFileSync(file, 'utf8')) as { day?: string; salt?: string };
+    if (stored?.day === day && typeof stored.salt === 'string' && stored.salt.length > 0) {
+      cachedSalt = Buffer.from(stored.salt, 'base64');
+      cachedDay = day;
+      return cachedSalt;
+    }
   } catch {}
+  // a new day, or a file left by the version that never rotated: either way this is a fresh key, and
+  // writing it over replaces the old one rather than keeping it beside it
   const salt = crypto.randomBytes(32);
   cachedSalt = salt;
   cachedDay = day;
-  try { fs.writeFileSync(file, salt, { mode: 0o600 }); } catch {}
+  try {
+    fs.writeFileSync(file, JSON.stringify({ day, salt: salt.toString('base64') }), { mode: 0o600 });
+  } catch {}
   return salt;
 }
 

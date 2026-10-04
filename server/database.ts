@@ -143,8 +143,9 @@ function ensureSchema(): void {
      * sign in would overwrite the first one's bundle and every message would reach only whichever
      * device happened to upload last.
      *
-     * Within a row the identity key lasts as long as the device, the signed prekey is rotated on a
-     * schedule, and the one-time prekeys inside it are consumed so a single bundle cannot be replayed.
+     * Within a row the identity key lasts as long as the device and the signed prekey is rotated on a
+     * schedule. The one-time prekeys inside it are consumed on the server, not merely on the client: see
+     * the prekey_issued table below.
      */
     CREATE TABLE IF NOT EXISTS prekeys (
       user_id TEXT NOT NULL,
@@ -152,6 +153,25 @@ function ensureSchema(): void {
       bundle TEXT NOT NULL,
       created_at INTEGER NOT NULL,
       PRIMARY KEY (user_id, device_id)
+    );
+    /**
+     * Which one-time prekeys have already been handed out.
+     *
+     * This is the table the old implementation had and lost. Without it the server served the same bundle
+     * to every sender until the device happened to republish, so the same one-time prekey built session
+     * after session. That is exactly what "one-time" is there to prevent: the responder's private half
+     * goes into every one of those shared secrets, so a device compromised later opens all of them rather
+     * than only the ones after.
+     *
+     * Keyed on the prekey id alone within a device's bundle, because that is what the sender received and
+     * the only thing that identifies which key was spent.
+     */
+    CREATE TABLE IF NOT EXISTS prekey_issued (
+      user_id TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      opk_id INTEGER NOT NULL,
+      issued_at INTEGER NOT NULL,
+      PRIMARY KEY (user_id, device_id, opk_id)
     );
     CREATE TABLE IF NOT EXISTS meta (
       key TEXT PRIMARY KEY,
@@ -613,6 +633,62 @@ export async function getPreKeyBundlesByIds(ids: string[]): Promise<Record<strin
     (out[r.userId] ||= []).push({ deviceId: r.deviceId, bundle });
   }
   return out;
+}
+
+/**
+ * The bundles to hand a sender, with spent one-time prekeys taken out.
+ *
+ * A bundle is a snapshot of several one-time prekeys, and the server has to remember which of them it has
+ * already given away — otherwise every sender takes the same one, and the responder's private half ends
+ * up in the shared secret of every session built against it. That is the property "one-time" exists for,
+ * and losing it costs forward secrecy for all of them at once.
+ *
+ * A bundle with nothing left is still returned, without a one-time prekey. X3DH is defined over the
+ * identity and signed prekeys alone, so the conversation still starts — the responder simply gets less
+ * protection against later compromise of the device, which is the correct trade against handing out a key
+ * twice. Devices replenish and republish on their own schedule, so this is a window, not a state.
+ */
+export async function takePreKeyBundlesForSender(ids: string[], requestedBy?: string | null): Promise<Record<string, { deviceId: string; bundle: any }[]>> {
+  const db = getDb();
+  const remaining = await getPreKeyBundlesByIds(ids);
+  const insert = db.prepare(
+    'INSERT OR IGNORE INTO prekey_issued (user_id, device_id, opk_id, issued_at) VALUES (?, ?, ?, ?)',
+  );
+  const alreadyIssued = db.prepare(
+    'SELECT opk_id FROM prekey_issued WHERE user_id = ? AND device_id = ?',
+  );
+
+  for (const [userId, entries] of Object.entries(remaining)) {
+    // A device fetching its own bundles is not opening a session with itself, so nothing is spent. This
+    // is not a rare case to be careful about: sign-in hands a client the list of its own devices so it
+    // can seal a copy to its other screens, and a client that then asks for them over the wire would burn
+    // a one-time prekey per device for nothing, draining the supply of an account that never had many.
+    const selfFetch = !!requestedBy && requestedBy === userId;
+    for (const entry of entries) {
+      const opk = entry.bundle?.oneTimePreKey;
+      if (!opk || typeof opk.keyId !== 'number') continue;
+
+      const spent = alreadyIssued.all(userId, entry.deviceId) as any[];
+      if (spent.some((r) => r.opk_id === opk.keyId)) {
+        // taken already: leave it out rather than hand the same key to a second sender
+        delete entry.bundle.oneTimePreKey;
+        continue;
+      }
+      if (selfFetch) continue;
+      insert.run(userId, entry.deviceId, opk.keyId, Date.now());
+    }
+  }
+  return remaining;
+}
+
+/**
+ * Forgets the record of spent keys for one device.
+ *
+ * Called when the device publishes a fresh bundle: those are new key ids, so the old bookkeeping does not
+ * apply to them and keeping it would only grow.
+ */
+export async function resetIssuedPreKeys(userId: string, deviceId: string): Promise<void> {
+  getDb().prepare('DELETE FROM prekey_issued WHERE user_id = ? AND device_id = ?').run(userId, deviceId);
 }
 
 /** The freshest bundle for an account, which is what a caller with a single device in mind wants. */

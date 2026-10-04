@@ -1,6 +1,6 @@
 import { WebSocket } from 'ws';
 import { issueUploadToken } from './uploadTokens.js';
-import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundlesByIds, getIdentityKeyB64, setIdentityKeyB64, getIdentityKeysByIds, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, updateEncryptedMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, setUserAvatar, removeUserAvatar, getAvatarDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, StoredSession, getChannelMediaKey } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundlesByIds, takePreKeyBundlesForSender, resetIssuedPreKeys, getIdentityKeyB64, setIdentityKeyB64, getIdentityKeysByIds, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, updateEncryptedMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, setUserAvatar, removeUserAvatar, getAvatarDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, StoredSession, getChannelMediaKey } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -615,6 +615,10 @@ function preKeyBundleDiagnostics(bundle: any): Record<string, any> {
  */
 async function storePreKeys(userId: string, deviceId: string | null | undefined, payload: any): Promise<void> {
   if (isValidPreKeyBundle(payload?.preKeyBundle) && deviceId) {
+    // a fresh bundle carries fresh one-time prekeys, so what was spent against the old ids does not apply
+    // to these; keeping the old record would only grow, and worse would mark ids that now mean something
+    // else as already spent
+    await resetIssuedPreKeys(userId, deviceId);
     await setPreKeyBundle(userId, deviceId, payload.preKeyBundle);
   }
   const accountKey = payload?.identityKey;
@@ -1790,7 +1794,9 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
       // keys, and a row keyed on the account alone would mean the second upload silently replaced the
       // first and every message would stop reaching it.
       const deviceId = typeof payload.deviceId === 'string' && payload.deviceId.length > 0 ? payload.deviceId : currentDeviceId;
-      if (deviceId) await setPreKeyBundle(userId, deviceId, payload.bundle);
+      // through the same path as every other publish, so the bookkeeping that forgets spent one-time
+      // prekeys cannot be applied in one place and forgotten in another
+      await storePreKeys(userId, deviceId, { preKeyBundle: payload.bundle });
       send(ws, { type: 'prekey_uploaded', payload: {}, timestamp: Date.now() });
     } else {
       logSecurity('PREKEY_REJECTED', { userId, ...preKeyBundleDiagnostics(payload?.bundle) });
@@ -1816,7 +1822,7 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
       return;
     }
     const ids = payload.userIds.filter(id => typeof id === 'string').slice(0, 100);
-    const bundles = await getPreKeyBundlesByIds(ids);
+    const bundles = await takePreKeyBundlesForSender(ids, userId);
     // Account identity keys ride along with the fetch, because a safety number needs the peer's and
     // asking for it separately would be one more round trip for something that changes once in years.
     const identityKeys = await getIdentityKeysByIds(ids);

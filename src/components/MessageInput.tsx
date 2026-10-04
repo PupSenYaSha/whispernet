@@ -2,27 +2,16 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useConnection } from '../context';
 import { mediaErrorKey, MAX_UPLOAD_BYTES } from '../upload';
 import { MAX_MESSAGE_CHARS } from '../limits';
+import { getDraft, setDraft } from '../drafts';
 
 /**
  * Where the half-typed message for a conversation is kept.
  *
- * Per conversation and on this device only. A draft is the one thing a person types that they have not
- * decided to send, and it belongs to nobody but them: putting it anywhere the account can reach would
- * mean a half-finished thought sitting in a server's database, and putting it in the message store would
- * mean it travelled to the other person before it was ready.
+ * Per conversation, on this device, and encrypted — see `../drafts` for why a draft is not simply a
+ * `localStorage` entry: the app has a passcode lock, and a draft in the clear next to it undoes that
+ * promise for the one conversation somebody was in the middle of thinking about.
  */
-const draftKey = (channel: string) => `wn_draft_${channel === 'general' ? 'general' : channel}`;
-
-function readDraft(channel: string): string {
-  try { return localStorage.getItem(draftKey(channel)) || ''; } catch { return ''; }
-}
-
-function writeDraft(channel: string, text: string): void {
-  try {
-    if (text.trim()) localStorage.setItem(draftKey(channel), text);
-    else localStorage.removeItem(draftKey(channel));
-  } catch { /* private mode: the draft simply will not survive a reload */ }
-}
+const draftKey = (channel: string) => channel || 'general';
 
 export function MessageInput() {
   const { state, sendMessage, sendDm, sendImage, sendDmImage, blockedUsers, unblockUser, setReply, editingTarget, setEditing, editMessage, notifyTyping, t } = useConnection();
@@ -69,7 +58,7 @@ export function MessageInput() {
     if (ta) { ta.value = ''; ta.style.height = 'auto'; }
     setHasText(false);
     setError(null);
-    writeDraft(dmTarget || 'general', '');
+    setDraft(draftKey(dmTarget || 'general'), '');
   }, [setReply, setEditing, dmTarget]);
 
   // the composer is an uncontrolled textarea, so React reuses the same node when the channel
@@ -79,10 +68,10 @@ export function MessageInput() {
     const next = dmTarget || 'general';
     if (channelRef.current === next) return;
     // the outgoing draft is kept, and the incoming one put back in the box
-    writeDraft(channelRef.current, textareaRef.current?.value || '');
+    setDraft(draftKey(channelRef.current), textareaRef.current?.value || '');
     channelRef.current = next;
     clearComposer();
-    const restored = readDraft(next);
+    const restored = getDraft(next);
     if (restored && textareaRef.current) {
       textareaRef.current.value = restored;
       setHasText(restored.trim().length > 0);
@@ -93,7 +82,7 @@ export function MessageInput() {
   // the draft follows what is typed, and is dropped when the message actually goes
   const onComposerChange = (value: string) => {
     setHasText(value.trim().length > 0);
-    writeDraft(dmTarget || 'general', value);
+    setDraft(draftKey(dmTarget || 'general'), value);
     if (value.length > 0) notifyTyping(dmTarget || 'general');
   };
 
