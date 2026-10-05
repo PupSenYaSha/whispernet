@@ -22,6 +22,18 @@ export interface E2EServer {
 }
 
 export async function startE2EServer(): Promise<E2EServer> {
+  // Point the same scenarios at an instance that is already running, with WN_E2E_LIVE=1.
+  //
+  // Worth having as a mode rather than a separate suite: the browser tests prove the crypto path, and they
+  // prove it against a server this run started. That is not the same claim as proving it against the
+  // server people are connected to, and the difference is not academic — the live host was returning 502
+  // for a while while every one of these passed locally.
+  if (process.env.WN_E2E_LIVE === '1') {
+    const url = process.env.WN_E2E_URL;
+    if (!url) throw new Error('WN_E2E_LIVE=1 needs WN_E2E_URL');
+    return { url, dataDir: '', stop: async () => { /* somebody else's server; leave it running */ } };
+  }
+
   if (!fs.existsSync(path.join(CLIENT_DIST, 'index.html'))) {
     throw new Error('dist/client is missing — run `npm run build:client` before the browser tests');
   }
