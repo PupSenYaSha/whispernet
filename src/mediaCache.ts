@@ -27,6 +27,20 @@ export class MediaCache {
   private refs = new Map<string, number>();
   /** Entries whose provisional claim a bubble has already taken over. */
   private adopted = new Set<string>();
+  /**
+   * Urls that were replaced while a bubble was still showing them, held until that bubble lets go.
+   *
+   * A second `put` for an id that is already on screen used to revoke the url the first bubble was
+   * displaying, and to reset its refcount to one. Neither is true of the single-bubble case the comment
+   * below was written for: the same message can be rendered in the conversation and in the search results
+   * at once, and React mounts both in one commit, so two decryptions of one message overlap and both call
+   * `put`. The first one landed, the second replaced it, and the image the user was looking at went blank
+   * with nothing in the console to say why.
+   *
+   * A list rather than a single url, because the overlap can be more than two deep and a map keyed on the
+   * id would drop the earliest url on the floor without revoking it.
+   */
+  private pendingRevoke = new Map<string, string[]>();
   private total = 0;
 
   bytes(): number {
@@ -56,11 +70,49 @@ export class MediaCache {
    * the console to say why.
    */
   put(id: string, url: string, size: number): void {
+    // Replacing an entry has to take the old one out of the accounting first. It used to go straight over the
+    // top: `sizes` was overwritten and `total` had the new size added to it without the old one being
+    // subtracted, so the byte count drifted upward by the difference on every replacement and the excess was
+    // unrecoverable - the entry could never be correctly subtracted on the way out, because the size
+    // recorded for it was no longer the size it contributed. The budget was then wrong for the rest of the
+    // tab's life while still being reported as authoritative.
+    //
+    // The url it replaced is revoked rather than dropped - but only once nothing is actually showing it.
+    // `put` used to revoke unconditionally, which is right for the single-bubble case and wrong for every
+    // other one: see `pendingRevoke`.
+    const previous = this.urls.get(id);
+    if (previous !== undefined) {
+      this.total -= this.sizes.get(id) ?? 0;
+      this.sizes.delete(id);
+      // `adopted`, not the refcount, is what says a bubble is showing this. The refcount is never zero
+      // here - `put` has just claimed the entry on its own, so that the budget cannot revoke it in the gap
+      // before React's effect runs - which means testing the refcount would make every replacement look
+      // like one a bubble was holding, and nothing would ever be revoked.
+      const shownByABubble = this.adopted.has(id);
+      this.adopted.delete(id);
+      if (shownByABubble) {
+        const waiting = this.pendingRevoke.get(id);
+        if (waiting) waiting.push(previous);
+        else this.pendingRevoke.set(id, [previous]);
+      } else {
+        // nothing is showing it, so anything already queued for this id has nothing left to be shown in either
+        for (const orphan of this.pendingRevoke.get(id) ?? []) {
+          try { URL.revokeObjectURL(orphan); } catch { /* already gone */ }
+        }
+        this.pendingRevoke.delete(id);
+        try { URL.revokeObjectURL(previous); } catch { /* already gone */ }
+      }
+    }
+
     this.urls.set(id, url);
     this.sizes.set(id, size);
     this.total += size;
-    this.refs.set(id, 1);
-    this.adopted.delete(id);
+    // the claim `put` makes, or the count the bubbles had already built up where they are still there -
+    // overwriting it with one would let the last of two bubbles to unmount free the entry the other is
+    // still displaying
+    this.refs.set(id, previous !== undefined && this.refs.has(id)
+      ? Math.max(1, this.refs.get(id) ?? 0)
+      : 1);
     this.evict();
   }
 
@@ -86,6 +138,15 @@ export class MediaCache {
     if (held <= 1) {
       this.refs.delete(id);
       this.adopted.delete(id);
+      // the url this entry replaced while it was on screen, if there was one: the bubble that was holding
+      // it has gone, so this is the first moment it can safely be revoked
+      const orphans = this.pendingRevoke.get(id);
+      if (orphans) {
+        this.pendingRevoke.delete(id);
+        for (const orphan of orphans) {
+          try { URL.revokeObjectURL(orphan); } catch { /* already gone */ }
+        }
+      }
       // the bubble that was holding these bytes has gone, so this is the moment the budget can actually be
       // met. Without it the cache sat above the line until the next decryption happened to come along,
       // which on a quiet screen is never.
@@ -109,10 +170,15 @@ export class MediaCache {
   /** Revokes everything, for signing out. */
   clear(): void {
     for (const url of this.urls.values()) { try { URL.revokeObjectURL(url); } catch { /* already gone */ } }
+    // the replaced urls are still outstanding, and signing out is the one moment every bubble has let go
+    for (const orphans of this.pendingRevoke.values()) {
+      for (const orphan of orphans) { try { URL.revokeObjectURL(orphan); } catch { /* already gone */ } }
+    }
     this.urls.clear();
     this.sizes.clear();
     this.refs.clear();
     this.adopted.clear();
+    this.pendingRevoke.clear();
     this.total = 0;
   }
 }

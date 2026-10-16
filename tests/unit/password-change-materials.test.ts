@@ -97,6 +97,39 @@ describe('the own-message cache across a password change', () => {
     expect(await secureGet<Record<string, string>>('wn_own_dm_text', OLD)).toBeNull();
   });
 
+  /**
+   * The same thing, with the new password the same length as the old one.
+   *
+   * Every other test in this file changes between a ten-character password and a fourteen-character one,
+   * and that is the only reason they all passed. The derived key behind these boxes was cached under an
+   * identity built from the password's *length*, so a change to another password of the same length was
+   * answered with the key derived from the old one - the box was rewritten under the password the user
+   * had just moved away from. Two failures followed from that and neither of them was loud: the previous
+   * password kept opening the box, and on the next page load, with an empty cache, the right key no longer
+   * opened it at all, so the account's own copy of every conversation it had sent silently vanished.
+   *
+   * Fixing a typo in a password is the ordinary reason two of them are the same length.
+   */
+  it('does not keep the old password working when the new one is the same length', async () => {
+    const OLD_SAME = 'correct-horse-1';
+    const NEW_SAME = 'correct-horse-2';
+    expect(OLD_SAME.length).toBe(NEW_SAME.length);
+
+    const { secureGet } = await import('../../src/secureStore');
+    rememberOwnMessageText('msgid7654321', 'a message the sender can read back');
+    await rekeyOwnMessageCache(OLD_SAME);
+
+    await rekeyOwnMessageCache(NEW_SAME);
+
+    expect(await secureGet<Record<string, string>>('wn_own_dm_text', NEW_SAME),
+      'the box was not re-sealed under the new password').toBeTruthy();
+    expect(await secureGet<Record<string, string>>('wn_own_dm_text', OLD_SAME),
+      'the previous password still opens the box, which is what the change was supposed to prevent')
+      .toBeNull();
+    // and the tab still holds them, because it typed them
+    expect(recallOwnMessageText('msgid7654321')).toBe('a message the sender can read back');
+  });
+
   it('forgets them on signing out rather than leaving them under a live password', async () => {
     rememberOwnMessageText('msgid7654321', 'something private');
     await rekeyOwnMessageCache(OLD);

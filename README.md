@@ -25,7 +25,10 @@ Short usage: `npm start` — installs deps if needed, builds the client, then se
   registration date, safety number; own photo upload (auto-cropped, WebP)
 - **Contact verification** — compare a safety number in person and mark the contact verified; the mark
   clears itself if their identity key ever changes
-- **Chat list** — unread counts, unread-only filter, per-chat pins, per-chat draft memory
+- **Chat list** — unread counts, unread-only filter, per-chat pins, per-chat draft memory. A pin is stored
+  as a bare message id: it survives a reload without keeping a second copy of what was pinned, which for a
+  private message would mean writing somebody's words to disk in the clear. Installing over an older
+  version rewrites any pin that still carries its text.
 - **Multi-device** — up to 3 sessions (named devices, list & revoke); a 4th device is rejected. Every
   device has its own ratchet identity, so compromising one device does not open the others
 - **Key protection** — private keys encrypted at rest (PBKDF2 600K + AES-256-GCM); encrypted key backup /
@@ -178,16 +181,50 @@ Android release builds need the `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PAS
 rather than shipping a debug-signed APK. That refusal is deliberate and it fails the whole run, so an
 Android build is all-or-nothing: no keystore means no APK, not a debug one.
 
+The Android build has both kinds of backup switched off — Auto Backup and device-to-device transfer — via
+`android:allowBackup="false"` plus an explicit `data_extraction_rules.xml`. The WebView's storage holds an
+identity key, the app-lock verifier and a cache of decrypted messages, and copying that to a Google Drive
+account would contradict the first line of this file. Reinstalling means signing in again, which is the
+right trade for a messenger. Its `FileProvider` is also narrowed to the app's own cache and external files
+directory; the stock Capacitor template publishes the entire shared-storage root through it.
+
 ### The in-app updater
 
 The desktop shell checks the GitHub releases API, downloads the portable zip, and **refuses to install
 anything it cannot check against a published digest**. A missing or unreadable `.sha256` for the exact file
 being downloaded is a hard failure, not a warning.
 
-The digest is fetched from the same place as the payload, so it catches a corrupted or stale download but
-does **not** prove who published the build — that needs a signature, and no key is pinned in this
-repository. `ALLOW_UNVERIFIED_UPDATES=1` will accept an unverifiable release; it is off by default and has
-to be set deliberately.
+The digest is fetched from the same place as the payload, so on its own it would catch a corrupted or stale
+download but **not** prove who published the build: whoever can change the release can change the digest
+beside it. So releases are also **signed**, and the signature is the part that proves authorship.
+
+The chain is signature → digest → file. `scripts/sign-update.mjs` signs the 32 digest bytes — not the 50 MB
+archive, which would mean hashing that on every build to say the same thing — and the desktop shell verifies
+that signature against an **Ed25519 public key compiled into the binary**, before it will install anything.
+A digest fetched from the same place as the payload could not do this job even in principle: the answer to
+"did the right person publish this" must not itself be editable by whoever can publish.
+
+The key pair comes from `scripts/generate-update-key.mjs`. It writes **only the private half to a file and
+prints only the public half**, so the secret never passes through a terminal, a log or a chat message. The
+public half goes into `UPDATE_PUBLIC_KEY` in `src-tauri/src/lib.rs`; the private half goes into the
+repository secret `UPDATE_SIGNING_KEY_BASE64`.
+
+> **There is no second key and no recovery path.** A key that can no longer sign is a key that can no longer
+> be used, and shipping a replacement is itself a release — one that only installs on builds already
+> carrying the new key. Back it up somewhere that is not the machine that made it. **Publishing it would let
+> anyone ship code to every user's desktop.**
+
+CI refuses to publish a Windows build without the key, rather than publishing an unsigned one: an unsigned
+release looks identical to a signed one right up until the binary is swapped, which is exactly when the check
+matters. `ALLOW_UNVERIFIED_UPDATES=1` still exists for a self-hoster whose own key they have deliberately
+removed; it is off by default, and setting it means declining to check who published what you install.
+
+Downloading is automatic; **applying is not.** Once the update is unpacked the shell waits for the user to
+choose, and every button in that dialog — including the one in the corner — means "not now". The new
+version is then installed and picked up on the next launch. The shell used to restart the app by itself a
+few seconds after unpacking, which made "dismiss" a button that hid an overlay while the app restarted
+underneath it, taking anything unsent with it. Declining or ignoring the prompt waits five minutes, then
+keeps the current version.
 
 ## Hosted instance
 
@@ -235,9 +272,41 @@ Everything has a working default; nothing is required.
 | `TLS_KEY` / `TLS_CERT` | *(unset)* | Serve HTTPS/WSS directly instead of behind a proxy |
 | `MAX_CONNECTIONS` | `10000` | Hard ceiling on open sockets |
 | `MAX_UPLOAD_SIZE` | `1073741824` | Ceiling on one attachment, in bytes |
-| `MAX_REGISTRATIONS_PER_IP` | `20` | Accounts one address may create per day; `0` lifts it |
+| `MAX_REGISTRATIONS_PER_IP` | `40` | Accounts one address may create per day; `0` lifts it |
+| `MAX_ACCOUNTS_PER_DEVICE` | `6` | Accounts one device may create per day; `0` lifts it |
+| `POW_BITS` | `20` | Leading zero bits a registration proof must have; `0` lifts it |
+
+Creating an account costs a **proof-of-work search**: the client hashes until it finds a value with enough
+leading zero bits, and the server refuses anything short. Measured in a browser at roughly 330,000 hashes a
+second, the default is about **3 seconds** — one bit is twice the work, so 22 would be ~13 seconds and 24
+would be ~50. It runs in a worker, with progress and a cancel button, so the tab stays usable.
+
+This is the only one of the three brakes that cannot be sidestepped by editing a request: the address and
+device caps are both defeated by sending a different value, while the search has to actually be performed —
+so a hundred accounts cost a hundred searches. It needs no identity either, which matters here, because the
+alternative would be a database of whose hardware is whose.
+
+Proofs are single-use, and the difficulty is taken from the challenge the server issued rather than from the
+request, so a client cannot talk its way to a lower one. The format is `SHA-256(ascii(nonce) + ':' +
+ascii(challenge))`, computed with `@noble/hashes` on the client and `node:crypto` on the server; a test
+checks the two agree against an independent implementation, because nothing at runtime would notice if they
+drifted — the symptom would just be a register button that silently does nothing.
+
+Account creation counts are kept as rows in `registration_events`, so a limit survives a restart — which it
+did not when the counts were in memory, and where every deploy quietly handed everyone a fresh allowance.
+Nothing but the pseudonym is stored: an address or device id is HMAC'd with a salt that does **not** rotate
+(a rotating one would make every account look new each morning and the limit would never reach its ceiling),
+which is the opposite of the security log's salt on purpose, because that one is meant to be worthless by
+tomorrow.
+
+The device limit is the more meaningful of the two, and worth understanding honestly: a device id is
+generated by the client and sent in the clear, so it is not a credential. Anyone determined to make more
+accounts presents a new one, and clearing site data does the same for free. It is a cost, not a wall. What
+it does buy is that a person with three devices keeps the same one on each, whereas someone wanting twenty
+accounts has to work at it for every one.
 | `MAX_AUTH_ATTEMPTS` | `300` | Coarse per-address auth backstop, counted before anybody has proved who they are |
-| `ALLOW_UNVERIFIED_UPDATES` | *(unset)* | Desktop only; see above |
+| `ALLOW_UNVERIFIED_UPDATES` | *(unset)* | Desktop only; installs a build with no valid signature — see above |
+| `UPDATE_SIGNING_KEY_BASE64` | *(unset)* | Repository secret; CI refuses to publish a Windows build without it |
 
 `npm start` also serves `site/` on `:3000` when that directory is present. It is not tracked in
 git, so a fresh clone simply has no marketing site — the messenger on `:50025` is unaffected.

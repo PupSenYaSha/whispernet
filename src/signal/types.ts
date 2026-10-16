@@ -39,7 +39,7 @@ export interface SignedPreKeyRecord {
 }
 
 export interface SessionState {
-  version: 3;
+  version: 4;
   registrationId: number;
   currentRatchetPublicKey: Uint8Array | null;
   rootKey: Uint8Array;
@@ -71,6 +71,21 @@ export interface SessionState {
   sendingMessageNumber: number;
   receivingMessageNumber: number;
   skippedMessageKeys: Map<number, Uint8Array>;
+  /**
+   * The receiving-side mirror of the two fields above, and for the same reason.
+   *
+   * `skippedMessageKeys` are the keys of the receiving chain this side is on *now*, kept so a message
+   * that arrives ahead of an earlier one still opens. `ratchetStep` used to `clear()` that map outright,
+   * which threw away the keys of the chain just left: peer sends 5, 6, 7, this device opens 7 first and
+   * derives k5 and k6, then the peer steps the ratchet, and 5 and 6 become messages nobody can read - so
+   * `openOne` reported `[encrypted]` and reset the whole session over two messages that were merely late.
+   *
+   * The sending half of this problem was already solved with `previousSendingSkippedKeys`. This is that
+   * same pattern applied to the receiving half, not a redesign of the map.
+   */
+  previousReceivingRatchetPublicKey: Uint8Array | null;
+  previousReceivingChainLength: number;
+  previousReceivingSkippedKeys: Map<number, Uint8Array>;
   createdAt: number;
   lastActivity: number;
   /**
@@ -92,7 +107,7 @@ export interface SessionState {
 export interface Session {
   sessionId: string;
   state: SessionState;
-  version: 3;
+  version: 4;
   protocolVersion: number;
 }
 

@@ -74,6 +74,58 @@ describe('shared networks', () => {
     expect(received.payload.text).toBe('still there?');
   }, 30000);
 
+  /**
+   * Two accounts on one browser share a device id, and that is not an attack.
+   *
+   * `wn_device_id` is stored once per browser profile, not once per account, so signing in as somebody else
+   * on the same machine presents an id the server has already seen. The registry was keyed by that id
+   * alone, so the second sign-in evicted the first account's socket with `close(4001)` - and then held only
+   * one entry, which meant the first account's typing indicators and read receipts were routed to the
+   * second account's socket. Both halves of that are wrong, and the eviction is the visible one.
+   */
+  it('lets two accounts share one device id without evicting each other', async () => {
+    const ip = '10.1.0.6';
+    const deviceId = 'dev-shared-browser';
+    const firstNick = uniqueNick('share');
+    const secondNick = uniqueNick('share2');
+
+    const first = await open(ip, deviceId);
+    const firstAuth = await first.register(firstNick, { deviceId });
+    expect(firstAuth.type, `register: ${JSON.stringify(firstAuth.payload)}`).toBe('auth_success');
+
+    const listener = await open('10.1.0.7', 'dev-share-listener');
+    expect((await listener.register(uniqueNick('sharepeer'), { deviceId: 'dev-share-listener' })).type).toBe('auth_success');
+
+    // The collision: a different account, presented the same device id.
+    const second = await open(ip, deviceId);
+    const secondAuth = await second.register(secondNick, { deviceId });
+    expect(secondAuth.type, `second register: ${JSON.stringify(secondAuth.payload)}`).toBe('auth_success');
+
+    await new Promise((r) => setTimeout(r, 300));
+
+    // Neither account may be silently disconnected by the other's sign-in.
+    first.clear();
+    listener.send('chat_message', { text: 'is the first account still here?' });
+    const toFirst = await first.waitFor('chat_message', 5000);
+    expect(toFirst, 'signing in as a second account disconnected the first one').toBeTruthy();
+    expect(toFirst.payload.text).toBe('is the first account still here?');
+
+    // And the shared entry must not swallow private traffic. A read receipt is looked up by device id, so
+    // with one entry per device it went to whichever account registered last: the sender received its own
+    // receipt and the recipient got nothing.
+    const dm = `${second.userId}:${first.userId}`;
+    second.clear();
+    first.clear();
+    second.send('dm_read', { channel: dm, upTo: Date.now() });
+
+    const misrouted = await second.waitFor('dm_read', 900);
+    expect(misrouted, "the sender received its own read receipt, so it never reached the recipient").toBeNull();
+
+    const delivered = await first.waitFor('dm_read', 5000);
+    expect(delivered, "the read receipt never reached the account it was addressed to").toBeTruthy();
+    expect(delivered.payload.channel).toBe(dm);
+  }, 30000);
+
   it('does not let one address flood the server before signing in', async () => {
     const ip = '10.1.0.5';
     const nick = uniqueNick('flood');

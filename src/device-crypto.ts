@@ -27,7 +27,28 @@ const STORE = 'keys';
 const WRAP_KEY_ID = 'auth-wrap-v1';
 const LEGACY_SALT_KEY = 'wn_fingerprint_salt';
 
+/**
+ * Memoised only when the database actually opened.
+ *
+ * A failure is deliberately not memoised, and that is the whole of item 2. `dbPromise` used to hold the
+ * `null` from `onerror` and `onblocked` as well, and `deviceKeyStorageWorks()` read the *same* memoised
+ * value - so a single failed open made both answers null, and `storePassword` concluded this browser cannot
+ * hold a key and sealed the plaintext account password under the fingerprint scheme instead. It had no way
+ * back: the blob is only ever rewritten when the *legacy* scheme is what opens, so a transient failure
+ * turned a permanent, silent downgrade.
+ */
 let dbPromise: Promise<IDBDatabase | null> | null = null;
+
+/**
+ * Whether this browser permanently cannot open IndexedDB, as opposed to having failed this time.
+ *
+ * Only two things count as permanent: there being no `indexedDB` at all (a non-browser host, or an
+ * extension policy), and `factory.open` throwing synchronously. Everything the open request reports is
+ * treated as retryable, which is the correct reading of the real triggers: another tab holding an
+ * older-version database open, an upgrade blocked by a connection that has not closed yet, and private
+ * mode's intermittent refusal all clear on a later attempt.
+ */
+let storagePermanentlyUnavailable = false;
 
 function indexedDbFactory(): IDBFactory | null {
   try {
@@ -41,12 +62,18 @@ function indexedDbFactory(): IDBFactory | null {
 function openDb(): Promise<IDBDatabase | null> {
   if (dbPromise) return dbPromise;
   const factory = indexedDbFactory();
-  if (!factory) return Promise.resolve(null);
-  dbPromise = new Promise<IDBDatabase | null>((resolve) => {
+  if (!factory) {
+    storagePermanentlyUnavailable = true;
+    return Promise.resolve(null);
+  }
+  const pending = new Promise<IDBDatabase | null>((resolve) => {
     let request: IDBOpenDBRequest;
     try {
       request = factory.open(DB_NAME, 1);
     } catch {
+      // thrown, not reported: the factory itself is unusable, so this is the one open failure that will
+      // not get better and the fallback below is the right answer
+      storagePermanentlyUnavailable = true;
       resolve(null);
       return;
     }
@@ -55,12 +82,21 @@ function openDb(): Promise<IDBDatabase | null> {
       if (!db.objectStoreNames.contains(STORE)) db.createObjectStore(STORE);
     };
     request.onsuccess = () => resolve(request.result);
-    // A browser in private mode, or with storage disabled, refuses to open the database. That is not a
-    // failure worth breaking sign-in over: the fallback below keeps the old behaviour.
+    // Neither of these is cached. `onblocked` in particular is the ordinary case of another tab holding an
+    // older version of this database open, which clears on its own once that tab closes or reloads -
+    // caching it would turn a momentary blocked upgrade into a permanent downgrade.
     request.onerror = () => resolve(null);
     request.onblocked = () => resolve(null);
   });
-  return dbPromise;
+  // Only a database that opened is memoised. Two callers in the same tick share one open; a caller after a
+  // failure gets a fresh attempt. The identity check is what keeps a late-arriving failure from clearing a
+  // *newer* open that has already replaced it in `dbPromise`.
+  const attempt = pending.then((db) => {
+    if (!db && dbPromise === attempt) dbPromise = null;
+    return db;
+  });
+  dbPromise = attempt;
+  return attempt;
 }
 
 function idbGet<T>(key: string): Promise<T | null> {
@@ -100,13 +136,33 @@ function idbPut(key: string, value: unknown): Promise<boolean> {
 function idbDelete(key: string): Promise<void> {
   return openDb().then((db) => {
     if (!db) return;
-    try {
-      db.transaction(STORE, 'readwrite').objectStore(STORE).delete(key);
-    } catch { /* nothing to remove */ }
+    // The transaction is awaited, not merely started. It used to fire the delete and resolve on the same
+    // tick, so `destroyDeviceKey` returned while the key was still on disk and a `deviceKey()` called
+    // straight afterwards could read back the key it had just been told to forget.
+    return new Promise<void>((resolve) => {
+      try {
+        const tx = db.transaction(STORE, 'readwrite');
+        tx.objectStore(STORE).delete(key);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => resolve();
+        tx.onabort = () => resolve();
+      } catch { resolve(); }
+    });
   });
 }
 
 let cached: CryptoKey | null = null;
+/**
+ * The generation in flight, so two callers cannot both make one.
+ *
+ * `deviceKeyAvailable`, `storePassword` and `readStoredAuth` all reach this during the same startup tick,
+ * and each awaits between asking whether there is a key and writing one. Two overlapping callers therefore
+ * both read *absent* and both generated: the second write to IndexedDB replaced the first, and `cached` ended
+ * up as whichever resolved last. If `storePassword` had sealed the stored password under the key that lost,
+ * the database now holds a key that cannot open it, and on the next launch `readStoredAuth` returned null -
+ * the user silently signed out, with an unreadable blob that nothing ever overwrites.
+ */
+let keyPending: Promise<CryptoKey | null> | null = null;
 
 /**
  * The wrapping key, created once per profile.
@@ -116,25 +172,57 @@ let cached: CryptoKey | null = null;
  */
 async function deviceKey(): Promise<CryptoKey | null> {
   if (cached) return cached;
-  const existing = await idbGet<CryptoKey>(WRAP_KEY_ID);
-  if (existing) {
-    cached = existing;
-    return existing;
+  if (!keyPending) {
+    keyPending = (async () => {
+      const existing = await idbGet<CryptoKey>(WRAP_KEY_ID);
+      if (existing) {
+        cached = existing;
+        return existing;
+      }
+      if (typeof crypto === 'undefined' || !crypto.subtle) return null;
+      try {
+        const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
+        if (!(await idbPut(WRAP_KEY_ID, key))) return null;
+        cached = key;
+        return key;
+      } catch {
+        return null;
+      }
+    })();
   }
-  if (typeof crypto === 'undefined' || !crypto.subtle) return null;
   try {
-    const key = await crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']);
-    if (!(await idbPut(WRAP_KEY_ID, key))) return null;
-    cached = key;
-    return key;
-  } catch {
-    return null;
+    return await keyPending;
+  } finally {
+    // cleared whatever the outcome, so a caller arriving afterwards waits for the next attempt instead of
+    // for a promise already settled with `null`
+    keyPending = null;
   }
 }
 
 /** Whether this browser can hold a real device-bound key, as opposed to falling back. */
 export async function deviceKeyAvailable(): Promise<boolean> {
   return (await deviceKey()) !== null;
+}
+
+/**
+ * Whether IndexedDB is usable *at all*, as opposed to merely having failed on this attempt.
+ *
+ * The distinction decides how credentials get stored, and getting it wrong is a silent downgrade.
+ * `deviceKey()` answers null for both "this browser cannot store a key" and "the key could not be produced
+ * this time" (a quota error, a transaction that lost a race, a blocked upgrade). Those want opposite
+ * behaviour: the first justifies the fingerprint fallback, the second must not - treating a momentary
+ * failure as a permanent inability wrote the password under a key derived from public browser details, and
+ * then kept it there, because nothing ever moves it back up to the real scheme.
+ *
+ * So this no longer answers "was the last open successful". It answers whether the *absence* is
+ * permanent, which is the only thing that may authorise the fallback: a live `indexedDB` whose open failed
+ * this time is retried rather than believed. The trigger worth naming is a second tab sitting on the
+ * database - `onblocked` fires, the open resolves null, and without this the credentials were sealed under
+ * the fingerprint for as long as that tab stayed open.
+ */
+async function deviceKeyStorageWorks(): Promise<boolean> {
+  if (storagePermanentlyUnavailable) return false;
+  return (await openDb()) !== null;
 }
 
 const PBKDF2_ITER = iterationsFor('deviceCredentials');
@@ -157,7 +245,7 @@ function base64ToBuf(b64: string): ArrayBuffer {
 }
 
 /* ------------------------------------------------------------------ *
- * The fallback, kept only for browsers that cannot hold a device key.
+ * The fallback: a key derived from public details about the browser.
  * ------------------------------------------------------------------ */
 
 async function fingerprintSalt(): Promise<Uint8Array> {
@@ -277,16 +365,31 @@ function storage(): Storage | null {
   }
 }
 
-/** Writes the sign-in blob under the device key, or under the fallback when there is none. */
+/**
+ * Writes the sign-in blob under the device key, or under the fallback when there is none.
+ *
+ * Note what the fallback is. Its key is derived by PBKDF2 from a *browser fingerprint* - user agent,
+ * screen size, timezone, canvas output, GPU renderer - with the salt sitting in the same `localStorage` as
+ * the blob. Anyone holding a copy of the profile can reconstruct those inputs and open it. So it keeps a
+ * password away from a casual glance at the disk, and away from a backup that is copied without its
+ * IndexedDB; it is not protection against anyone who means it. The real scheme is a non-extractable key
+ * that WebCrypto will not hand over, which is why the fallback is a last resort and not a preference.
+ *
+ * Returns false rather than persisting weakly when a device key *could* have been used but could not be
+ * produced right now, because the alternative is a permanent downgrade with no path back.
+ */
 export async function storePassword(nickname: string, password: string): Promise<boolean> {
   const s = storage();
   if (!s) return false;
   try {
     const key = await deviceKey();
-    const stored = key
-      ? await seal(key, 'device', JSON.stringify({ nickname, password }))
-      : await seal(await legacyKey(), 'fingerprint', JSON.stringify({ nickname, password }));
-    s.setItem('wn_auth', JSON.stringify(stored));
+    if (key) {
+      s.setItem('wn_auth', JSON.stringify(await seal(key, 'device', JSON.stringify({ nickname, password }))));
+      return true;
+    }
+    // No key. Fall back only if this browser cannot hold one at all.
+    if (await deviceKeyStorageWorks()) return false;
+    s.setItem('wn_auth', JSON.stringify(await seal(await legacyKey(), 'fingerprint', JSON.stringify({ nickname, password }))));
     return true;
   } catch {
     return false;

@@ -14,7 +14,6 @@ export interface X3DHResult {
 
 export interface X3DHInitResult {
   sharedSecret: Uint8Array;
-  messageKeys: Uint8Array[];
   message: SignalPreKeyMessage;
 }
 
@@ -44,7 +43,6 @@ export function x3dhInit(
   }
 
   const sharedSecret = deriveX3DHSecret(dh1, dh2, dh3, dh4);
-  const messageKeys = deriveMessageKeys(sharedSecret);
 
   const message: SignalPreKeyMessage = {
     identityKey: identityKey.publicKey,
@@ -64,7 +62,7 @@ export function x3dhInit(
     },
   };
 
-  return { sharedSecret, messageKeys, message };
+  return { sharedSecret, message };
 }
 
 export function x3dhRespond(
@@ -143,13 +141,4 @@ export function x3dhTranscriptHash(
     ),
   ]);
   return sha256(body);
-}
-
-function deriveMessageKeys(sharedSecret: Uint8Array): Uint8Array[] {
-  const keys: Uint8Array[] = [];
-  for (let i = 0; i < 3; i++) {
-    const info = new TextEncoder().encode(`msg_key_${i}`);
-    keys.push(hkdf(sha256, sharedSecret, new Uint8Array(32), info, 32));
-  }
-  return keys;
 }

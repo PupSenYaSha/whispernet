@@ -61,6 +61,73 @@ export function pseudonymizeAddress(ip: string): string {
 }
 
 /**
+ * The same pseudonym, under the salt that does not rotate - and only for the one scope that counts rows.
+ *
+ * `pseudonymizeAddress` above is keyed by the day, which is right for a log and quietly wrong for a limit.
+ * The registration counters count rows in `registration_events` whose subject column holds this value, so a
+ * new key every midnight means every address starts again at zero at 00:00 UTC: "40 accounts in the last
+ * 24 hours" was in fact "40 per UTC day", and the promise made in MAX_REGISTRATIONS_PER_IP was not the one
+ * the code kept. The device scope never had this problem - it was already on `stableSalt`, which is
+ * documented above as being the salt for exactly this reason.
+ *
+ * The split is deliberate and narrow: the log gets the rotating pseudonym, because joining one person's
+ * addresses across days is what the rotation exists to stop, and only the counted scope gets this one,
+ * because a counter keyed on a value that changes every morning is a counter that never fills. Both are
+ * HMACs over the same input to a server-held secret, truncated identically, so neither tells an operator
+ * which address it stands for.
+ */
+export function stablePseudonymizeAddress(ip: string): string {
+  if (!ip || ip === 'unknown') return 'unknown';
+  return crypto.createHmac('sha256', stableSalt()).update(ip).digest('base64url').slice(0, 16);
+}
+
+const LIMIT_SALT_FILE = 'limit-salt';
+let cachedLimitSalt: Buffer | null = null;
+
+/**
+ * A salt that does *not* rotate, for keys that have to keep meaning the same thing tomorrow.
+ *
+ * The log salt above is deliberately worthless by the next day, which is right for a log and useless here:
+ * the registration limits count rows keyed on this pseudonym, so rotating it would make every account look
+ * brand new each morning and the limits would never reach their ceiling at all. The two needs are opposite,
+ * so they get two files rather than one compromise.
+ *
+ * The value is only ever used to group identical inputs - nothing is recovered from it and nothing is
+ * compared across servers - so it is a stable secret rather than a rotating one, and rotating it would
+ * hand everyone a fresh allowance, which is the same as having no limit.
+ */
+function stableSalt(): Buffer {
+  if (cachedLimitSalt) return cachedLimitSalt;
+  const file = path.join(getDataDir(), LIMIT_SALT_FILE);
+  try {
+    const stored = JSON.parse(fs.readFileSync(file, 'utf8')) as { salt?: string };
+    if (typeof stored?.salt === 'string' && stored.salt.length > 0) {
+      cachedLimitSalt = Buffer.from(stored.salt, 'base64');
+      return cachedLimitSalt;
+    }
+  } catch {}
+  const salt = crypto.randomBytes(32);
+  cachedLimitSalt = salt;
+  try { fs.writeFileSync(file, JSON.stringify({ salt: salt.toString('base64') }), { mode: 0o600 }); } catch {}
+  return salt;
+}
+
+/**
+ * A device id reduced to a stable pseudonym, for counting rather than identifying.
+ *
+ * A device id is a client-supplied UUID, not a credential, and it is already stored against sessions - but
+ * here it would be stored with no account attached to it, which is a list of machines that exist whether or
+ * not their owners ever signed in. Hashing it keeps that list to one opaque value per machine.
+ *
+ * Truncated to 16 base64url characters, the same as the address pseudonym: 96 bits, and these are never
+ * brute-forced because UUIDs are not guessable.
+ */
+export function pseudonymizeDevice(deviceId: string): string {
+  if (!deviceId) return 'unknown';
+  return crypto.createHmac('sha256', stableSalt()).update(deviceId).digest('base64url').slice(0, 16);
+}
+
+/**
  * A device string is a fingerprint, so only a coarse label survives. Version numbers and hardware
  * models are dropped: together with a nickname they would identify one person's machine, and their
  * only use on this screen is telling the account owner which session to revoke.
@@ -117,6 +184,14 @@ export function appendSecurityLine(line: string): void {
 }
 
 function rotate(file: string): void {
-  try { fs.renameSync(file, file + '.1'); } catch {}
-  activeBytes = 0;
+  // The destination has to go first. `renameSync` over an existing file is allowed on POSIX and fails with
+  // EPERM/EEXIST on Windows, so after the first rotation every later rename threw - and the throw was
+  // swallowed by the caller's `catch`. `activeBytes` was zeroed regardless, so the size that decides
+  // whether to rotate was forgotten from then on and the log grew without bound on the one platform this
+  // is developed on. Zeroing only on success keeps the accounting honest on any platform.
+  try { fs.unlinkSync(file + '.1'); } catch {}
+  try {
+    fs.renameSync(file, file + '.1');
+    activeBytes = 0;
+  } catch {}
 }

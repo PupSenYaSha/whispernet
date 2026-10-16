@@ -4,6 +4,8 @@ data/
 *.log
 .env
 .env.*
+# `.env.example` is not a secret: it is the documented list of the variables below with safe defaults, and
+# the negation is what keeps it in the repository. It did not exist, so the negation was negating nothing.
 !.env.example
 .DS_Store
 android/app/build/
@@ -11,6 +13,11 @@ android/.gradle/
 android/.idea/
 ios/
 src-tauri/target/
+
+# jars dropped in for the Cordova bridge, which this project does not use. The Gradle repository blocks that
+# would have picked them up are gone (see android/app/build.gradle), so nothing reads this directory - it is
+# ignored so that the directory itself cannot be committed with something in it.
+android/app/libs/
 
 # the marketing site is deployed from the working copy, but the release artifacts it links to are
 # not: they are large, and the server redirects to the GitHub release when they are missing

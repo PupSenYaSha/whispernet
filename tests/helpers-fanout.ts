@@ -140,16 +140,17 @@ export async function sealToEach(
 
     const ratchetPublicKey = started.ratchetPublicKey;
     const x3dhMessage = started.x3dhMessage;
+    // The seal reports its own header. Reading the counter back off the session afterwards is what the
+    // app used to do, and it is only correct because nothing moved the counter in between - which is a
+    // property of this helper rather than of the ratchet.
     const sealed = await sender.manager.encryptMessage(sessionId, plaintext);
-    // the number that goes on the wire is one less than the counter, which has already moved by the time
-    // encryptMessage returns - the same adjustment the app makes when it reads the counter back
     out.push({
       deviceId: target.deviceId,
       body: {
         kind: 'ratchet',
-        ciphertext: b64(sealed),
+        ciphertext: b64(sealed.ciphertext),
         ratchetPublicKey: b64(ratchetPublicKey),
-        messageNumber: sender.manager.getSession(sessionId)!.state.sendingMessageNumber - 1,
+        messageNumber: sealed.messageNumber,
         // the handshake rides with the body that starts the session, in the same serialised form the app
         // puts on the wire - arrays rather than base64, because that is what the JSON body carries
         x3dh: serializeX3dhMessage(x3dhMessage),
@@ -227,9 +228,24 @@ export async function openAsRecipient(
  */
 const liveManagers: InstanceType<typeof SessionManager>[] = [];
 
-/** Drops every manager, so no pending write lands in the next test. Call from `afterEach`. */
+/**
+ * Drops every manager *and* the store they share, so no pending write lands in the next test. Call from
+ * `afterEach`.
+ *
+ * The store has to go too, not just the managers. `destroy()` clears the manager's own map and cancels its
+ * timers, but the sessions it had already written stay in `localStorage`, and `init()` reads them back:
+ * every device here is created with `init(PASSWORD)` and no account id, so they all share one key and one
+ * password and the leftover blob opens cleanly. Since `ACCOUNT` and `SENDER_ACCOUNT` are constants of the
+ * calling file, the session ids collide across tests too - `getSessionId('acct-e2e', 'sender-e2e phone')`
+ * is the same string in test one and test five. A new device in a later test therefore finds a session
+ * already sitting in its map, decides the conversation is established, skips the handshake that the new
+ * body's `x3dh` field is carrying, and tries to open message 0 against a chain from the previous test.
+ * That fails with "Message did not authenticate", which names a symptom rather than the cause.
+ */
 export function resetFanoutDevices(): void {
   for (const m of liveManagers.splice(0)) m.destroy();
+  // after the destroys, so a manager that had a pending write cannot put its state back
+  store.clear();
 }
 
 export { PASSWORD };

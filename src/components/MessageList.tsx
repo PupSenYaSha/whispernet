@@ -2,6 +2,7 @@ import { useRef, useEffect, useState, useMemo, memo } from 'react';
 import type { Message } from '../types';
 import { MessageItem } from './MessageItem';
 import { cn } from '../utils';
+import { rememberScrollPosition, recallScrollPosition } from '../scrollMemory';
 
 /** Escapes a value for use inside a CSS attribute selector. */
 function cssEscape(value: string): string {
@@ -9,7 +10,7 @@ function cssEscape(value: string): string {
   return value.replace(/["\\]/g, '\\$&');
 }
 
-function MessageListImpl({ messages, fontSizeClass, t, hasMore, loadingOlder, onLoadMore, jumpToMessageId, pinnedIds, channel }: { messages: Message[]; fontSizeClass: string; t: (key: string) => string; hasMore?: boolean; loadingOlder?: boolean; onLoadMore?: () => void; jumpToMessageId?: string | null; pinnedIds?: string[]; channel?: string }) {
+function MessageListImpl({ messages, fontSizeClass, t, hasMore, loadingOlder, onLoadMore, jumpToMessageId, pinnedIds, channel, compact }: { messages: Message[]; fontSizeClass: string; t: (key: string) => string; hasMore?: boolean; loadingOlder?: boolean; onLoadMore?: () => void; jumpToMessageId?: string | null; pinnedIds?: string[]; channel?: string; compact?: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const isNearBottomRef = useRef(true);
   const prevLengthRef = useRef(0);
@@ -20,6 +21,11 @@ function MessageListImpl({ messages, fontSizeClass, t, hasMore, loadingOlder, on
   const [nearBottom, setNearBottom] = useState(true);
   const [flashId, setFlashId] = useState<string | null>(null);
   const pinnedSet = useMemo(() => new Set(pinnedIds || []), [pinnedIds]);
+// 'general' when the prop is absent, so the memory is keyed the same way every caller keys its drafts.
+// Held in a ref because the scroll handler and the restore below are attached once, and re-attaching them
+// whenever the conversation changes would restore a position belonging to the conversation just left.
+const scrollKeyRef = useRef(channel || 'general');
+scrollKeyRef.current = channel || 'general';
 
   useEffect(() => {
     const container = containerRef.current;
@@ -32,17 +38,43 @@ function MessageListImpl({ messages, fontSizeClass, t, hasMore, loadingOlder, on
       // kept as state as well as a ref: the button below has to appear and disappear, which a ref cannot do
       setNearBottom(near);
       if (near) setMissedCount(0);
+      // Held outside React, because this component does not survive the layout swap at 768px.
+      // See ../scrollMemory for why a remount has to be able to come back to the same place.
+      rememberScrollPosition(scrollKeyRef.current, scrollTop, scrollHeight);
     };
     container.addEventListener('scroll', handleScroll, { passive: true });
     return () => container.removeEventListener('scroll', handleScroll);
   }, [mounted]);
 
-  useEffect(() => {
+  /**
+ * Gets the list to the newest message, or back where the reader was.
+ *
+ * Both halves live in one effect on purpose. They were two, both keyed on `mounted`, and they raced: the
+ * first scheduled a `requestAnimationFrame` *and* an 80 ms `setTimeout` to pin the bottom, the second
+ * scheduled its own frame to restore the remembered offset - and the 80 ms timer fired last, so it won.
+ * The restore was undone every single time, `handleScroll` then observed a list sitting at the bottom and
+ * flipped `nearBottom` back to true, and the feature this module exists for did nothing at all on any
+ * input. No test caught it because each half is correct alone.
+ *
+ * So: the frame goes to the bottom (a first mount must reach the newest message whatever), and the settle
+ * timer decides between staying there and going back. The restore waits for the timeout because at frame
+ * time the rows have not been laid out yet, so `scrollHeight` is still the placeholder's and the offset
+ * would land in the wrong place.
+ */
+useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const scrollToBottom = () => { el.scrollTop = el.scrollHeight; };
     const raf = requestAnimationFrame(scrollToBottom);
-    const timeout = window.setTimeout(scrollToBottom, 80);
+    const timeout = window.setTimeout(() => {
+      const remembered = recallScrollPosition(scrollKeyRef.current, el.scrollHeight, el.clientHeight);
+      if (remembered === null) { scrollToBottom(); return; }
+      el.scrollTop = remembered;
+      // The scroll handler above only learns "not near the bottom" from a real scroll event, and assigning
+      // `scrollTop` does not always produce one.
+      isNearBottomRef.current = false;
+      setNearBottom(false);
+    }, 80);
     return () => { cancelAnimationFrame(raf); clearTimeout(timeout); };
   }, [mounted]);
 
@@ -147,7 +179,7 @@ function MessageListImpl({ messages, fontSizeClass, t, hasMore, loadingOlder, on
         </div>
       )}
       {!empty && (
-        <div className="space-y-2" role="log" aria-live="polite" aria-relevant="additions">
+        <div className={cn(compact ? 'space-y-0.5' : 'space-y-2')} role="log" aria-live="polite" aria-relevant="additions">
           {onLoadMore && hasMore && (
             <div className="flex justify-center py-2">
               <button
@@ -188,6 +220,7 @@ function MessageListImpl({ messages, fontSizeClass, t, hasMore, loadingOlder, on
                         animate={msg.id === newest?.id && Date.now() - msg.timestamp < 15000}
                         isPinned={pinnedSet.has(msg.id)}
                         channel={channel}
+                        compact={compact}
                       />
                     </div>
                   ))}
@@ -216,6 +249,5 @@ function MessageListImpl({ messages, fontSizeClass, t, hasMore, loadingOlder, on
     </div>
   );
 }
-
 
 export const MessageList = memo(MessageListImpl);

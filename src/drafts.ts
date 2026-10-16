@@ -24,6 +24,18 @@ const LEGACY_PREFIX = 'wn_draft_';
 
 type ChannelMap = Record<string, string>;
 
+/**
+ * How many conversations may hold a draft.
+ *
+ * One entry per conversation ever opened, keyed by a peer id the server supplies, so the count is driven by
+ * somebody else's data and there was nothing stopping it. Each entry is capped at the composer's own limit,
+ * so this is not about filling the disk — it is that past a few hundred entries the box runs into the
+ * browser's storage quota, the write fails, and the `catch` in `secureSet` says nothing. The visible
+ * result is drafts that stop saving at all, which looks like the app losing them rather than the app
+ * running out of room. The own-message cache caps its entries for the same reason.
+ */
+const MAX_ENTRIES = 300;
+
 /** Held for the tab, so the common case never touches storage or a key derivation. */
 const memory = new Map<string, string>();
 
@@ -37,10 +49,45 @@ let dirty = false;
  * this before it stores anything, the same guard the own-message cache uses.
  */
 let generation = 0;
+/**
+ * Counts every mutation, so a write can tell whether anything changed while it was in flight.
+ *
+ * Needed because `dirty` can no longer be cleared on the way in: it is only given up once the box is known
+ * to hold the snapshot that was written. Clearing it up front and setting it again on failure does not work,
+ * because a keystroke arriving during the write would be swallowed by the later `false`.
+ */
+let changes = 0;
+/** Consecutive failed saves, so the retry in `persist` can back off instead of looping. */
+let saveFailures = 0;
 
 /** Writes and the initial load, chained so two of them cannot interleave on one box. */
 let pending: Promise<void> = Promise.resolve();
 let timer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Told when a load finishes.
+ *
+ * `hydrate` sits behind the same 600,000-iteration derivation as everything else in the box, so it takes
+ * seconds — long enough that the composer has already been opened for a conversation by the time its draft
+ * exists. The composer reads the tab synchronously and nothing re-rendered it when the words arrived, so a
+ * draft was shown never: the user saw an empty box, typed, and the next write replaced the old text with
+ * theirs. A draft that is silently destroyed is worse than one that is never restored.
+ *
+ * Nothing waits on the subscription. It only says "look again now", and a conversation with nothing saved
+ * costs one map lookup.
+ */
+const hydratedListeners = new Set<() => void>();
+
+export function subscribeDrafts(onHydrated: () => void): () => void {
+  hydratedListeners.add(onHydrated);
+  return () => { hydratedListeners.delete(onHydrated); };
+}
+
+function announceHydrated(): void {
+  for (const listener of [...hydratedListeners]) {
+    try { listener(); } catch { /* one bad listener must not stop the rest */ }
+  }
+}
 
 export function setDraftsPassword(next: string): void {
   if (next === password) return;
@@ -55,17 +102,39 @@ export function setDraftsPassword(next: string): void {
   }
   // queued onto the same chain as the writes, so two of them cannot interleave on one box
   pending = pending.then(() => hydrate(password), () => hydrate(password));
-  // Anything already in the tab has to be re-wrapped under the new password even though nothing was
-  // typed after the change. Without this the box on disk stays sealed under the old one and the previous
-  // password carries on opening it, which is the opposite of what changing a password is for.
-  if (memory.size > 0) dirty = true;
+  // Anything already in the tab has to be re-wrapped under the new password even though nothing was typed
+  // after the change. Without this the box on disk stays sealed under the old one and the previous password
+  // carries on opening it, which is the opposite of what changing a password is for.
+  //
+  // The write has to be scheduled here rather than left for the next keystroke. It used to be: the flag was
+  // set and nothing acted on it, so unless the user happened to type in that conversation the box kept the
+  // old seal, and the salt that derived the old key was still sitting in localStorage beside it. A draft
+  // nobody had returned to was the case that stayed broken.
+  if (memory.size > 0) {
+    dirty = true;
+    schedulePersist();
+  }
 }
 
 async function hydrate(withPassword: string): Promise<void> {
+  // Taken before the await, and checked after it, for the same reason `persist` does.
+  //
+  // `forgetDrafts` already documents the hazard: the generation has to move, or a hydrate that is inside a
+  // 600,000-iteration derivation comes back afterwards and puts a signed-out account's words into the tab
+  // again. Only `persist` was checking. Sign in, then sign out before the derivation finishes, and this
+  // resolved into a cleared map and refilled it - then announced, so the composer rendered the previous
+  // account's half-typed messages, and the next person to use that tab saved them into their own box.
+  // `ownMessageCache` guards the same way; drafts was the one that did not.
+  const mine = generation;
   const stored = await secureGet<ChannelMap>(STORAGE_KEY, withPassword);
+  if (mine !== generation) return;
   if (stored) {
     for (const [channel, text] of Object.entries(stored)) {
+      // A channel with no name in it cannot be rendered and is not something `setDraft` would have
+      // written, so a hand-edited or truncated entry is skipped rather than stored under `undefined`.
+      if (typeof channel !== 'string' || channel.length === 0) continue;
       if (typeof text === 'string') memory.set(channel, text);
+      if (memory.size >= MAX_ENTRIES) break;
     }
   }
   // whatever was recovered has to be written into the box, or deleting the plaintext copy would throw the
@@ -75,6 +144,8 @@ async function hydrate(withPassword: string): Promise<void> {
     dirty = true;
     schedulePersist();
   }
+  // last, so a listener that reads the tab sees everything this load recovered
+  announceHydrated();
 }
 
 /**
@@ -142,10 +213,22 @@ export function getDraft(channel: string): string {
 
 export function setDraft(channel: string, text: string): void {
   if (!channel) return;
-  if (text) memory.set(channel, text);
-  else memory.delete(channel);
+  if (text) {
+    // re-inserting moves the channel to the end of the iteration order, which is what makes the oldest
+    // entry below the right one to drop
+    memory.delete(channel);
+    memory.set(channel, text);
+    while (memory.size > MAX_ENTRIES) {
+      const oldest = memory.keys().next();
+      if (oldest.done) break;
+      memory.delete(oldest.value);
+    }
+  } else memory.delete(channel);
   if (!password) return;
+  changes++;
   dirty = true;
+  // a keystroke is a reason to stop backing off: whatever was wrong has had a moment to be fixed
+  saveFailures = 0;
   schedulePersist();
 }
 
@@ -168,17 +251,49 @@ export function flushDrafts(): Promise<void> {
 
 async function persist(): Promise<void> {
   if (!password || !dirty) return;
-  dirty = false;
   const withPassword = password;
   const mine = generation;
-  await secureSet(STORAGE_KEY, withPassword, draftSnapshot());
+  const at = changes;
+  const saved = await secureSet(STORAGE_KEY, withPassword, draftSnapshot());
   // the account changed while the key was being derived: the box has been cleared, and putting it back
   // would undo a sign-out that already happened
-  if (mine !== generation) await secureRemove(STORAGE_KEY);
+  if (mine !== generation) {
+    await secureRemove(STORAGE_KEY);
+    return;
+  }
+  // Cleared only once the box holds this snapshot, and only if nothing was typed while it was being
+  // written - the same rule `ownMessageCache` follows. `secureSet` used to report nothing, so a full disk
+  // read as a successful write: the flag went false on the way in, the draft was never stored, and nothing
+  // was left to retry from. It is the words of a message that was never sent.
+  if (saved && changes === at) {
+    dirty = false;
+    saveFailures = 0;
+  } else if (!saved && changes === at) {
+    // Retried, but not forever. `secureSet` reports one `false` for every reason a write can fail, including
+    // the two that never get better on their own: a full disk and private browsing mode. Re-arming the
+    // ordinary one-second debounce on each failure - which is what this did first - turns either into a loop
+    // that runs for the life of the tab, doing a full snapshot, a serialise and an AES-GCM encrypt of up to
+    // 300 drafts every second while the app sits open. Five attempts with a widening gap, then it waits for
+    // the next keystroke: a failure that is transient gets picked up, and a permanent one costs nothing.
+    if (saveFailures < 5) {
+      const delay = 1000 * Math.pow(2, saveFailures);
+      saveFailures++;
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = null;
+        pending = pending.then(persist, persist);
+      }, delay);
+    }
+  }
 }
 
 export function forgetDrafts(): void {
   if (timer) { clearTimeout(timer); timer = null; }
+  // The generation has to move, or a `hydrate` that is already inside a 600,000-iteration derivation comes
+  // back afterwards and puts the signed-out account's words back into the tab. Nothing reaches disk in
+  // that state, because `persist` checks the generation too - but signing into a different account in the
+  // same tab would then have the next write put them in that account's box.
+  generation++;
   memory.clear();
   dirty = false;
   secureRemove(STORAGE_KEY);

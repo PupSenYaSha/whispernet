@@ -37,6 +37,13 @@ const PNG = Uint8Array.from(Buffer.from(
 // a raw key, in the shape the reader takes it
 const rawKey = () => crypto.getRandomValues(new Uint8Array(32)).buffer as ArrayBuffer;
 
+/** `getRandomValues` refuses more than 64 KiB in one call, and these tests want megabytes. */
+function randomBytes(n: number): Uint8Array<ArrayBuffer> {
+  const out = new Uint8Array(n);
+  for (let i = 0; i < n; i += 65536) crypto.getRandomValues(out.subarray(i, Math.min(i + 65536, n)));
+  return out;
+}
+
 const u32 = (n: number) => {
   const b = Buffer.alloc(4);
   b.writeUInt32BE(n >>> 0, 0);
@@ -89,7 +96,7 @@ describe('a media stream from a host that does not want to be reasonable', () =>
     // declares 4 GB and then is perfectly willing to keep sending, which is what makes this the
     // difference between refusing and filling the heap
     const { res, handedOver } = greedyResponse(frame(
-      { v: 2, iv: 'AAAAAAAAAAAAAAAA', size: 16, chunk: CHUNK },
+      { v: 3, iv: 'AAAAAAAAAAAAAAAA', size: 16, chunk: CHUNK },
       [u32(0xfffffff0), new Uint8Array(12)],
     ));
 
@@ -105,7 +112,7 @@ describe('a media stream from a host that does not want to be reasonable', () =>
 
     // a declared size past a gigabyte, with the stream ending immediately
     const stream = responseOf(frame(
-      { v: 2, iv: 'AAAAAAAAAAAAAAAA', size: 4 * 1024 * 1024 * 1024, chunk: CHUNK },
+      { v: 3, iv: 'AAAAAAAAAAAAAAAA', size: 4 * 1024 * 1024 * 1024, chunk: CHUNK },
       [u32(0)],
     ));
     await expect(openStreamedAttachment(stream, raw, 'AAAAAAAAAAAAAAAA')).rejects.toThrow(/too large/i);
@@ -118,7 +125,7 @@ describe('a media stream from a host that does not want to be reasonable', () =>
     // a small declared size, then chunks sized to the real limit, three of them
     const oneChunk = CHUNK + 16;
     const stream = responseOf(frame(
-      { v: 2, iv: 'AAAAAAAAAAAAAAAA', size: 1024, chunk: CHUNK },
+      { v: 3, iv: 'AAAAAAAAAAAAAAAA', size: 1024, chunk: CHUNK },
       [u32(oneChunk), new Uint8Array(12), new Uint8Array(oneChunk)],
     ));
     await expect(openStreamedAttachment(stream, raw, 'AAAAAAAAAAAAAAAA')).rejects.toThrow(/truncated|implausible|authenticate/i);
@@ -146,4 +153,44 @@ describe('a media stream from a host that does not want to be reasonable', () =>
 
     await expect(openStreamedAttachment(responseOf([copy]), enc.rawKey, enc.ivB64)).rejects.toBeTruthy();
   }, 30000);
+
+  it('names a v:2 attachment instead of reading it whole', async () => {
+    // The refusal has to be reachable.
+    //
+    // `v: 2` chunks were each sealed under their own random nonce, so this reader cannot open them at all.
+    // Left to fall through to the legacy path they were taken as one AES-GCM message over the whole body,
+    // which meant reading up to a gigabyte out of a host that had already been told it was not welcome.
+    //
+    // The check that said so was written inside the `try` whose `catch` swallows a JSON parse failure, so
+    // the `throw` was caught two lines below it. Nothing ever saw this error, and the code it was written
+    // to prevent ran every time.
+    const raw = rawKey();
+    const stream = responseOf(frame(
+      { v: 2, iv: 'AAAAAAAAAAAAAAAA', size: 1024 },
+      // a real length prefix, so the reader is committed to consuming the body before it can complain
+      [u32(1024), new Uint8Array(1024)],
+    ));
+    await expect(openStreamedAttachment(stream, raw, 'AAAAAAAAAAAAAAAA'))
+      .rejects.toThrow(/no longer supported/i);
+  }, 30000);
+
+  it('opens a wrapped attachment whole, at a size where a stray wrapper scan would show', async () => {
+    // A wrapped body used to have the wrapper stripped off it a second time, after `readThroughWrap` had
+    // already consumed it while locating it. That second pass scanned the *ciphertext* for `IEND` and threw
+    // away everything past the first hit, so a file was truncated at a random point and reported as
+    // failing authentication. The odds are about 1 in 4 billion per byte - roughly 0.02% on a megabyte and
+    // 23% on a gigabyte - which is why it was invisible: it is a coin-flip at the sizes people actually
+    // send, and nobody sees a bug that only fires on some files.
+    //
+    // So it cannot be provoked directly - the marker lives in output this code does not produce and there
+    // is no way to steer it. What this can do is the part that *is* deterministic: a wrapped body of a size
+    // where the failure would land has to come back at its exact length. The old truncation changed the
+    // length, and a changed length is a changed tag.
+    const source = new Blob([randomBytes(5 * 1024 * 1024)]);
+    const enc = await encryptFileStream(source);
+    const written = new Uint8Array(await new Response(enc.stream).arrayBuffer());
+
+    const blob = await openStreamedAttachment(responseOf([written]), enc.rawKey, enc.ivB64);
+    expect(blob.size).toBe(5 * 1024 * 1024);
+  }, 60000);
 });

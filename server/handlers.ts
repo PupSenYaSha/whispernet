@@ -1,6 +1,6 @@
 import { WebSocket } from 'ws';
 import { issueUploadToken } from './uploadTokens.js';
-import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundlesByIds, takePreKeyBundlesForSender, resetIssuedPreKeys, getIdentityKeyB64, setIdentityKeyB64, getIdentityKeysByIds, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, updateEncryptedMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, setUserAvatar, removeUserAvatar, getAvatarDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, StoredSession, getChannelMediaKey } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundlesByIds, takePreKeyBundlesForSender, resetIssuedPreKeys, getIdentityKeyB64, setIdentityKeyB64, getIdentityKeysByIds, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, updateEncryptedMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, setUserAvatar, removeUserAvatar, getAvatarDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, StoredSession, getChannelMediaKey, countRegistrations, oldestRegistration, recordRegistrationEvent } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -14,13 +14,12 @@ import {
   MAX_SESSIONS_PER_USER,
   MAX_CONNECTIONS_PER_IP,
   MAX_CONNECTIONS_PER_USER,
-  MAX_FAILED_LOGINS,
-  ACCOUNT_LOCKOUT_DURATION,
-  MAX_FAILED_LOGINS_GLOBAL,
-  ACCOUNT_LOCKOUT_DURATION_GLOBAL,
   MAX_REGISTRATIONS_PER_IP,
+  MAX_ACCOUNTS_PER_DEVICE,
+  POW_BITS,
+  POW_CHALLENGE_TTL_MS,
+  POW_MAX_CHALLENGES,
   REGISTRATION_WINDOW_MS,
-  FAILED_LOGIN_RETENTION_MS,
   MAX_WS_PAYLOAD_SIZE,
   HEARTBEAT_INTERVAL,
   CLIENT_TIMEOUT,
@@ -28,9 +27,29 @@ import {
   MAX_AVATAR_BYTES,
   MAX_AVATAR_PAYLOAD,
   AVATAR_CHANGE_INTERVAL_MS,
+  WS_FRAME_WINDOW_MS,
+  WS_FRAME_LIMIT_PER_CONNECTION,
+  WS_FRAME_LIMIT_PER_ACCOUNT,
+  WS_SEND_BUFFER_LIMIT,
+  SEARCH_RATE_LIMIT,
+  SEARCH_RATE_WINDOW,
+  MAX_SEARCH_QUERY_CHARS,
+  TRUSTED_PROXY_HOPS,
+  INACTIVE_SESSION_TTL_MS,
 } from './constants.js';
 
-import { pseudonymizeAddress, coarsenDeviceLabel, appendSecurityLine } from './privacy.js';
+import { pseudonymizeAddress, stablePseudonymizeAddress, pseudonymizeDevice, coarsenDeviceLabel, appendSecurityLine } from './privacy.js';
+import { pruneUploadTokens } from './uploadTokens.js';
+import {
+  recordFailedLogin,
+  clearFailedLogins,
+  loginLockedOut,
+  pruneCounters,
+  collectExpiredLocks,
+  authCounterSizes,
+  recordAuthAttempt,
+  authAttemptRemainingMs,
+} from './authCounters.js';
 
 /**
  * One line in the security log.
@@ -40,11 +59,25 @@ import { pseudonymizeAddress, coarsenDeviceLabel, appendSecurityLine } from './p
  * nothing called it: every entry went to disk with the caller's real address in it and the full user
  * agent stored beside it, which is the largest map of who used this server and from where an operator
  * could ask for. Applied once, here, it cannot be forgotten at a new call site.
+ *
+ * The nickname and the device id are pseudonymised too, and for the same reason the address is. They were
+ * passed through in cleartext on every sign-in line, which quietly undid the rotation: an operator could
+ * join one `nickname` across every day the file holds and read one person's movement over weeks, which is
+ * exactly what the daily salt exists to prevent. Within a day the three still correlate, which is the log's
+ * remaining value; across days they do not. The plaintext nickname stays in the `users` table, where it is
+ * already joined to the account and has to be for the product to work.
  */
 function logSecurity(event: string, details: Record<string, any>) {
   const safe: Record<string, any> = {};
   for (const [key, value] of Object.entries(details)) {
+    // Keyed by key, and the list is exact on purpose. Anything not named here is written verbatim, so a
+    // caller that spells a nickname `nick` or `target` rather than `nickname` bypasses the mapping
+    // entirely - which it did, for every ban and unban, and the point of pseudonymising the rest is defeated
+    // by the call site nobody read. A nickname is a nickname under all three spellings.
     if (key === 'ip') safe[key] = pseudonymizeAddress(String(value ?? ''));
+    else if (key === 'nickname' || key === 'nick' || key === 'admin') safe[key] = pseudonymizeAddress(String(value ?? ''));
+    else if (key === 'target') safe[key] = pseudonymizeAddress(String(value ?? ''));
+    else if (key === 'deviceId') safe[key] = pseudonymizeDevice(String(value ?? ''));
     else if (key === 'deviceInfo') safe[key] = coarsenDeviceLabel(value);
     else safe[key] = value;
   }
@@ -66,17 +99,20 @@ export interface ConnectedClient {
   deviceInfo: string;
 }
 
-
 const clients = new Map<string, ConnectedClient>();
 
 const userDevices = new Map<string, Set<string>>();
-
 
 const sessionRecords = new Map<string, Map<string, StoredSession>>();
 let sessionRegistryPromise: Promise<void> | null = null;
 
 async function ensureSessionRegistry(): Promise<void> {
   if (!sessionRegistryPromise) {
+    // A failure here is transient - a locked database, a busy file past `busy_timeout` - and the memo
+    // used to keep the *rejection* forever. Every later call re-awaited the same rejected promise, so a
+    // single blip took sign-in down for every account in the process until it was restarted, and
+    // `sessionCapReached` sits right on the login path. The memo is dropped on the way out so the next
+    // caller rebuilds it.
     sessionRegistryPromise = (async () => {
       const all = await getAllSessions();
       for (const rec of all) {
@@ -84,16 +120,11 @@ async function ensureSessionRegistry(): Promise<void> {
         if (!m) { m = new Map(); sessionRecords.set(rec.userId, m); }
         m.set(rec.deviceId, rec);
       }
-    })();
+    })().catch((e) => { sessionRegistryPromise = null; throw e; });
   }
   await sessionRegistryPromise;
   reconcileActiveSessions();
 }
-
-
-
-
-
 
 /**
  * Only fills in a record for a device that has none.
@@ -143,18 +174,67 @@ function sessionLastActive(userId: string, deviceId: string, ts: number): void {
   const rec = m?.get(deviceId);
   if (rec) rec.lastActive = ts;
 }
+
+/**
+ * Drops records the database has already forgotten.
+ *
+ * `sessionRecords` is a full copy of the `sessions` table for every account that has ever signed in, and
+ * `pruneInactiveSessions` deletes the rows - but only the rows. The mirror kept every record for the
+ * lifetime of the process, so an account that had ever signed in left a permanent per-device entry behind
+ * whether or not the device still existed. Anything past INACTIVE_SESSION_TTL_MS is dead weight by the same
+ * rule the sweep uses, and is dropped from here too.
+ *
+ * A record for a *live* socket is always kept regardless of age: it is what `get_sessions` reads to show the
+ * current device, and the database sweep has not run over it yet in any case.
+ */
+function pruneSessionRegistry(now: number): void {
+  const cutoff = now - INACTIVE_SESSION_TTL_MS;
+  for (const [userId, records] of sessionRecords) {
+    for (const [deviceId, rec] of records) {
+      if (rec.lastActive < cutoff && !clients.has(clientKey(userId, deviceId))) records.delete(deviceId);
+    }
+    if (records.size === 0) sessionRecords.delete(userId);
+  }
+}
 let totalConnections = 0;
 
+/**
+ * The socket registry is keyed by account *and* device together.
+ *
+ * `deviceId` is client-supplied and, on the client, stored once per browser rather than per account - so two
+ * accounts signed in on the same machine legitimately present the same one. Keyed by device alone, the
+ * second account to connect evicted the first one's socket with `close(4001)`, and the map then held only
+ * whichever connected last: a second login in the same browser silently disconnected the first, and
+ * receipts or typing updates for the first account were routed to the second account's socket.
+ *
+ * The pair is joined with a NUL, which cannot occur in either half, so `alice` + `bob` cannot be made to
+ * collide with `al` + `icebob` by choosing ids.
+ */
+function clientKey(userId: string, deviceId: string): string {
+  return `${userId}\u0000${deviceId}`;
+}
 
 function devicesForUser(userId: string): ConnectedClient[] {
   const ids = userDevices.get(userId);
   if (!ids) return [];
   const out: ConnectedClient[] = [];
   for (const id of ids) {
-    const c = clients.get(id);
+    const c = clients.get(clientKey(userId, id));
     if (c) out.push(c);
   }
   return out;
+}
+
+/** The first live socket for an account, for the few places that only need somebody to ask. */
+function firstClientFor(userId: string | null | undefined): ConnectedClient | null {
+  if (!userId) return null;
+  const ids = userDevices.get(userId);
+  if (!ids) return null;
+  for (const id of ids) {
+    const c = clients.get(clientKey(userId, id));
+    if (c) return c;
+  }
+  return null;
 }
 
 function isUserOnline(userId: string): boolean {
@@ -162,22 +242,19 @@ function isUserOnline(userId: string): boolean {
   return !!ids && ids.size > 0;
 }
 
-
-
-
-
 function registerDevice(deviceId: string, client: ConnectedClient): void {
-  const prev = clients.get(deviceId);
+  const key = clientKey(client.userId, deviceId);
+  const prev = clients.get(key);
+  // Only ever a reconnect of the *same* account. Two accounts on one browser share a device id, so the
+  // comparison has to be there: without it, signing in a second account kicks the first one off, and with
+  // the id trusted at face value, guessing one would let anyone disconnect anyone.
   if (prev && prev.ws !== client.ws) {
     try { prev.ws.close(4001, 'Reconnected from another socket'); } catch {}
   }
-  clients.set(deviceId, client);
+  clients.set(key, client);
   if (!userDevices.has(client.userId)) userDevices.set(client.userId, new Set());
   userDevices.get(client.userId)!.add(deviceId);
 }
-
-
-
 
 async function sessionCapReached(userId: string, deviceId: string | null): Promise<boolean> {
   await ensureSessionRegistry();
@@ -195,7 +272,6 @@ async function sessionCapReached(userId: string, deviceId: string | null): Promi
   return active >= MAX_SESSIONS_PER_USER;
 }
 
-
 /**
  * Drops a device from the live tables.
  *
@@ -204,12 +280,17 @@ async function sessionCapReached(userId: string, deviceId: string | null): Promi
  * when that old socket runs its close handler it looks its id up again. Without the check it finds the
  * *new* connection by id and unregisters that one instead, leaving the client that just logged in with
  * no socket registered at all.
+ *
+ * `userId` is part of the lookup for the same reason it is part of the key: a device id on its own is not
+ * an identity, and two accounts in one browser share one.
  */
-function unregisterDevice(deviceId: string, expectedWs?: WebSocket): void {
-    const client = clients.get(deviceId);
+function unregisterDevice(userId: string | null, deviceId: string, expectedWs?: WebSocket): void {
+    if (!userId) return;
+    const key = clientKey(userId, deviceId);
+    const client = clients.get(key);
     if (!client) return;
     if (expectedWs && client.ws !== expectedWs) return;
-    clients.delete(deviceId);
+    clients.delete(key);
     const set = userDevices.get(client.userId);
     if (set) {
       set.delete(deviceId);
@@ -221,27 +302,47 @@ export function getTotalConnections(): number {
   return totalConnections;
 }
 
+/**
+ * Drops every live socket at once, for the way out.
+ *
+ * `app.close()` closes them gracefully, and a graceful close is a handshake: the frame goes out and the
+ * server waits for the other end to answer. A client that has gone away without a clean goodbye - a dropped
+ * mobile link, a killed tab - never answers, so a restart would sit waiting on it for `ws`'s own timeout
+ * instead of finishing. `terminate()` drops the socket without asking.
+ */
+export function terminateAllConnections(): void {
+  for (const client of [...clients.values()]) {
+    try { client.ws.terminate(); } catch { /* already gone */ }
+  }
+}
 
-
+/**
+ * Writes out the session activity that is still only in memory, for the way out.
+ *
+ * Only for sockets that are actually connected. A record whose socket has gone is left alone on purpose:
+ * `touchSession` stamps the current time, so writing every record would move a device that has not been seen
+ * in weeks up to the present and hand it months of life it had already spent. A live socket is the one case
+ * where "now" is the honest value for `last_active`.
+ *
+ * On an ordinary restart the sweep and this are seconds apart, so it is mostly belt and braces; it matters
+ * when the shutdown is fast, which is what a SIGTERM from the supervisor is.
+ */
+export async function flushSessionWrites(): Promise<void> {
+  const writes: Promise<void>[] = [];
+  for (const client of clients.values()) {
+    writes.push(touchSession(client.userId, client.deviceId));
+  }
+  await Promise.allSettled(writes);
+}
 
 const DUMMY_PASSWORD_HASH = '$2a$12$C6UzMDM.H8dQYhC1Bcye0e7o3mN0q0VWcZBp4eXmJzVQyGpL3uTIC';
 
 const authAttempts = new Map<string, { count: number; resetAt: number }>();
 const lastMessageTime = new Map<string, number>();
 const connectionCounts = new Map<string, number>();
-/**
- * Wrong passwords, keyed by nickname and address together.
- *
- * It used to be keyed by nickname alone, which is a denial of service rather than a security measure:
- * anybody who knew a name could lock the account for five minutes at a time and hold it there for as
- * long as they cared to. Keying on the pair means a family, an office or a school behind one router no
- * longer locks each other out, while a spray at one name from one machine still runs into a wall.
- */
-const failedLogins = new Map<string, { count: number; lockedUntil: number; lastActive: number }>();
-/** The same mistakes counted for one nickname across every address, which is what a spray runs into. */
-const nicknameFailures = new Map<string, { count: number; lockedUntil: number; lastActive: number }>();
+
 /** Accounts one address has created, and when, so a spammer cannot fill the users table. */
-const registrationsByIp = new Map<string, number[]>();
+// The old in-memory registration counters, gone. Account creation is now counted from rows in the
 
 const lastAvatarChange = new Map<string, number>();
 
@@ -294,88 +395,173 @@ function decodeAvatarDataUrl(dataUrl: unknown): { ext: string; buffer: Buffer } 
   return { ext, buffer };
 }
 
-/** Drops expired entries once the table is big enough to be worth the pass. */
-function pruneCounters(now: number): void {
-  const cutoff = now - FAILED_LOGIN_RETENTION_MS;
-  for (const [key, entry] of failedLogins) {
-    if (entry.lastActive < cutoff && (!entry.lockedUntil || entry.lockedUntil < now)) failedLogins.delete(key);
-  }
-  for (const [key, entry] of nicknameFailures) {
-    if (entry.lastActive < cutoff && (!entry.lockedUntil || entry.lockedUntil < now)) nicknameFailures.delete(key);
-  }
-  if (failedLogins.size > 5000 || nicknameFailures.size > 5000) pruneCounters(now);
+/**
+ * How many accounts one subject may still create in the window, for a subject of the given scope.
+ *
+ * Counted from rows on disk rather than a Map in memory. That was the bug this replaced: the count lived
+ * only as long as the process, so every restart - a deploy, an OOM kill, a crash - handed everybody a full
+ * allowance again. It also means the number can be looked at afterwards rather than trusted, and that two
+ * processes sharing a database would agree on it.
+ *
+ * A ceiling of zero lifts the limit entirely, checked here so every caller gets it for free.
+ */
+async function creationLimit(scope: 'ip' | 'device', subject: string, ceiling: number): Promise<{ allowed: boolean; retryHours: number }> {
+  if (ceiling <= 0) return { allowed: true, retryHours: 0 };
+  const used = await countRegistrations(scope, subject, REGISTRATION_WINDOW_MS);
+  if (used < ceiling) return { allowed: true, retryHours: 0 };
+  const oldest = await oldestRegistration(scope, subject, REGISTRATION_WINDOW_MS);
+  // No oldest means no rows, which cannot happen alongside a non-zero count - but answering "free now" is
+  // the safe failure, where "wait forever" would strand somebody who is in fact under the cap.
+  const waitMs = oldest == null ? 0 : oldest + REGISTRATION_WINDOW_MS - Date.now();
+  return { allowed: false, retryHours: Math.max(1, Math.ceil(waitMs / 3600000)) };
 }
 
 /**
- * Counts one wrong password against both the nickname and address pair and the name on its own.
+ * Whether this address and this device may both create another account.
  *
- * The pair is what refuses an attempt; the cross-address total is the slower, higher ceiling that
- * only matters to somebody spraying one name from many machines.
+ * Reported together because the person being refused needs one answer rather than two, and because the two
+ * limits answer different questions: the device one is about *this* machine, the address one about a whole
+ * network behind a single IP.
  */
-function recordFailedLogin(pairKey: string, nicknameKey: string): { count: number; lockedUntil: number } {
-  const now = Date.now();
-  pruneCounters(now);
-
-  const pair = failedLogins.get(pairKey);
-  const pairCount = pair && (!pair.lockedUntil || pair.lockedUntil < now) ? pair.count + 1 : 1;
-  const pairLockedUntil = pairCount >= MAX_FAILED_LOGINS ? now + ACCOUNT_LOCKOUT_DURATION : 0;
-  failedLogins.set(pairKey, { count: pairCount, lockedUntil: pairLockedUntil, lastActive: now });
-
-  const global = nicknameFailures.get(nicknameKey);
-  const globalCount = global && (!global.lockedUntil || global.lockedUntil < now) ? global.count + 1 : 1;
-  const globalLockedUntil = globalCount >= MAX_FAILED_LOGINS_GLOBAL ? now + ACCOUNT_LOCKOUT_DURATION_GLOBAL : 0;
-  nicknameFailures.set(nicknameKey, { count: globalCount, lockedUntil: globalLockedUntil, lastActive: now });
-
-  return { count: pairCount, lockedUntil: pairLockedUntil };
+async function registrationAllowed(ip: string, deviceId: string): Promise<{ allowed: boolean; retryHours: number; reason: 'ip' | 'device' }> {
+  // Device first on purpose: its ceiling is much lower, so it is what refuses a normal person sooner, and
+  // an address limit should not be the reason a household is turned away.
+  const byDevice = await creationLimit('device', pseudonymizeDevice(deviceId), MAX_ACCOUNTS_PER_DEVICE);
+  if (!byDevice.allowed) return { ...byDevice, reason: 'device' };
+  // The stable pseudonym, not the rotating one: these rows are counted, and a counter keyed on a value
+  // that changes at midnight would reset itself every night. See stablePseudonymizeAddress.
+  const byIp = await creationLimit('ip', stablePseudonymizeAddress(ip), MAX_REGISTRATIONS_PER_IP);
+  if (!byIp.allowed) return { ...byIp, reason: 'ip' };
+  return { allowed: true, retryHours: 0, reason: 'device' };
 }
 
-/** Forgets a nickname's failures once the right password came through. */
-function clearFailedLogins(nicknameKey: string): void {
-  nicknameFailures.delete(nicknameKey);
-  for (const key of [...failedLogins.keys()]) {
-    if (key.endsWith('|' + nicknameKey)) failedLogins.delete(key);
+/**
+ * Charges the new account to both, but only once one really exists.
+ *
+ * Both or neither. A limit that charged one subject and not the other would be bypassable by holding the
+ * other at its ceiling, and the two are meant to be independent.
+ */
+async function recordRegistration(ip: string, deviceId: string): Promise<void> {
+  const at = Date.now();
+  if (MAX_ACCOUNTS_PER_DEVICE > 0) await recordRegistrationEvent('device', pseudonymizeDevice(deviceId), at);
+  if (MAX_REGISTRATIONS_PER_IP > 0) await recordRegistrationEvent('ip', stablePseudonymizeAddress(ip), at);
+}
+
+/**
+ * Serialises the check-then-act, so a burst cannot walk past a ceiling it has already reached.
+ *
+ * `registrationAllowed` counted rows, then `createUser` made one, and only then did `recordRegistration`
+ * write the row - with an await between every step. N `auth_register` frames arriving together therefore
+ * all read the count *before* any of them wrote one, and all N were allowed: the ceiling was checked and
+ * then not enforced, which is the one thing a ceiling cannot be. Holding a lock across all three steps
+ * closes it.
+ *
+ * This is an in-process mutex, and that is enough here because the server is a single process: the limits
+ * themselves are counted from rows on disk so they survive a restart, and a second process against the same
+ * database would need a database-level lock instead - which is a different deployment, not a different
+ * version of this. Nothing else holds these keys, so the table is emptied as the last holder of each one
+ * releases, and it cannot grow.
+ */
+const registrationLocks = new Map<string, Promise<void>>();
+
+async function lockRegistrationSubjects(keys: string[]): Promise<() => void> {
+  // Sorted, so two callers whose key sets overlap always take them in the same order and cannot deadlock
+  // against each other.
+  const ordered = [...new Set(keys)].sort();
+  // Read every tail before writing any of them. The two halves are synchronous, which is what makes the
+  // pair atomic: a yield between them would let two callers both read the old tail and both proceed.
+  const waitedFor: Promise<void>[] = [];
+  for (const key of ordered) {
+    const tail = registrationLocks.get(key);
+    if (tail) waitedFor.push(tail);
+  }
+  let release!: () => void;
+  const mine = new Promise<void>((resolve) => { release = resolve; });
+  for (const key of ordered) registrationLocks.set(key, mine);
+  for (const tail of waitedFor) await tail;
+  return () => {
+    // Only clear a key this caller still owns: a later caller overwrote it, and deleting its tail would let
+    // a third through in front of it.
+    for (const key of ordered) {
+      if (registrationLocks.get(key) === mine) registrationLocks.delete(key);
+    }
+    release();
+  };
+}
+
+/**
+ * Registration proofs, waiting to be answered.
+ *
+ * Held in memory and that is right: losing them on a restart costs an honest person at most one repeat of
+ * a search, while putting them in the database would make them a durable record of who was about to create
+ * an account and when - which is the opposite of what this project stores.
+ *
+ * `solved` is what makes a proof single-use. Without it one search would authorise any number of accounts,
+ * which would leave the cost of the hundredth identical to the cost of the first.
+ */
+const powChallenges = new Map<string, { bits: number; createdAt: number; solved?: boolean }>();
+
+/** Counts leading zero bits, matching the client's definition exactly - see src/registerPow.ts. */
+function leadingZeroBits(digest: Buffer): number {
+  let bits = 0;
+  for (let i = 0; i < digest.length; i++) {
+    const b = digest[i];
+    if (b === 0) { bits += 8; continue; }
+    bits += Math.clz32(b) - 24;
+    return bits;
+  }
+  return bits;
+}
+
+/** Drops challenges nobody answered, and forgets which ones have been spent. */
+function prunePowChallenges(): void {
+  const now = Date.now();
+  for (const [challenge, entry] of powChallenges) {
+    if (now - entry.createdAt > POW_CHALLENGE_TTL_MS) powChallenges.delete(challenge);
+  }
+  // Bound the map by refusing new ones once it is full. Better to turn an honest person away for a few
+  // seconds than to let a flood of unanswered requests consume memory without limit.
+  while (powChallenges.size >= POW_MAX_CHALLENGES) {
+    const oldest = powChallenges.keys().next().value;
+    if (oldest === undefined) break;
+    powChallenges.delete(oldest);
   }
 }
 
-/**
- * Whether this attempt is the one that stops answering.
- *
- * Only a *wrong* password is ever refused here. A lockout that can turn away the correct password is a
- * way to lock somebody out of their own account, so the check runs after the comparison succeeds and
- * the right password always gets in, however many failures the name has collected.
- */
-function loginLockedOut(pairKey: string, nicknameKey: string): number {
-  const now = Date.now();
-  const pair = failedLogins.get(pairKey);
-  if (pair && pair.lockedUntil > now) return Math.ceil((pair.lockedUntil - now) / 60000);
-  const global = nicknameFailures.get(nicknameKey);
-  if (global && global.lockedUntil > now) return Math.ceil((global.lockedUntil - now) / 60000);
-  return 0;
+/** Issues a challenge and tells the client what difficulty to reach. */
+function issuePowChallenge(ws: WebSocket): void {
+  if (POW_BITS <= 0) return;
+  prunePowChallenges();
+  const challenge = crypto.randomBytes(16).toString('hex');
+  powChallenges.set(challenge, { bits: POW_BITS, createdAt: Date.now() });
+  send(ws, { type: 'auth_pow_challenge', payload: { challenge, bits: POW_BITS }, timestamp: Date.now() });
 }
 
 /**
- * How many accounts this address may still create in the window.
+ * Whether a registration carries a proof good enough to proceed.
  *
- * The window is long on purpose: a short one punishes a shared address rather than a spammer, which is
- * the same mistake the auth backstop used to make. A ceiling of zero lifts it entirely.
+ * Answers false for a missing, wrong, expired, replayed or under-difficulty proof alike - from the server's
+ * point of view they are the same event, and distinguishing them would tell whoever is probing how far they
+ * got. The client re-reads the difficulty from the challenge it was issued and simply tries again.
  */
-function registrationAllowed(ip: string): { allowed: boolean; retryHours: number } {
-  if (MAX_REGISTRATIONS_PER_IP <= 0) return { allowed: true, retryHours: 0 };
-  const now = Date.now();
-  const since = now - REGISTRATION_WINDOW_MS;
-  const recent = (registrationsByIp.get(ip) || []).filter(t => t > since);
-  registrationsByIp.set(ip, recent);
-  if (recent.length < MAX_REGISTRATIONS_PER_IP) return { allowed: true, retryHours: 0 };
-  const oldest = Math.min(...recent);
-  return { allowed: false, retryHours: Math.max(1, Math.ceil((oldest + REGISTRATION_WINDOW_MS - now) / 3600000)) };
-}
-
-/** Charges an account to the address that created it, but only once one really exists. */
-function recordRegistration(ip: string): void {
-  if (MAX_REGISTRATIONS_PER_IP <= 0) return;
-  const recent = registrationsByIp.get(ip) || [];
-  recent.push(Date.now());
-  registrationsByIp.set(ip, recent);
+function checkPow(ws: WebSocket, payload: any): boolean {
+  if (POW_BITS <= 0) return true;
+  const challenge = typeof payload?.powChallenge === 'string' ? payload.powChallenge : '';
+  const nonce = Number(payload?.powNonce);
+  const entry = challenge ? powChallenges.get(challenge) : undefined;
+  if (!entry || entry.solved) return false;
+  if (Date.now() - entry.createdAt > POW_CHALLENGE_TTL_MS) {
+    powChallenges.delete(challenge);
+    return false;
+  }
+  if (!Number.isSafeInteger(nonce) || nonce < 0) return false;
+  // The difficulty is the one *this* challenge was issued at, never the one in the request: accepting the
+  // client's figure would make the whole thing optional.
+  if (leadingZeroBits(crypto.createHash('sha256').update(`${nonce}:${challenge}`).digest()) < entry.bits) return false;
+  // Spent, whether or not the rest of the registration goes on to succeed. Otherwise a solved proof could
+  // be replayed until the account behind it failed for some unrelated reason.
+  entry.solved = true;
+  return true;
 }
 
 /** How many reports one account may file in the window, and why the ceiling exists. */
@@ -387,6 +573,47 @@ const reportsByUser = new Map<string, number[]>();
 const MAX_PREKEY_FETCHES = 300;
 const PREKEY_FETCH_WINDOW_MS = 60 * 60 * 1000;
 const preKeyFetches = new Map<string, number[]>();
+
+/**
+ * How often one account may search, per window.
+ *
+ * Search is the most expensive thing an authenticated account can ask for and the only one with no meter at
+ * all. Two costs stack here: the query itself is answered from an FTS5 index, and the fallback is an
+ * unindexable `instr(lower(text), ?)` scan over every row in the server. That fallback is taken whenever the
+ * index returns nothing - a query simply has no hits - so an account that searched for a word nobody ever
+ * typed paid for a scan of the whole server, once per keystroke's worth of patience. This is the meter that
+ * bounds it; `stripFtsOperators` below keeps the common queries on the index path.
+ */
+const searchAttempts = new Map<string, number[]>();
+
+function searchAllowed(userId: string): boolean {
+  if (rateLimitsDisabled()) return true;
+  const now = Date.now();
+  const since = now - SEARCH_RATE_WINDOW;
+  const recent = (searchAttempts.get(userId) || []).filter((t) => t > since);
+  if (recent.length >= SEARCH_RATE_LIMIT) {
+    searchAttempts.set(userId, recent);
+    return false;
+  }
+  recent.push(now);
+  searchAttempts.set(userId, recent);
+  return true;
+}
+
+/**
+ * A keyword with every FTS5 operator character taken out.
+ *
+ * Measured against the SQLite this ships with: doubling a quote - `"a""b"` - is *valid* FTS5 escaping and
+ * does not throw, so a quote is not what forced the fallback. What does force it is a query the index simply
+ * does not match: `searchMessages` treats zero rows as "the index cannot answer this" and re-runs the same
+ * search as `instr(lower(text), ?) > 0 LIMIT 5000`, which no index can serve and which touches every row in
+ * the server. So the characters removed here are the ones that can make a well-formed query match nothing -
+ * a bare `NEAR`, `(`, or `^` reads as syntax inside the phrase - and `searchAllowed` above is what actually
+ * bounds the damage from the queries that still come back empty.
+ */
+function stripFtsOperators(keyword: string): string {
+  return keyword.replace(/["*()^]/g, '').trim();
+}
 
 function preKeyFetchAllowed(userId: string): boolean {
   if (rateLimitsDisabled()) return true;
@@ -437,26 +664,51 @@ function normalizeIp(raw: unknown): string {
   return ip.replace(/^::ffff:/, '');
 }
 
-/** Read once at load: the flag is process configuration, not something a request can move. */
-const TRUST_PROXY_ENABLED = /^(1|true|yes)$/i.test(process.env.TRUST_PROXY || '');
+/**
+ * Read at call time, like `rateLimitsDisabled` below: the flag is process state, and capturing it at
+ * import made behaviour depend on which test file happened to load the module first.
+ */
+function trustProxyEnabled(): boolean {
+  return /^(1|true|yes)$/i.test(process.env.TRUST_PROXY || '');
+}
 
 /**
  * Whether a forwarding header may be believed.
  *
  * Behind a tunnel every socket arrives from the proxy itself, so the address was identical for all
- * users and they shared one rate limit bucket - which is why the header is read at all. Reading it
- * unconditionally is just as bad in the other direction: an instance bound to a network address is
- * reachable by anyone on it, and every one of those clients could put an arbitrary address in the
- * header and walk past the per-address auth limit, the per-address registration limit and the
- * connection cap. So the header is only honoured when the operator has said there is a proxy, or when
- * the immediate peer is loopback - which is a tunnel on this machine and nothing else.
+ * users and they shared one rate limit bucket - which is why the header is read at all.
+ *
+ * It used to be honoured whenever the immediate peer was loopback, on the reasoning that a loopback peer
+ * is a tunnel on this machine and nothing else. That holds for a same-host nginx, and it also holds for
+ * anything else that binds a port on the same host: a second instance, a debugging tool, a container
+ * publishing the port, a client connecting over loopback. Under any of those, one header was enough to
+ * choose your own address, which walks straight past MAX_AUTH_ATTEMPTS, past the per-address registration
+ * limit and past the connection cap. Trust is now a decision the operator makes by setting TRUST_PROXY,
+ * and is not inferred from anything the request or the peer says about itself.
  */
-function proxyHeadersTrusted(socketIp: string): boolean {
-  if (TRUST_PROXY_ENABLED) return true;
-  return socketIp === 'unknown' || socketIp === '::1' || socketIp === '127.0.0.1'
-    || socketIp === '::ffff:127.0.0.1' || socketIp.startsWith('127.');
+function proxyHeadersTrusted(_socketIp: string): boolean {
+  return trustProxyEnabled();
 }
 
+/**
+ * The address this connection really came from.
+ *
+ * When a proxy is trusted, the chain is walked from the *right* for TRUSTED_PROXY_HOPS entries. The
+ * leftmost element is what the client sent: a standard proxy appends the address it saw to whatever
+ * arrived, so reading the left end means believing the client's own claim, which is the entire problem.
+ *
+ * `x-real-ip` is believed only where it agrees with that entry. It used to simply win, on the reasoning
+ * that a proxy which sets it is stating the client's address outright rather than extending a list - true,
+ * and beside the point: the header has no way to be genuine, because most proxies (Caddy, Traefik,
+ * cloudflared, the usual hosting panels) do not set it at all, so whatever arrives is whatever the client
+ * sent. `deploy.sh` ships `TRUST_PROXY=1`, which made this the configuration that ships, and it put every
+ * per-address limit here - auth attempts, registrations, connections - one header away from being bypassed.
+ * Agreeing with the chain is what makes it evidence rather than an assertion, and a proxy that sets both
+ * consistently, as the common ones do, is unaffected.
+ *
+ * `app.ts` was making the same promotion on the HTTP side, into the header `req.ip` is derived from, which
+ * had the same effect for the media and upload limits; that is gone too.
+ */
 function getClientIp(ws: WebSocket, upgradeRequest?: any): string {
   // @fastify/websocket hands the upgrade request to the route handler as the second argument, and
   // the ws socket itself does not keep it, so the forwarded headers are only reachable from here
@@ -465,10 +717,18 @@ function getClientIp(ws: WebSocket, upgradeRequest?: any): string {
   if (!proxyHeadersTrusted(socketIp)) return socketIp;
   const headers = req?.headers || {};
   const forwarded = headers['x-forwarded-for'];
-  const first = Array.isArray(forwarded) ? forwarded[0] : typeof forwarded === 'string' ? forwarded.split(',')[0] : '';
-  const realIp = typeof headers['x-real-ip'] === 'string' ? headers['x-real-ip'] : '';
-  const candidate = normalizeIp(first || realIp);
-  if (candidate !== 'unknown') return candidate;
+  const chain = (Array.isArray(forwarded) ? forwarded.join(',') : typeof forwarded === 'string' ? forwarded : '')
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean);
+  const hops = Math.max(1, TRUSTED_PROXY_HOPS);
+  const fromRight = chain.length > 0 ? chain[Math.max(0, chain.length - hops)] : '';
+  const chosen = normalizeIp(fromRight.trim());
+  // the chain is believed on its own. `x-real-ip` is read only to be checked against it, never to replace
+  // it: where the two agree the answer is the same either way, and where they disagree the chain is the one
+  // a real proxy wrote. An `x-real-ip` with no `x-forwarded-for` behind it is an assertion with nothing to
+  // corroborate it, so it does not get one.
+  if (chosen !== 'unknown') return chosen;
   return socketIp;
 }
 
@@ -512,6 +772,15 @@ function recordAuthFailure(ip: string): void {
   entry.count++;
 }
 
+/**
+ * Forgets this address's *failed* attempts, so a correct password starts the next minute clean.
+ *
+ * Deliberately does not touch the work budget above. Clearing that one on success would hand an attacker who
+ * has the password exactly what they need: sign in correctly, which resets the counter, and sign in again as
+ * often as the loop allows - every one of them a full blocking bcrypt. So a successful sign-in spends the
+ * budget like any other attempt and only the window gives it back, which is the same answer a sprayed
+ * address already gets from MAX_AUTH_ATTEMPTS.
+ */
 function clearAuthRateLimit(ip: string): void {
   authAttempts.delete(ip);
 }
@@ -519,6 +788,55 @@ function clearAuthRateLimit(ip: string): void {
 function authLimitReason(ip: string): string {
   const seconds = Math.max(1, Math.ceil(authRateRemainingMs(ip) / 1000));
   return `Too many attempts. Try again in ${seconds} second(s).`;
+}
+
+/**
+ * The budget on sign-in *work*, answered with the same string as the budget on failures.
+ *
+ * Deliberately not a new message: a caller that could tell "you have done too much work" from "you have
+ * failed too much" learns which of the two counters it is up against, and a client picking names to spray
+ * is exactly who should not get that. The two limits are told apart by the wait, not by the words.
+ */
+function authWorkLimitReason(ip: string): string {
+  const seconds = Math.max(1, Math.ceil(authAttemptRemainingMs(ip) / 1000));
+  return `Too many attempts. Try again in ${seconds} second(s).`;
+}
+
+/**
+ * Charges every sign-in attempt against this address, before any of them touches bcrypt.
+ *
+ * `recordAuthFailure` above only ever counted rejections, which made MAX_AUTH_ATTEMPTS a ceiling on
+ * *mistakes* rather than on cost - and the cost is the point, because a `bcryptjs` comparison at cost 12
+ * is computed synchronously and takes about 310 ms of the single Node thread. Successes and attempts made
+ * during a lockout were free, so an address could ask for a great deal of that. See
+ * MAX_AUTH_ATTEMPTS_PER_ADDRESS.
+ */
+function recordAuthFrame(ip: string): boolean {
+  if (rateLimitsDisabled()) return true;
+  return recordAuthAttempt(ip);
+}
+
+/**
+ * A frame budget, counted in a sliding window and metered before the frame is dispatched.
+ *
+ * Per connection and per account rather than per address, for the same reason the connection cap moves from
+ * the address to the account once it authenticates: a shared network must not throttle unrelated people, and
+ * one account must not be able to spend its budget across a dozen tabs to get twelve times the rate.
+ */
+const frameCounts = new Map<string, { count: number; resetAt: number }>();
+let frameSlotCounter = 0;
+
+function frameBudgetOk(key: string, limit: number): boolean {
+  if (rateLimitsDisabled()) return true;
+  const now = Date.now();
+  const entry = frameCounts.get(key);
+  if (!entry || now > entry.resetAt) {
+    frameCounts.set(key, { count: 1, resetAt: now + WS_FRAME_WINDOW_MS });
+    return true;
+  }
+  if (entry.count >= limit) return false;
+  entry.count++;
+  return true;
 }
 
 /**
@@ -589,7 +907,12 @@ function preKeyBundleDiagnostics(bundle: any): Record<string, any> {
   const spk = bundle.signedPreKey;
   return {
     present: true,
-    keys: Object.keys(bundle).join(','),
+    // Bounded, because this runs on the *reject* path - which is exactly where the bundle's own size
+    // cap no longer applies. Joining every key name meant a hostile frame could put megabytes of
+    // attacker-chosen strings into a line that `appendFileSync` then writes while holding the event
+    // loop. The shape is all this is for, so a handful of truncated names says it just as well.
+    keys: Object.keys(bundle).slice(0, 32).map((k) => k.slice(0, 64)).join(','),
+    keyCount: Object.keys(bundle).length,
     jsonLen: (() => { try { return JSON.stringify(bundle).length; } catch { return -1; } })(),
     identityKeyType: typeof bundle.identityKey,
     identityKeyLen: typeof bundle.identityKey === 'string' ? bundle.identityKey.length : -1,
@@ -740,6 +1063,22 @@ function isValidDeviceBodies(value: any): value is { kind: 'devices'; bodies: { 
   return size <= MAX_ENCRYPTED_BODY_BYTES;
 }
 
+/**
+ * Whether this account may see this message at all.
+ *
+ * A direct channel is a pair of ids joined by a colon, and only that pair; a channel of any other shape is
+ * reachable by nobody rather than by everybody. At module scope because every message operation asks it and
+ * one of them - the reporter - is not a socket handler.
+ */
+function canAccessMessage(userId: string, msg: { channel?: string | null }): boolean {
+  if (!msg.channel || msg.channel === 'general') return true;
+  if (msg.channel.includes(':')) {
+    const parts = msg.channel.split(':');
+    return parts.length === 2 && (parts[0] === userId || parts[1] === userId);
+  }
+  return msg.channel === userId;
+}
+
 function isValidDmEncryptedPayload(value: any): boolean {
   return isValidEncryptedBody(value) || isValidDeviceBodies(value);
 }
@@ -751,9 +1090,22 @@ function isValidDmEncryptedPayload(value: any): boolean {
  * and served exactly as it always was. A fan-out with no body for this device yields null, which the
  * client shows as a message it cannot read - and it is still counted, still reacted to and still
  * deletable, because a message nobody can open is not a message that did not happen.
+ *
+ * The three cases are kept apart deliberately, and the middle one refuses rather than falling through.
+ * This used to ask only "is this a valid fan-out?", and hand the whole object back when the answer was
+ * no - so a stored value that said `kind: 'devices'` but failed validation was treated as a bare body
+ * and delivered whole. That is every device's ciphertext at once: the peer's laptop, the sender's other
+ * phones. The write path (`handleDmSend`) and this read path run the same validator, so nothing in the
+ * current code produces such a row, and that is exactly why it went unnoticed: the bug needed a legacy
+ * row or one future tweak to the validator to fire, and would then leak silently and completely.
  */
 function bodyForDevice(stored: any, deviceId?: string | null): any {
-  if (!isValidDeviceBodies(stored)) return stored || null;
+  // Not a fan-out: a bare body, or nothing at all.
+  if (typeof stored !== 'object' || stored === null || Array.isArray(stored) || stored.kind !== 'devices') {
+    return stored || null;
+  }
+  // A fan-out that does not validate is never a bare body, whatever else it may be.
+  if (!isValidDeviceBodies(stored)) return null;
   if (!deviceId) return null;
   return stored.bodies.find((entry) => entry.deviceId === deviceId)?.body ?? null;
 }
@@ -780,15 +1132,26 @@ function safeJsonLength(value: unknown): number {
 }
 
 function send(ws: WebSocket, message: ServerMessage): void {
-  if (ws.readyState === WebSocket.OPEN) {
+  if (ws.readyState === WebSocket.OPEN && ws.bufferedAmount <= WS_SEND_BUFFER_LIMIT) {
     ws.send(JSON.stringify(message));
   }
 }
 
+/**
+ * Relays a frame to every connected client.
+ *
+ * The one client with a deep send buffer is skipped rather than queued. `ws.send()` appends to an
+ * in-process buffer and never blocks, so a client that has stopped reading - asleep, on a dead mobile
+ * link, or deliberately - does not slow this loop down, it just makes the server hold the frame for it.
+ * With MAX_TOTAL_CONNECTIONS clients on the other end, `typing` on the general channel was a way to make
+ * every one of them cost the server memory. Skipping a client that is already over the ceiling keeps the
+ * cost flat; it picks the conversation back up on the next frame that gets through.
+ */
 function broadcast(message: ServerMessage, excludeUserId?: string): void {
   const data = JSON.stringify(message);
   for (const client of clients.values()) {
-    if (client.userId !== excludeUserId && client.ws.readyState === WebSocket.OPEN) {
+    if (client.userId !== excludeUserId && client.ws.readyState === WebSocket.OPEN
+      && client.ws.bufferedAmount <= WS_SEND_BUFFER_LIMIT) {
       client.ws.send(data);
     }
   }
@@ -800,6 +1163,10 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
    const ip = getClientIp(ws, upgradeRequest);
   const ipKey = 'ip:' + ip;
   let connectionKey: string = ipKey;
+  // A key that does not move when the socket authenticates. `connectionKey` is deliberately reassigned at
+  // sign-in (the slot moves from the shared address to the account), and a frame budget keyed on it would
+  // hand out a fresh allowance at exactly that moment.
+  const frameSlot = 'conn:' + (++frameSlotCounter);
   totalConnections++;
 
   if (!claimConnection(ipKey, MAX_CONNECTIONS_PER_IP)) {
@@ -813,6 +1180,19 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
   ws.on('message', (data: Buffer) => {
     if (data.length > MAX_WS_PAYLOAD_SIZE) {
       send(ws, { type: 'error', payload: { code: 'PAYLOAD_TOO_LARGE', message: 'Message too large' }, timestamp: Date.now() });
+      return;
+    }
+
+    // Before the frame is even parsed, and for every type: the per-type meters below only ever covered the
+    // two kinds that write to a channel, so `typing`, `dm_read`, `search_messages`, `prekey_upload`,
+    // `get_sessions` and the rest could be sent as fast as the socket would take them - and the first of
+    // those is a broadcast to every client on the server. The per-account budget is only consulted once
+    // there is an account to consult it against; before sign-in the connection's own budget is all there is.
+    if (!frameBudgetOk(frameSlot, WS_FRAME_LIMIT_PER_CONNECTION)) {
+      return;
+    }
+    if (currentUserId && !frameBudgetOk('wsacct:' + currentUserId, WS_FRAME_LIMIT_PER_ACCOUNT)) {
+      send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down. Too many frames.' }, timestamp: Date.now() });
       return;
     }
 
@@ -846,8 +1226,8 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
   ws.on('error', dispose);
 
   ws.on('pong', () => {
-    if (currentDeviceId) {
-      const client = clients.get(currentDeviceId);
+    if (currentDeviceId && currentUserId) {
+      const client = clients.get(clientKey(currentUserId, currentDeviceId));
       if (client) client.lastHeartbeat = Date.now();
     }
   });
@@ -855,6 +1235,16 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
   async function handleMessage(ws: WebSocket, userId: string | null, message: ClientMessage): Promise<void> {
     switch (message.type) {
       case 'auth_login':
+        // Refused rather than re-run: `auth_login` was dispatched with no check, so a socket that already
+        // holds an account could sign in as a second one and `registerDevice` would add a *second* registry
+        // entry pointing at the same socket - every later broadcast then delivered to it twice, and one of
+        // its three session slots was spent without the owner ever seeing a device appear. Dropping the
+        // stale entries first was the other option and is worse: a client that re-authenticates after a
+        // token refresh would silently lose the registration its messages are routed by.
+        if (currentUserId) {
+          send(ws, { type: 'auth_failure', payload: { reason: 'Already signed in on this connection' }, timestamp: Date.now() });
+          return;
+        }
         await handleAuthLogin(ws, message.payload);
         break;
       case 'auth_register':
@@ -909,8 +1299,8 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
         if (userId) await handlePreKeyFetch(userId, ws, message.payload);
         break;
       case 'heartbeat':
-        if (currentDeviceId) {
-          const client = clients.get(currentDeviceId);
+        if (currentDeviceId && userId) {
+          const client = clients.get(clientKey(userId, currentDeviceId));
           if (client) client.lastHeartbeat = Date.now();
           send(ws, { type: 'heartbeat_ack', payload: {}, timestamp: Date.now() });
         }
@@ -922,10 +1312,10 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
         if (userId) await handleDmRead(userId, ws, message.payload);
         break;
       case 'get_sessions':
-        if (userId) handleGetSessions(userId, ws, currentDeviceId);
+        if (userId) await handleGetSessions(userId, ws, currentDeviceId);
         break;
       case 'revoke_session':
-        if (userId) handleRevokeSession(userId, ws, message.payload, currentDeviceId);
+        if (userId) await handleRevokeSession(userId, ws, message.payload, currentDeviceId);
         break;
       case 'block_user':
         if (userId) await handleBlockUser(userId, ws, message.payload);
@@ -973,6 +1363,17 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       return;
     }
 
+    // Charged before anything is hashed, and charged whatever the outcome. This is the ceiling on *work*,
+    // as opposed to checkAuthRateLimit above, which is a ceiling on failures and is therefore only ever
+    // spent after the bcrypt has already happened. Refusing here is what stops one unauthenticated socket
+    // from asking for a minute of solid CPU time by guessing, because `bcryptjs` computes the KDF
+    // synchronously and a cost-12 comparison takes about 310 ms of the single Node thread.
+    if (!recordAuthFrame(ip)) {
+      logSecurity('RATE_LIMIT_AUTH', { ip, nickname: typeof payload?.nickname === 'string' ? payload.nickname.slice(0, 32) : '' });
+      send(ws, { type: 'auth_failure', payload: { reason: authWorkLimitReason(ip) }, timestamp: Date.now() });
+      return;
+    }
+
     const { nickname, password } = payload;
 
     if (!nickname || !password) {
@@ -989,6 +1390,21 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     const nicknameKey = cleanNick.toLowerCase();
     const pairKey = ip + '|' + nicknameKey;
 
+    // Asked before the comparison rather than after it. It used to be consulted only once the comparison
+    // had already been paid for, so an address sitting on a lockout - which is precisely where an attacker
+    // wants to be - was buying a full cost-12 comparison per attempt and getting nothing for it, twice over
+    // because the dummy compare below ran as well.
+    //
+    // What this deliberately does *not* do is refuse the attempt. Refusing here would mean a lockout could
+    // turn away the correct password, which is a denial of service against the account's owner rather than
+    // a slower guess: anybody who knew a name could hold it shut for five minutes at a time. So the real
+    // comparison still runs - that is what lets the right password in however many failures have piled up -
+    // and what the lockout buys is that the *dummy* comparison, the one that exists only to make a miss
+    // indistinguishable from a wrong password, is skipped. For a name that does not exist - the case a spray
+    // spends its time in - that is the whole cost, so a locked-out spray now hashes nothing at all.
+    // The remaining cost per attempt is bounded by the per-address work budget charged above.
+    const lockedBeforeCompare = loginLockedOut(pairKey, nicknameKey);
+
     const user = await getUserByNickname(cleanNick);
 
     // A name that does not exist still gets the full comparison, so a miss is indistinguishable from a
@@ -996,14 +1412,14 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     const passwordMatches = user && user.passwordHash && typeof password === 'string'
       ? await bcrypt.compare(String(password), user.passwordHash)
       : false;
-    if (!passwordMatches) {
+    if (!passwordMatches && lockedBeforeCompare === 0) {
       // A name that does not exist still pays for the full comparison, so a miss is indistinguishable
       // from a wrong password in both the answer and the time it takes.
       await bcrypt.compare(String(password || ''), DUMMY_PASSWORD_HASH);
     }
 
     if (!passwordMatches || !user) {
-      const lockedMinutes = loginLockedOut(pairKey, nicknameKey);
+      const lockedMinutes = lockedBeforeCompare > 0 ? lockedBeforeCompare : loginLockedOut(pairKey, nicknameKey);
       if (lockedMinutes > 0) {
         recordAuthFailure(ip);
         logSecurity('LOGIN_LOCKED', { nickname: cleanNick, ip, remainingMin: lockedMinutes });
@@ -1081,12 +1497,32 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       return;
     }
 
+    // Read here rather than further down, because the creation limit needs it: the device cap is checked
+    // before the account is made, so the id has to be in hand by then. The bound matters - it is what keeps
+    // an untrusted client from putting a megabyte of text into a pseudonym that gets written down.
+    const deviceId = typeof payload.deviceId === 'string' && payload.deviceId.length > 0 && payload.deviceId.length <= 64
+      ? payload.deviceId : crypto.randomUUID();
+
+    // Before anything expensive, and before any of the per-address and per-device counting, so that being
+    // asked for a proof costs nothing and answers nothing. The search itself is the brake.
+    if (!checkPow(ws, payload)) {
+      issuePowChallenge(ws);
+      return;
+    }
+
     if (await isAdminNickname(cleanNick)) {
       send(ws, { type: 'auth_failure', payload: { reason: 'This nickname is reserved' }, timestamp: Date.now() });
       logSecurity('RESERVED_NICK_REGISTER', { nick: cleanNick, ip });
       return;
     }
 
+    // The second lookup is not a fallback for a broken first one - it is the only case-insensitive
+    // uniqueness check in the system. `users.nickname` is declared `UNIQUE`, and SQLite's UNIQUE is
+    // case-sensitive, so on its own it happily holds `Ana` and `ana` at once. The indexed lookup above asks
+    // for the lower-cased name and misses whenever a name was stored with capitals, which is why the scan
+    // exists. Two accounts differing only in case would break nickname addressing everywhere else - DMs,
+    // blocking, the admin check - so this cost is worth paying and the row count is bounded by the
+    // per-address registration limit above it.
     const sameNick = await getUserByNickname(cleanNick.toLowerCase()) || (await getAllUsers()).find(u => u.nickname.toLowerCase() === cleanNick.toLowerCase());
     if (sameNick) {
       send(ws, { type: 'auth_failure', payload: { reason: 'Nickname already taken' }, timestamp: Date.now() });
@@ -1095,56 +1531,87 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
 
     // Checked only once the name is genuinely free: a refusal that happens before the account exists
     // must not spend the budget, or one person holding a name could stop a whole network registering.
-    const registration = registrationAllowed(ip);
-    if (!registration.allowed) {
-      send(ws, { type: 'auth_failure', payload: { reason: `Too many accounts created from this network. Try again in ${registration.retryHours} hour(s).` }, timestamp: Date.now() });
-      logSecurity('REGISTRATION_LIMIT', { ip, limit: MAX_REGISTRATIONS_PER_IP, retryHours: registration.retryHours });
-      return;
+    //
+    // The lock is taken before the count and released after the row is written, so the three steps below
+    // cannot interleave with another registration for the same address or the same device. Without it
+    // every one of a burst read the count before any of them wrote one, and all of them were allowed -
+    // a ceiling that is checked and then not enforced. Both subjects are held at once, because a limit
+    // that only covered one of them would be bypassable by exhausting the other.
+    const releaseSubjects = await lockRegistrationSubjects([
+      'device:' + pseudonymizeDevice(deviceId),
+      'ip:' + stablePseudonymizeAddress(ip),
+    ]);
+    try {
+      const registration = await registrationAllowed(ip, deviceId);
+      if (!registration.allowed) {
+        const byDevice = registration.reason === 'device';
+        send(ws, {
+          type: 'auth_failure',
+          payload: {
+            // Naming which limit fired, because they are not interchangeable: "this device" is something the
+            // person can do something about by signing out or switching accounts, while "this network" is
+            // shared with everyone else behind the same address and is not theirs to raise.
+            reason: byDevice
+              ? `Too many accounts from this device. Try again in ${registration.retryHours} hour(s), or sign in to an existing account.`
+              : `Too many accounts created from this network. Try again in ${registration.retryHours} hour(s).`,
+          },
+          timestamp: Date.now(),
+        });
+        logSecurity('REGISTRATION_LIMIT', {
+          ip,
+          scope: registration.reason,
+          limit: byDevice ? MAX_ACCOUNTS_PER_DEVICE : MAX_REGISTRATIONS_PER_IP,
+          retryHours: registration.retryHours,
+        });
+        return;
+      }
+
+      if (typeof cleanPass !== 'string' || cleanPass.length < 8 || cleanPass.length > 64) {
+        send(ws, { type: 'auth_failure', payload: { reason: 'Password must be 8-64 characters' }, timestamp: Date.now() });
+        return;
+      }
+
+      if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(cleanPass)) {
+        send(ws, { type: 'auth_failure', payload: { reason: 'Password contains invalid characters' }, timestamp: Date.now() });
+        return;
+      }
+
+      if (!/[a-zA-Z]/.test(cleanPass) || !/[0-9]/.test(cleanPass)) {
+        send(ws, { type: 'auth_failure', payload: { reason: 'Password must contain letters and numbers' }, timestamp: Date.now() });
+        return;
+      }
+
+      if (payload.publicKey && !isValidPublicKey(payload.publicKey)) {
+        send(ws, { type: 'auth_failure', payload: { reason: 'Invalid public key' }, timestamp: Date.now() });
+        return;
+      }
+
+      const user = await createUser(cleanNick, cleanPass, payload.publicKey);
+      if (!user) {
+        send(ws, { type: 'auth_failure', payload: { reason: 'Nickname already taken' }, timestamp: Date.now() });
+        return;
+      }
+
+      clearAuthRateLimit(ip);
+      await recordRegistration(ip, deviceId);
+
+      registerSession({ userId: user.id, deviceId, nickname: user.nickname, deviceInfo: coarsenDeviceLabel(payload?.deviceInfo), firstSeen: Date.now(), lastActive: Date.now(), revoked: false });
+      releaseConnectionKey(connectionKey);
+      connectionKey = 'user:' + user.id;
+      claimConnection(connectionKey, MAX_CONNECTIONS_PER_USER);
+      currentUserId = user.id;
+      currentDeviceId = deviceId;
+      registerDevice(deviceId, { deviceId, ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip, deviceInfo: coarsenDeviceLabel(payload?.deviceInfo) });
+
+      // Same ordering as sign-in: the account's identity key has to be recorded before the reply that
+      // reports it back, or a brand new account reads as having none.
+      await storePreKeys(user.id, deviceId, payload);
+      await onAuthenticated(user.id, user.nickname, ws, deviceId);
+    } finally {
+      // Released on every exit, including the refusals above: a lock left held by an early return would
+      // make the next registration for that address wait for a turn that never comes.
+      releaseSubjects();
     }
-
-    if (typeof cleanPass !== 'string' || cleanPass.length < 8 || cleanPass.length > 64) {
-      send(ws, { type: 'auth_failure', payload: { reason: 'Password must be 8-64 characters' }, timestamp: Date.now() });
-      return;
-    }
-
-    if (/[\x00-\x08\x0b\x0c\x0e-\x1f]/.test(cleanPass)) {
-      send(ws, { type: 'auth_failure', payload: { reason: 'Password contains invalid characters' }, timestamp: Date.now() });
-      return;
-    }
-
-    if (!/[a-zA-Z]/.test(cleanPass) || !/[0-9]/.test(cleanPass)) {
-      send(ws, { type: 'auth_failure', payload: { reason: 'Password must contain letters and numbers' }, timestamp: Date.now() });
-      return;
-    }
-
-    if (payload.publicKey && !isValidPublicKey(payload.publicKey)) {
-      send(ws, { type: 'auth_failure', payload: { reason: 'Invalid public key' }, timestamp: Date.now() });
-      return;
-    }
-
-    const user = await createUser(cleanNick, cleanPass, payload.publicKey);
-    if (!user) {
-      send(ws, { type: 'auth_failure', payload: { reason: 'Nickname already taken' }, timestamp: Date.now() });
-      return;
-    }
-
-    clearAuthRateLimit(ip);
-    recordRegistration(ip);
-
-    const deviceId = typeof payload.deviceId === 'string' && payload.deviceId.length > 0 && payload.deviceId.length <= 64
-      ? payload.deviceId : crypto.randomUUID();
-    registerSession({ userId: user.id, deviceId, nickname: user.nickname, deviceInfo: coarsenDeviceLabel(payload?.deviceInfo), firstSeen: Date.now(), lastActive: Date.now(), revoked: false });
-    releaseConnectionKey(connectionKey);
-    connectionKey = 'user:' + user.id;
-    claimConnection(connectionKey, MAX_CONNECTIONS_PER_USER);
-    currentUserId = user.id;
-    currentDeviceId = deviceId;
-    registerDevice(deviceId, { deviceId, ws, userId: user.id, nickname: user.nickname, lastHeartbeat: Date.now(), ip, deviceInfo: coarsenDeviceLabel(payload?.deviceInfo) });
-
-    // Same ordering as sign-in: the account's identity key has to be recorded before the reply that
-    // reports it back, or a brand new account reads as having none.
-    await storePreKeys(user.id, deviceId, payload);
-    await onAuthenticated(user.id, user.nickname, ws, deviceId);
   }
 
   async function onAuthenticated(userId: string, nickname: string, ws: WebSocket, deviceId?: string): Promise<void> {
@@ -1246,9 +1713,6 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     send(ws, { type: 'chat_history_page', payload: { channel: 'general', messages, hasMore: history.length === limit }, timestamp: Date.now() });
   }
 
-  
-  
-  
   async function handleKeyBackupUpload(userId: string, ws: WebSocket, payload: { blob?: string }): Promise<void> {
     if (typeof payload?.blob !== 'string' || payload.blob.length === 0 || payload.blob.length > 200000) {
       send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Invalid backup blob' }, timestamp: Date.now() });
@@ -1358,7 +1822,6 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       return;
     }
 
-    
     const recvBlocked = await getBlockedUserIds(recipientUser.id);
     const senderBlocked = await getBlockedUserIds(senderId);
     if (recvBlocked.includes(senderId)) {
@@ -1473,7 +1936,13 @@ async function resolveQuote(
   if (!id || id.length > 64) return null;
   const target = await getMessageById(id);
   if (!target || !canAccessMessage(userId, target)) return null;
-  if (fallbackChannel === 'general' && target.channel !== 'general') return null;
+  // The quote has to belong to the conversation it is being posted into, not merely to one the sender can
+  // see. The check used to be written for the public channel only, so a quote id taken from any other
+  // conversation - including a private one - was accepted when posting to a DM, and the quoted id and the
+  // quoted sender's nickname were carried across into a conversation they were never in. No words leak
+  // (a DM row stores `text = ''`), but the id and the name did. The two call sites pass either 'general'
+  // or the DM's own channel, so one equality test covers both.
+  if (target.channel !== fallbackChannel) return null;
   const text = sanitizeText(target.text || '').slice(0, MAX_MESSAGE_CHARS);
   const sender = sanitizeText(String(target.senderNickname || '')).slice(0, 64);
   // an empty string would be stored as null anyway, and telling the client there are no words is not the
@@ -1486,7 +1955,6 @@ function isValidEmoji(emoji: unknown): emoji is string {
     && /[\p{Emoji_Presentation}\p{Extended_Pictographic}\u200d\uFE0F]/u.test(emoji);
 }
 
-
 function canonicalJwk(jwk: any): string {
   const sorted: Record<string, any> = {};
   for (const k of Object.keys(jwk || {}).sort()) sorted[k] = jwk[k];
@@ -1496,7 +1964,7 @@ function canonicalJwk(jwk: any): string {
 async function handleAddReaction(userId: string, ws: WebSocket, payload: { messageId: string; emoji: string }): Promise<void> {
     if (!payload?.messageId || typeof payload.messageId !== 'string') return;
     if (!isValidEmoji(payload.emoji)) return;
-    
+
     const target = await getMessageById(payload.messageId);
     if (!target || !canAccessMessage(userId, target)) return;
     await addReaction(payload.messageId, userId, payload.emoji);
@@ -1522,21 +1990,18 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
     });
   }
 
-  function canAccessMessage(userId: string, msg: { channel?: string | null }): boolean {
-    if (!msg.channel || msg.channel === 'general') return true;
-    if (msg.channel.includes(':')) {
-      const parts = msg.channel.split(':');
-      return parts.length === 2 && (parts[0] === userId || parts[1] === userId);
-    }
-    return msg.channel === userId;
-  }
-
   function broadcastToMessageAudience(messageId: string, actorUserId: string, message: ServerMessage): void {
+    // The rejection handler is not decoration. This promise is deliberately not awaited by the reaction and
+    // edit handlers - they have already answered the client - and Node's default for an unhandled rejection
+    // is to throw, which takes the process down. Any SQLite error on this one read path - a locked database,
+    // a corrupt row - would have ended the server for every user on it.
     void (async () => {
       const target = await getMessageById(messageId);
       if (!target) return;
       deliverToChannel(target.channel, actorUserId, message);
-    })();
+    })().catch((err: unknown) => {
+      console.error(`Audience broadcast failed (${messageId}):`, (err as Error)?.message);
+    });
   }
 
   /**
@@ -1619,7 +2084,6 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
     send(ws, { type: before === undefined ? 'dm_history' : 'dm_history_page', payload: page, timestamp: Date.now() });
   }
 
-  
   async function handleDmHistoryMessages(
     userId: string,
     messages: any[],
@@ -1656,7 +2120,11 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
   }
 
   async function handleSearchUsers(userId: string, ws: WebSocket, payload: { query: string }): Promise<void> {
-    const query = sanitize(payload?.query || '').toLowerCase();
+    if (!searchAllowed(userId)) {
+      send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down. Try again shortly.' }, timestamp: Date.now() });
+      return;
+    }
+    const query = sanitize(payload?.query || '').toLowerCase().slice(0, MAX_SEARCH_QUERY_CHARS);
     if (query.length < 1) {
       send(ws, { type: 'search_results', payload: { results: [] }, timestamp: Date.now() });
       return;
@@ -1673,7 +2141,18 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
   }
 
   async function handleSearchMessages(userId: string, ws: WebSocket, payload: { query: string; channel?: string }): Promise<void> {
-    const query = sanitize(payload?.query || '');
+    if (!searchAllowed(userId)) {
+      send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down. Try again shortly.' }, timestamp: Date.now() });
+      return;
+    }
+    // Bounded before it reaches the database, and stripped of the characters that would send the query down
+    // the `instr()` fallback. See `stripFtsOperators` for why the fallback was the expensive path.
+    const query = sanitize(payload?.query || '')
+      .slice(0, MAX_SEARCH_QUERY_CHARS)
+      .split(/\s+/)
+      .map(stripFtsOperators)
+      .filter(Boolean)
+      .join(' ');
     if (query.length < 2) {
       send(ws, { type: 'message_search_results', payload: { results: [] }, timestamp: Date.now() });
       return;
@@ -1701,8 +2180,12 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
     if (deleted) {
       const notice = { type: 'message_deleted', payload: { messageId: payload.messageId }, timestamp: Date.now() };
       // the row is gone by now, so the channel it belonged to is the one captured above
+      // `deliverToChannel` already reaches the actor's own devices - for the public channel it broadcasts
+      // to everyone else and then loops over `devicesForUser(actorUserId)`, and for a private one it walks
+      // both participants. The extra `send(ws, notice)` that used to follow handed the actor who pressed
+      // the button a second copy of the same frame. Harmless while every handler is idempotent, which is
+      // the only reason it survived: the moment one of them is not, the duplicate is a visible bug.
       deliverToChannel(target.channel, userId, notice);
-      send(ws, notice);
     } else {
       send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
     }
@@ -1740,7 +2223,8 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
       const timestamp = Date.now();
       const edit = { messageId: payload.messageId, encrypted: payload.encrypted, editedAt: timestamp, expiresAt };
       broadcastToMessageAudience(payload.messageId, userId, { type: 'message_edited', payload: edit, timestamp });
-      send(ws, { type: 'message_edited', payload: edit, timestamp });
+      // no echo to the requesting socket: `broadcastToMessageAudience` reaches the actor's devices by way
+      // of `deliverToChannel`, so a `send(ws, edit)` here was the same frame twice.
       return;
     }
 
@@ -1760,7 +2244,14 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
     const updated = await updateMessageText(payload.messageId, userId, text);
     if (updated) {
       const timestamp = Date.now();
-      broadcast({ type: 'message_edited', payload: { messageId: payload.messageId, text, editedAt: timestamp }, timestamp }, userId);
+      const edit = { messageId: payload.messageId, text, editedAt: timestamp };
+      // `broadcast` skips *every* socket belonging to `userId`, which is right for the audience but
+      // leaves the author out - and the author is the one who asked. The client does not apply the edit
+      // optimistically, so without the echo below the person who just fixed their own typo kept seeing
+      // the old text until they reloaded. The encrypted branch gets this right by sending to the
+      // requesting socket after broadcasting; this one did not, and the asymmetry is what hid it.
+      broadcast({ type: 'message_edited', payload: edit, timestamp }, userId);
+      for (const dev of devicesForUser(userId)) send(dev.ws, { type: 'message_edited', payload: edit, timestamp });
     } else {
       send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
     }
@@ -1793,7 +2284,13 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
       // Against the uploading device, not the account: two devices of one account hold different ratchet
       // keys, and a row keyed on the account alone would mean the second upload silently replaced the
       // first and every message would stop reaching it.
-      const deviceId = typeof payload.deviceId === 'string' && payload.deviceId.length > 0 ? payload.deviceId : currentDeviceId;
+      // Bounded like every other place that takes a client-supplied device id (the auth paths check
+      // `<= 64`). This one had no upper bound and the value goes straight into the `prekeys` primary
+      // key, so one authenticated socket could insert a fresh row per frame - each with a
+      // megabyte-scale id in it - and nothing reaps those for thirty days. The bundle's own size cap
+      // does not help: it caps the bundle, not the column beside it.
+      const deviceId = typeof payload.deviceId === 'string' && payload.deviceId.length > 0 && payload.deviceId.length <= 64
+        ? payload.deviceId : currentDeviceId;
       // through the same path as every other publish, so the bookkeeping that forgets spent one-time
       // prekeys cannot be applied in one place and forgotten in another
       await storePreKeys(userId, deviceId, { preKeyBundle: payload.bundle });
@@ -1907,10 +2404,10 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
   }
 
   function handleDisconnect(deviceId: string | null, userId: string | null, ws?: WebSocket): void {
-    if (!deviceId) return;
+    if (!deviceId || !userId) return;
 
-    const client = clients.get(deviceId);
-    unregisterDevice(deviceId, ws);
+    const client = clients.get(clientKey(userId, deviceId));
+    unregisterDevice(userId, deviceId, ws);
 
     // A socket that has already been replaced by a newer one for the same device is not a departure:
     // the reload it belongs to is already connected, and announcing user_left here would make every
@@ -1973,7 +2470,7 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
     if (reg) {
       const sorted = [...reg.values()].filter(s => !s.revoked).sort((a, b) => b.lastActive - a.lastActive);
       for (const rec of sorted) {
-        const live = clients.get(rec.deviceId);
+        const live = clients.get(clientKey(userId, rec.deviceId));
         sessions.push({
           id: rec.deviceId,
           nickname: rec.nickname,
@@ -2000,22 +2497,31 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
       send(ws, { type: 'error', payload: { code: 'SESSION_NOT_FOUND', message: 'Session not found' }, timestamp: Date.now() });
       return;
     }
-    
-    
+
     rec.revoked = true;
-    void markSessionRevoked(userId, targetId).catch(() => {});
-    
-    const live = clients.get(targetId);
-    if (live && live.userId === userId) {
+    // Awaited, not fire-and-forget. This is the one write that has to survive a restart: a revocation that
+    // only reached memory was silently undone by the next deploy, because the row still said `revoked = 0`
+    // and the device signed straight back in. `void ... .catch(() => {})` made the acknowledgement of a
+    // revocation a promise about a write that might never happen.
+    await markSessionRevoked(userId, targetId);
+
+    // Scoped to this account. The registry used to be keyed by device id alone, so a revocation could turn
+    // up a socket belonging to somebody else who happened to share that id - the `userId` guard below then
+    // had to exist purely to refuse to close it. Now the lookup cannot return one.
+    const live = clients.get(clientKey(userId, targetId));
+    if (live) {
+      // Announced here rather than left to the socket's own close handler. That handler looks the device up
+      // in the registry, and by the time `close` has been processed the entry is already gone - so it found
+      // nothing, skipped the broadcast, and every other client carried on showing that person as online for
+      // the rest of the server's life. The same applies to a ban below.
+      broadcast({ type: 'user_left', payload: { userId, nickname: live.nickname }, timestamp: Date.now() });
       try { live.ws.close(4001, 'Session revoked'); } catch {}
-      unregisterDevice(targetId);
+      unregisterDevice(userId, targetId);
     }
     send(ws, { type: 'session_revoked', payload: { sessionId: targetId }, timestamp: Date.now() });
-    
+
     if (targetId !== currentDeviceId) await handleGetSessions(userId, ws, currentDeviceId);
   }
-
-  
 
   async function sendBlockedList(userId: string, ws: WebSocket): Promise<void> {
     const blockedIds = await getBlockedUserIds(userId);
@@ -2065,13 +2571,8 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
     await sendBlockedList(userId, ws);
   }
 
-  
-
   const ADMIN_KEY = process.env.ADMIN_KEY || '';
 
-  
-  
-  
   async function adminIdentity(userId: string | null, ws: WebSocket, payload: { key?: string }): Promise<string | null> {
     if (ADMIN_KEY && typeof payload?.key === 'string') {
       const a = Buffer.from(payload.key);
@@ -2079,8 +2580,7 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
       if (a.length === b.length && crypto.timingSafeEqual(a, b)) return 'admin';
     }
     if (!userId) return null;
-    const ids = userDevices.get(userId);
-    const client = ids ? clients.get([...ids][0] || '') : null;
+    const client = firstClientFor(userId);
     const nick = client ? client.nickname : '';
     if (nick && await isAdminNickname(nick)) return nick;
     return null;
@@ -2101,7 +2601,7 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
       return;
     }
     const source: 'profile' | 'message' = payload?.source === 'profile' ? 'profile' : 'message';
-    const reporter = clients.get([...userDevices.get(userId) || []][0] || '') || null;
+    const reporter = firstClientFor(userId);
     const reporterNick = reporter ? reporter.nickname : 'unknown';
     const target = await getUserById(targetId);
     const targetNick = target ? target.nickname : undefined;
@@ -2112,7 +2612,15 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
       if (msg) {
         if (!msg.channel || msg.channel === 'general') channel = 'general';
         else if (msg.channel === getDmChannelId(userId, targetId)) channel = 'dm';
-        messageText = sanitizeText(msg.text || '').slice(0, 100) || undefined;
+        // The words are copied into the report row, and that row is read by moderators. Without this check
+        // a reporter could name any message id on the server - a private conversation they are not part of -
+        // and have a hundred characters of somebody else's message stored where an operator will read it.
+        // Every other message operation asks `canAccessMessage` first; this one did not, and the id is
+        // client-supplied and therefore guessable. The report itself is still filed: the point of it is that
+        // an operator should decide, not the reporter.
+        if (canAccessMessage(userId, msg)) {
+          messageText = sanitizeText(msg.text || '').slice(0, 100) || undefined;
+        }
       }
     }
     await addReport({
@@ -2122,7 +2630,12 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
       targetId,
       targetNick,
       channel,
-      messageId: source === 'message' && typeof payload?.messageId === 'string' ? payload.messageId : undefined,
+      // Bounded like `reason` and `messageText` beside it, which are both sliced. This one was only
+      // type-checked, so a multi-megabyte string went into `reports.message_id`. The table is capped
+      // at a thousand *rows*, not row size, so a handful of throwaway accounts could put gigabytes of
+      // operator-readable junk in front of a moderator. A real message id is a UUID - 36 characters.
+      messageId: source === 'message' && typeof payload?.messageId === 'string' && payload.messageId.length <= 64
+        ? payload.messageId : undefined,
       messageText,
       reason,
       source,
@@ -2161,9 +2674,7 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
     // With ADMIN_KEY and no session there is no way to tell who the caller is, so only the id arm applies.
     // That is not a hole in the guard — it is the reason the id arm exists.
     const targetNickname = typeof payload?.nickname === 'string' ? payload.nickname : null;
-    const actingNickname = userId
-      ? ((userDevices.get(userId) ? clients.get([...userDevices.get(userId)!][0] || '') : null)?.nickname ?? null)
-      : null;
+    const actingNickname = firstClientFor(userId)?.nickname ?? null;
     const selfById = !!targetId && !!userId && targetId === userId;
     const selfByName = !!targetNickname && !!actingNickname && targetNickname.toLowerCase() === actingNickname.toLowerCase();
     if (selfById || selfByName) {
@@ -2178,14 +2689,17 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
       return;
     }
     logSecurity('ADMIN_BAN', { admin, target: payload?.userId || payload?.nickname });
-    
+
     if (targetId) {
       for (const c of devicesForUser(targetId)) {
+        // Same ordering as a revocation: announced first, because the close handler finds nothing left to
+        // look up once `unregisterDevice` below has run and so broadcasts nothing.
+        broadcast({ type: 'user_left', payload: { userId: targetId, nickname: c.nickname }, timestamp: Date.now() });
         c.ws.close(4003, 'Account banned');
       }
-      for (const id of [...(userDevices.get(targetId) || [])]) unregisterDevice(id);
+      for (const id of [...(userDevices.get(targetId) || [])]) unregisterDevice(targetId, id);
     }
-    
+
     const reportsRemoved = targetId ? await removeReportsForTarget(targetId) : 0;
     send(ws, { type: 'admin_action', payload: { ok: true, action: 'ban', targetId, reportsRemoved }, timestamp: Date.now() });
   }
@@ -2226,12 +2740,31 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
   }
 
 export function startHeartbeatCheck(): void {
+  /**
+   * When the failed-sign-in tables are worth mentioning in the security log.
+   *
+   * Well above what one person fumbling with their own password can reach, because a correct sign-in
+   * empties the name's entry and a wrong one from a single address trips the per-address backstop long
+   * before this. Getting here means the attempts are spread over many addresses or many names.
+   */
+  const AUTH_COUNTER_NOTICE_SIZE = 4000;
+
   setInterval(() => {
     const now = Date.now();
-    for (const [deviceId, client] of clients) {
+    for (const client of clients.values()) {
       if (now - client.lastHeartbeat > CLIENT_TIMEOUT) {
+        // Announced before the socket is torn down, and that ordering is the whole point. `terminate()`
+        // fires `close` asynchronously, by which time `unregisterDevice` below has already removed the
+        // entry - so `handleDisconnect` finds no client, takes the "not registered" branch and skips the
+        // broadcast. Every other disconnect path announces first for exactly this reason; this one was
+        // missed, so a client that went silent stayed on everyone's screen as online until they came
+        // back on their own. `userDevices` was cleaned up regardless, which is why only the pushed
+        // presence frame was lost and nothing looked obviously broken.
+        broadcast({ type: 'user_left', payload: { userId: client.userId, nickname: client.nickname }, timestamp: Date.now() });
         client.ws.terminate();
-        unregisterDevice(deviceId);
+        // The entry carries the account it belongs to, so a sweep can unregister it without having to
+        // split the key back apart - which also removes any chance of the two halves being parsed wrong.
+        unregisterDevice(client.userId, client.deviceId);
       } else if (client.ws.readyState === WebSocket.OPEN) {
         client.ws.ping();
       }
@@ -2250,20 +2783,32 @@ export function startHeartbeatCheck(): void {
     for (const [key, last] of lastMessageTime) {
       if (now - last > RATE_LIMIT_WINDOW) lastMessageTime.delete(key);
     }
-    for (const [key, entry] of failedLogins) {
-      if (entry.lockedUntil > 0 && now > entry.lockedUntil) failedLogins.delete(key);
-    }
-    for (const [key, entry] of nicknameFailures) {
-      if (entry.lockedUntil > 0 && now > entry.lockedUntil) nicknameFailures.delete(key);
+    // Drops the lockouts that have run out, then everything else the retention window has passed.
+    // The second call is what collects entries that were never locked: they carry no marker for the
+    // first to look at, so without it they would sit here until the next failed sign-in happened to
+    // call for a pass - which, on a server nobody is attacking, is never.
+    collectExpiredLocks(now);
+    pruneCounters(now);
+    // Both tables are keyed by things a stranger controls, so their size is a direct read on how much
+    // guessing is going on. Worth a line once they are genuinely large, and silent below that: the
+    // counters are emptied on every success, so a table this big means the attempts are spread over
+    // thousands of distinct names, which is a spray rather than one person fumbling.
+    const counters = authCounterSizes();
+    if (counters.pairs + counters.names > AUTH_COUNTER_NOTICE_SIZE) {
+      logSecurity('LOGIN_COUNTERS_LARGE', { pairEntries: counters.pairs, nameEntries: counters.names });
     }
     for (const [uid, last] of lastAvatarChange) {
       if (now - last > AVATAR_CHANGE_INTERVAL_MS) lastAvatarChange.delete(uid);
     }
-    for (const [ip, times] of registrationsByIp) {
-      const recent = times.filter((t) => now - t <= REGISTRATION_WINDOW_MS);
-      if (recent.length === 0) registrationsByIp.delete(ip);
-      else registrationsByIp.set(ip, recent);
+    // Challenges nobody answered. Only the unanswered ones: a solved-but-unspent proof is kept until it
+    // either times out or the sweep reaches it, so that a client which solved just as the sweep ran does not
+    // lose its work to a race.
+    for (const [challenge, entry] of powChallenges) {
+      if (now - entry.createdAt > POW_CHALLENGE_TTL_MS && !entry.solved) powChallenges.delete(challenge);
     }
+    // Registration counters used to be swept here. They are rows in registration_events now, pruned on
+    // write by the database, so there is nothing in memory left to sweep - and a sweeper that could have
+    // dropped a still-counting entry was a second way for the limit to fail open.
     for (const [uid, times] of reportsByUser) {
       const recent = times.filter((t) => now - t <= REPORT_WINDOW_MS);
       if (recent.length === 0) reportsByUser.delete(uid);
@@ -2274,6 +2819,18 @@ export function startHeartbeatCheck(): void {
       if (recent.length === 0) preKeyFetches.delete(uid);
       else preKeyFetches.set(uid, recent);
     }
+    for (const [uid, times] of searchAttempts) {
+      const recent = times.filter((t) => now - t <= SEARCH_RATE_WINDOW);
+      if (recent.length === 0) searchAttempts.delete(uid);
+      else searchAttempts.set(uid, recent);
+    }
+    // The frame budgets are keyed by a socket id and an account id, neither of which anything cleans up on
+    // close, so without this they would be one entry per connection for the lifetime of the process.
+    for (const [key, entry] of frameCounts) {
+      if (now > entry.resetAt) frameCounts.delete(key);
+    }
+    pruneUploadTokens(now);
+    pruneSessionRegistry(now);
     // a slot is only released on disconnect, so anything still at zero belongs to a socket that has
     // gone away without the release running
     for (const [key, count] of connectionCounts) {
@@ -2288,11 +2845,19 @@ function scheduleWeeklyCleanup(): void {
   const msUntilMonday = nextMondayMidnightMSK() - Date.now();
 
   setTimeout(async () => {
-    const deleted = await deleteGeneralMessages();
-    logSecurity('WEEKLY_CLEANUP', { deletedMessages: deleted });
-    console.log(`[Cleanup] Deleted ${deleted} general chat messages (Moscow 00:00 Monday)`);
-    broadcast({ type: 'chat_cleared', payload: { channel: 'general' }, timestamp: Date.now() });
-
-    scheduleWeeklyCleanup();
+    // The body used to be unguarded. A database error at Monday 00:00 MSK rejected out of this callback,
+    // Node's default turned that into an uncaught exception, and the server died with the weekly sweep
+    // never rescheduled - permanently, since the only thing that would have scheduled it was the line
+    // below the throw. Wrapped, and rescheduled in `finally` so one bad week does not end the schedule.
+    try {
+      const deleted = await deleteGeneralMessages();
+      logSecurity('WEEKLY_CLEANUP', { deletedMessages: deleted });
+      console.log(`[Cleanup] Deleted ${deleted} general chat messages (Moscow 00:00 Monday)`);
+      broadcast({ type: 'chat_cleared', payload: { channel: 'general' }, timestamp: Date.now() });
+    } catch (e) {
+      console.error('Weekly cleanup failed:', (e as Error).message);
+    } finally {
+      scheduleWeeklyCleanup();
+    }
   }, msUntilMonday);
 }

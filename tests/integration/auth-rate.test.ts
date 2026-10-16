@@ -33,9 +33,16 @@ beforeAll(async () => {
   // The per-address backstop is 300 a minute in production, which a test could not afford to walk
   // through. It is lowered here so the spray still trips it, while the per-nickname lockout below
   // keeps the production number of five.
+  //
+  // The *work* budget - charged on every attempt whatever the outcome, which is what bounds the bcrypt -
+  // is raised instead of lowered. This file is about the failure counters, and several cases here sign in
+  // twenty-five times in a row from one address to prove that successes never spend the failure budget.
+  // Against the production twenty-a-minute that is refused on the twenty-first, which says nothing about the
+  // counters and everything about the number chosen for the ceiling.
   server = await startTestServer({
     DISABLE_RATE_LIMITS: '0',
     MAX_AUTH_ATTEMPTS: '30',
+    MAX_AUTH_ATTEMPTS_PER_ADDRESS: '500',
   });
 });
 

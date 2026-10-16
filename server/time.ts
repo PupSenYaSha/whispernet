@@ -1,12 +1,8 @@
 
 export const MSK_OFFSET_MS = 3 * 60 * 60 * 1000;
 
-
-
-
 export function nextMondayMidnightMSK(now: number = Date.now()): number {
-  
-  
+
   const moscowNow = new Date(now + MSK_OFFSET_MS);
   const dow = moscowNow.getUTCDay(); 
   let daysUntil = (8 - dow) % 7; 

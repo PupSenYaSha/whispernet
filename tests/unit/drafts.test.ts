@@ -136,6 +136,53 @@ describe('a draft', () => {
 });
 
 /**
+ * A draft that is restored into nothing.
+ *
+ * `whenDraftsHydrated` was exported and called by nobody, because the composer reads the tab synchronously
+ * and nothing re-rendered it. The box is behind the same derivation as everything else in it, so opening
+ * a chat that had a draft during sign-in showed an empty composer, and the next keystroke wrote over the
+ * saved text - a draft destroyed without ever having been seen.
+ *
+ * So the load tells whoever is listening that it has finished, and the composer looks again.
+ */
+describe('being told when the drafts have arrived', () => {
+  it('calls back with the words already in memory, not before', async () => {
+    vi.resetModules();
+    const fresh = await import('../../src/drafts');
+    fresh.setDraftsPassword(OLD);
+    await fresh.flushDrafts();
+    fresh.setDraft('alice', 'still in the box from before the restart');
+    await fresh.flushDrafts();
+
+    // a reload: the tab is empty, the storage is not
+    vi.resetModules();
+    const reloaded = await import('../../src/drafts');
+    const seen: Array<Record<string, string>> = [];
+    const off = reloaded.subscribeDrafts(() => seen.push(reloaded.draftSnapshot()));
+    try {
+      reloaded.setDraftsPassword(OLD);
+      await reloaded.whenDraftsHydrated();
+    } finally {
+      off();
+    }
+
+    expect(seen.length).toBeGreaterThan(0);
+    // and the callback saw the finished box, which is the whole point of the ordering
+    expect(seen[seen.length - 1].alice).toBe('still in the box from before the restart');
+  });
+
+  it('stops calling back once the listener has gone', async () => {
+    const fresh = await import('../../src/drafts');
+    let calls = 0;
+    const off = fresh.subscribeDrafts(() => { calls++; });
+    off();
+    fresh.setDraftsPassword(NEW);
+    await fresh.whenDraftsHydrated();
+    expect(calls).toBe(0);
+  });
+});
+
+/**
  * Encrypting drafts protects new ones and does nothing at all for the ones already on disk.
  *
  * Everybody who used the app before the change still has their old `wn_draft_<channel>` entries, in the

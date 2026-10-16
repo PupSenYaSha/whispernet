@@ -2,7 +2,9 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <application
-        android:allowBackup="true"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
@@ -39,4 +41,11 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
+
+    <!--
+        No storage, camera or microphone permissions are declared, and none should be: avatars are picked
+        through the WebView, which hands the app a file it has already copied into its own cache, and
+        attachments go out over the network. A permission here would have to be granted by the user for
+        something the app never calls.
+    -->
 </manifest>

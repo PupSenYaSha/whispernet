@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/capability/2",
   "identifier": "default",
-  "description": "Core permissions for the main window",
+  "description": "Grants the page almost nothing, and that is a claim about the whole API surface rather than about the empty list it used to hold. Everything this shell does apart from one thing - navigating the window, setting its title, toggling screenshot protection - is driven from Rust, so the web layer needs no API surface. The one exception is the update prompt's answer, below. Capabilities attach to a window label rather than to an origin, and this window lives on the remote host, so anything listed here is handed to that host and to any script running in it.",
   "windows": ["main"],
-  "permissions": ["core:default"]
+  "permissions": ["allow-set-update-consent"]
 }

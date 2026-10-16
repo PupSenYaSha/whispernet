@@ -1,4 +1,5 @@
 import type { AppSettings } from './types';
+import { isAppLockSet } from './appLock';
 
 export const defaultSettings: AppSettings = {
   theme: 'light',
@@ -13,7 +14,9 @@ export const defaultSettings: AppSettings = {
   screenshotProtection: false,
   appLockEnabled: false,
   appLockAutoLockMs: 5 * 60_000,
-  readReceiptsDelayMs: 5_000,
+  // The figure the send path actually used, now that it reads this. It used to be declared as 5 s here and
+  // hardcoded to 2 s in `markRead`, so a reader changing the setting changed nothing at all.
+  readReceiptsDelayMs: 2_000,
 };
 
 export function cn(...classes: (string | boolean | undefined | null)[]): string {
@@ -170,19 +173,61 @@ export function formatProfileDate(timestamp: number): string {
   return d.toLocaleDateString([], { year: 'numeric', month: 'long', day: 'numeric' });
 }
 
-export function loadSettings(): AppSettings {
+/**
+ * A `localStorage.setItem` that cannot throw.
+ *
+ * Every read of this app's own storage is guarded, because a private-mode browser refuses it and the
+ * refusal was thrown out of whatever asked. The writes were not: a full disk raised a QuotaExceededError
+ * out of `dispatch` and React tore the tree down, so toggling one setting bricked the app. The settings
+ * write has moved out of the reducer altogether; the contact-name map is still written from inside it, so
+ * this is what both of them go through.
+ */
+export function writeLocal(key: string, value: unknown): boolean {
   try {
-    const saved = localStorage.getItem('wn_settings');
-    if (saved) {
-      const parsed: AppSettings = { ...defaultSettings, ...JSON.parse(saved) };
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function loadSettings(): AppSettings {
+  let saved: string | null = null;
+  try {
+    saved = localStorage.getItem('wn_settings');
+  } catch { /* private mode, or storage turned off entirely */ }
+  if (saved) {
+    try {
+      const parsed = JSON.parse(saved);
+      const settings: AppSettings = { ...defaultSettings, ...parsed };
       // the flag used to live in its own key, so an existing installation keeps its choice
-      if (typeof parsed.screenshotProtection !== 'boolean') {
-        parsed.screenshotProtection = !!localStorage.getItem('wn_screenshot_prot');
+      if (typeof settings.screenshotProtection !== 'boolean') {
+        settings.screenshotProtection = !!localStorage.getItem('wn_screenshot_prot');
       }
-      return parsed;
-    }
-  } catch {}
-  return defaultSettings;
+      // A blob written before this field existed, or one that does not carry a boolean here, must not be
+      // read as "the lock is off". `appLock.ts` goes to real trouble to fail closed on a damaged hash, and
+      // the settings blob was the hole beside it: a truncated write meant no lock screen at all, and
+      // Settings reporting a passcode as off while `wn_app_lock_hash` sat there still holding one. A lock
+      // that claims to be off is believed, so the hash decides when the blob cannot.
+      if (typeof settings.appLockEnabled !== 'boolean') settings.appLockEnabled = isAppLockSet();
+      return settings;
+    } catch { /* unreadable: fall through and fail closed instead */ }
+  }
+  return { ...defaultSettings, appLockEnabled: isAppLockSet() };
+}
+
+/**
+ * Whether a URL is one the media proxy may be asked to fetch.
+ *
+ * The attachment address comes out of a message body, so a body somebody else wrote decides it. One path
+ * checked it and the decrypted path did not, which meant the two disagreed about what a media URL is and
+ * the decrypted one widened what reached the same-origin proxy: `javascript:`, `data:` and `blob:` all
+ * reach it as a query string the server then fetches.
+ */
+export function safeMediaUrl(url: string | null | undefined): string | null {
+  if (typeof url !== 'string') return null;
+  const trimmed = url.trim();
+  return /^https?:\/\//i.test(trimmed) ? trimmed : null;
 }
 
 export const translations = {
@@ -224,6 +269,10 @@ export const translations = {
     create_account: 'Create Account',
     sign_in: 'Sign In',
     creating_account: 'Creating account...',
+    pow_working: 'Checking your device',
+    pow_working_short: 'Checking...',
+    pow_explainer: 'Creating an account asks your device to do a short calculation. It is what stops one person making a hundred accounts, and why this is not instant.',
+    pow_cancel: 'Cancel',
     signing_in: 'Signing in...',
     nickname_hint: 'Nickname: 3-16 chars, letters/numbers/_- only',
     type_message: 'Type a message...',
@@ -267,6 +316,8 @@ export const translations = {
     app_lock_enter: 'Code',
     app_lock_wrong: 'Wrong code',
     app_lock_wait: 'Too many attempts. Try again in',
+    app_lock_damaged: 'The code saved on this device could not be read, so it cannot be checked. The passcode lock has to be turned off before the app will open.',
+    app_lock_damaged_reset: 'Turn the lock off',
     unlock: 'Unlock',
     export_keys: 'Encrypted key backup',
     sec_keys: 'Keys and identity',
@@ -298,6 +349,8 @@ export const translations = {
     unpin: 'Unpin',
     pinned: 'Pinned',
     pinned_note: 'Pins are kept on this device only.',
+    pin_not_loaded: 'more pin from earlier - open the conversation to load it',
+    pins_not_loaded: 'more pins from earlier - open the conversation to load them',
     jump_to_quoted: 'Go to the quoted message',
     encrypted_message: 'Encrypted message',
     new_message: 'New message',
@@ -352,6 +405,7 @@ export const translations = {
     sessions_note: 'Up to 3 active sessions. Logging in from a new device while at the limit is rejected until you revoke an older session.',
     current_session: 'This device',
     editing_message: 'Editing message',
+    edit_failed: 'Could not save the correction. The message was left as it was — your text is still here.',
     safety_number: 'Safety number',
     safety_number_show: 'Show',
     safety_number_hide: 'Hide',
@@ -412,12 +466,18 @@ export const translations = {
     update_extracting: 'Installing Update',
     update_wait: 'Please wait...',
     update_ready: 'Update Ready',
-    update_ready_desc: 'Version {version} installed. Restart to apply.',
+    update_ready_desc: 'Version {version} is installed. Restart now to use it.',
     update_failed: 'Update Failed',
     update_error_default: 'An error occurred while updating.',
-    update_dismiss: 'Dismiss',
+    update_dismiss: 'Later',
+    update_apply: 'Restart now',
+    update_declined: 'Update installed. It will be used the next time you start the app.',
+    update_decline: 'Not now',
+    update_error_no_shell: 'Could not reach the desktop app to confirm. Close and reopen it to pick the update up.',
+    ok: 'OK',
     revoke: 'Revoke',
     key_import_err: 'Invalid backup file or wrong password',
+    key_import_wrong_account: 'That backup belongs to a different account. Importing it would replace the keys for the one you are signed in to.',
     loading: 'Loading...',
     copied: 'Copied',
     copy_failed: 'Could not copy',
@@ -453,7 +513,7 @@ export const translations = {
     message_too_long: 'Message is longer than 2000 characters',
     upload_failed: 'Could not upload the file',
     upload_unsupported: 'Only images and videos can be sent',
-    upload_too_large: 'The file is larger than 1 GB',
+    upload_too_large: 'The file is larger than 1000 MB',
     upload_offline: 'No connection, try again when online',
     upload_keys_missing: 'Encryption keys are not ready yet, try again in a moment',
     upload_encrypt_failed: 'Could not encrypt, the session was reset, send again',
@@ -504,6 +564,10 @@ export const translations = {
     create_account: 'Создать аккаунт',
     sign_in: 'Войти',
     creating_account: 'Создание аккаунта...',
+    pow_working: 'Проверяем устройство',
+    pow_working_short: 'Проверка...',
+    pow_explainer: 'Для регистрации устройство выполняет небольшое вычисление. Именно оно не даёт одному человеку завести сто аккаунтов — поэтому регистрация не мгновенная.',
+    pow_cancel: 'Отмена',
     signing_in: 'Вход...',
     nickname_hint: 'Никнейм: 3–16 символов, только буквы, цифры, _ и -',
     type_message: 'Напишите сообщение...',
@@ -547,6 +611,8 @@ export const translations = {
     app_lock_enter: 'Код',
     app_lock_wrong: 'Неверный код',
     app_lock_wait: 'Слишком много попыток. Повторите через',
+    app_lock_damaged: 'Код на этом устройстве не читается, поэтому проверить его нельзя. Блокировку кодом нужно выключить, чтобы открыть приложение.',
+    app_lock_damaged_reset: 'Выключить блокировку',
     unlock: 'Разблокировать',
     export_keys: 'Резервная копия ключей',
     sec_keys: 'Ключи и идентичность',
@@ -578,6 +644,8 @@ export const translations = {
     unpin: 'Открепить',
     pinned: 'Закреплено',
     pinned_note: 'Закрепления хранятся только на этом устройстве.',
+    pin_not_loaded: 'и ещё закреплено ранее — откройте диалог, чтобы загрузить',
+    pins_not_loaded: 'и ещё закреплено ранее — откройте диалог, чтобы загрузить',
     jump_to_quoted: 'Перейти к цитируемому сообщению',
     encrypted_message: 'Зашифрованное сообщение',
     new_message: 'Новое сообщение',
@@ -632,6 +700,7 @@ export const translations = {
     sessions_note: 'До 3 активных сессий. Вход с нового устройства при достижении лимита отклоняется, пока не отозвать одну из старых сессий.',
     current_session: 'Это устройство',
     editing_message: 'Редактирование сообщения',
+    edit_failed: 'Не удалось сохранить исправление. Сообщение осталось прежним — текст всё ещё в поле.',
     safety_number: 'Номер безопасности',
     safety_number_show: 'Показать',
     safety_number_hide: 'Скрыть',
@@ -692,12 +761,18 @@ export const translations = {
     update_extracting: 'Установка обновления',
     update_wait: 'Пожалуйста, подождите...',
     update_ready: 'Обновление готово',
-    update_ready_desc: 'Версия {version} установлена. Перезапустите, чтобы применить.',
+    update_ready_desc: 'Версия {version} установлена. Перезапустите сейчас, чтобы применить.',
     update_failed: 'Не удалось обновить',
     update_error_default: 'При обновлении произошла ошибка.',
-    update_dismiss: 'Закрыть',
+    update_dismiss: 'Позже',
+    update_apply: 'Перезапустить сейчас',
+    update_declined: 'Обновление установлено. Оно применится при следующем запуске.',
+    update_decline: 'Не сейчас',
+    update_error_no_shell: 'Не удалось связаться с настольным приложением. Перезапустите его, чтобы обновление применилось.',
+    ok: 'ОК',
     revoke: 'Отозвать',
     key_import_err: 'Неверный файл резервной копии или неправильный пароль',
+    key_import_wrong_account: 'Эта резервная копия принадлежит другому аккаунту. Её импорт заменит ключи того, с которым вы вошли.',
     loading: 'Загрузка...',
     copied: 'Скопировано',
     copy_failed: 'Не удалось скопировать',
@@ -733,7 +808,7 @@ export const translations = {
     message_too_long: 'Сообщение длиннее 2000 символов',
     upload_failed: 'Не удалось загрузить файл',
     upload_unsupported: 'Можно отправлять только изображения и видео',
-    upload_too_large: 'Файл больше 1 ГБ',
+    upload_too_large: 'Файл больше 1000 МБ',
     upload_offline: 'Нет соединения, попробуйте в сети',
     upload_keys_missing: 'Ключи шифрования ещё не готовы, попробуйте через мгновение',
     upload_encrypt_failed: 'Не удалось зашифровать, сессия сброшена, отправьте снова',
@@ -748,5 +823,4 @@ export const translations = {
     registered: 'Зарегистрирован',
   },
 } as const;
-
 

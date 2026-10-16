@@ -1,4 +1,5 @@
 import fastify from 'fastify';
+import type { FastifyInstance } from 'fastify';
 import fastifyWebsocket from '@fastify/websocket';
 import fastifyStatic from '@fastify/static';
 import fastifyMultipart from '@fastify/multipart';
@@ -9,8 +10,8 @@ import fs from 'fs';
 import os from 'os';
 import { resolveUploadTokenUser } from './uploadTokens.js';
 import { existsSync } from 'fs';
-import { handleConnection, startHeartbeatCheck, getTotalConnections } from './handlers.js';
-import { initializeDatabase, getMediaDir, getAvatarDir, getUserProfile } from './database.js';
+import { handleConnection, startHeartbeatCheck, getTotalConnections, flushSessionWrites, terminateAllConnections } from './handlers.js';
+import { initializeDatabase, getMediaDir, getAvatarDir, getUserProfile, closeDatabase } from './database.js';
 import {
   UPLOAD_RATE_LIMIT,
   UPLOAD_RATE_WINDOW,
@@ -20,14 +21,15 @@ import {
   MEDIA_RATE_WINDOW,
   MAX_MEDIA_STREAM,
   MAX_WS_PAYLOAD_SIZE,
+  MAX_CONCURRENT_UPLOADS,
+  UPLOAD_DAILY_BYTES,
+  TRUSTED_PROXY_HOPS,
 } from './constants.js';
 import https from 'https';
 import http from 'http';
 import type { Readable } from 'stream';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-
-
 
 const MIME_RE = /^(image|video)\/[a-z0-9.+-]+$/i;
 
@@ -43,10 +45,29 @@ const AVATAR_MIME: Record<string, string> = {
   gif: 'image/gif',
 };
 
+/**
+ * Whether a forwarding header may be believed, and by how much.
+ *
+ * Only ever on TRUST_PROXY. It used to be inferred from a loopback peer, which is true of a same-host
+ * tunnel and also of anything else that happens to bind the port - see `proxyHeadersTrusted` in
+ * handlers.ts for why that let a client choose its own address.
+ *
+ * As a function rather than a number on purpose: Fastify 5 turns a bare hop count into "trust nothing",
+ * because hop-count trust cannot validate the immediate peer. Expressing it as a trust function gets the
+ * hop count behaviour, and `x-forwarded-for` is then read from the right for that many entries - the same
+ * rule `getClientIp` applies, so `req.ip` and the address the socket handlers key their limits on cannot
+ * drift apart.
+ */
+function trustProxySetting(): boolean | ((address: string, hop: number) => boolean) {
+  if (!/^(1|true|yes)$/i.test(process.env.TRUST_PROXY || '')) return false;
+  const hops = Math.max(1, TRUSTED_PROXY_HOPS);
+  return (_address: string, hop: number) => hop < hops;
+}
+
 const uploadRateMap = new Map<string, { count: number; resetAt: number }>();
 const mediaRateMap = new Map<string, { count: number; resetAt: number }>();
-
-
+const uploadBytesMap = new Map<string, { bytes: number; resetAt: number }>();
+const uploadsInFlight = new Map<string, number>();
 
 setInterval(() => {
   const now = Date.now();
@@ -55,6 +76,10 @@ setInterval(() => {
   }
   for (const [ip, entry] of mediaRateMap) {
     if (now > entry.resetAt) mediaRateMap.delete(ip);
+  }
+  // A day-long window, so the sweep runs hourly rather than on the same minute boundary as everything else.
+  for (const [uid, entry] of uploadBytesMap) {
+    if (now > entry.resetAt) uploadBytesMap.delete(uid);
   }
 }, 60_000);
 
@@ -82,6 +107,55 @@ function checkMediaRate(key: string): boolean {
   return true;
 }
 
+/**
+ * Takes one of this account's upload slots, or refuses.
+ *
+ * `UPLOAD_RATE_LIMIT` counts requests and `MAX_UPLOAD_SIZE` is a gigabyte, so a hundred and twenty requests
+ * inside a minute meant a hundred and twenty concurrent gigabyte temp files under os.tmpdir() and a hundred
+ * and twenty concurrent fifteen-minute sockets to the media host - from a single sign-in, on a path whose only
+ * credential is the token the handshake hands out. The slot is per resolved user rather than per address, so
+ * one account cannot hand its allowance to another and a shared network is not affected.
+ *
+ * Released in a `finally` around the storage step, so a client that hangs up or whose upstream refuses still
+ * gives the slot back.
+ */
+function claimUploadSlot(userId: string): boolean {
+  if (process.env.DISABLE_RATE_LIMITS === '1') return true;
+  const inFlight = uploadsInFlight.get(userId) || 0;
+  if (inFlight >= MAX_CONCURRENT_UPLOADS) return false;
+  uploadsInFlight.set(userId, inFlight + 1);
+  return true;
+}
+
+function releaseUploadSlot(userId: string): void {
+  const inFlight = uploadsInFlight.get(userId) || 0;
+  if (inFlight <= 1) uploadsInFlight.delete(userId);
+  else uploadsInFlight.set(userId, inFlight - 1);
+}
+
+/**
+ * Charges bytes against this account's day, or refuses.
+ *
+ * Nothing counted bytes before: `UPLOAD_RATE_LIMIT` is a request count, so an account that sent one request
+ * a minute for an hour spent an hour of somebody else's bandwidth and disk for exactly the same allowance as
+ * somebody who sent a dozen photographs. Called with the size that was actually received, after the cap on
+ * size has already been enforced, so nothing is charged for a request that was refused.
+ */
+function chargeUploadBytes(userId: string, size: number): boolean {
+  if (process.env.DISABLE_RATE_LIMITS === '1') return true;
+  const now = Date.now();
+  const entry = uploadBytesMap.get(userId);
+  const windowEnd = new Date(now);
+  windowEnd.setUTCHours(24, 0, 0, 0);
+  if (!entry || now > entry.resetAt) {
+    uploadBytesMap.set(userId, { bytes: size, resetAt: windowEnd.getTime() });
+    return true;
+  }
+  if (entry.bytes + size > UPLOAD_DAILY_BYTES) return false;
+  entry.bytes += size;
+  return true;
+}
+
 function sanitizeFilename(name: string): string {
   return name.replace(/[\x00-\x1f\x7f/\\"]/g, '').slice(0, 128) || 'upload';
 }
@@ -105,8 +179,6 @@ function getMediaBase(): URL {
   return new URL(process.env.MEDIA_BASE_URL || 'https://img.n1ko.dev');
 }
 
-
-
 function loadHttpsOptions(): { key: Buffer; cert: Buffer } | null {
   const keyPath = process.env.TLS_KEY || process.env.HTTPS_KEY;
   const certPath = process.env.TLS_CERT || process.env.HTTPS_CERT;
@@ -120,7 +192,7 @@ function loadHttpsOptions(): { key: Buffer; cert: Buffer } | null {
 }
 
 export function createApp(clientDir?: string) {
-  const trustProxy = /^(1|true|yes)$/i.test(process.env.TRUST_PROXY || '');
+  const trustProxy = trustProxySetting();
   const app = fastify({ logger: false, trustProxy });
   let mediaHost = 'img.n1ko.dev';
   try { mediaHost = getMediaBase().host; } catch {}
@@ -138,8 +210,21 @@ export function createApp(clientDir?: string) {
       reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     }
     const host = req.headers.host || 'localhost';
-    // the policy is built from a host the client chose, so only a plain host:port may go in -
-    // anything else could carry extra directives into the header
+    // `X-Real-IP` is deliberately NOT promoted into `x-forwarded-for` here.
+    //
+    // It did look like a tidy way to make both paths read one value: the websocket handler prefers
+    // `X-Real-IP`, and two answers to "where did this come from" is how a rate limit ends up keyed on one
+    // thing while an operator reads another. But promoting it means a header the *client* chooses becomes
+    // the entire chain that `req.ip` is derived from, and a client chooses it freely.
+    //
+    // `trustProxy: true` already reads `x-forwarded-for` from the right, which is what a real proxy appends
+    // to and a client cannot reach past. `X-Real-IP` has no such property: Caddy, Traefik, cloudflared and
+    // most hosting panels do not set it at all, so the client's own value passes straight through, and
+    // `deploy.sh` ships `TRUST_PROXY=1` by default. That made every per-address limit in this file - media
+    // rate, connections per address, auth attempts, registrations - a header the caller rotates at will.
+    //
+    // Unifying the two readings is still worth having, and `server/handlers.ts` does it the safe way: the
+    // websocket path only believes `X-Real-IP` when it agrees with the rightmost `X-Forwarded-For` entry.
     const configured = (process.env.PUBLIC_HOST || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
     const cspHost = SAFE_HOST_RE.test(configured) ? configured : (SAFE_HOST_RE.test(host) ? host : 'localhost');
     // The websocket scheme follows the one the page itself arrived on. Listing `ws:` unconditionally left
@@ -181,9 +266,18 @@ export function createApp(clientDir?: string) {
     root: resolvedClientDir,
     prefix: '/',
     wildcard: true,
-    
-    
+
     setHeaders(res, filePath) {
+      // Before the extension match, because the extension match catches it. `/sw.js` is the service worker
+      // script, and it was being served `immutable, max-age=1 year` behind the reverse proxy - which means a
+      // fix to the worker could never be delivered to a browser that had already installed it, however many
+      // times it was published. `public/sw.js` depends on being re-fetched too: its whole job is rotating a
+      // cache name so a new build is picked up, and a worker is never evicted by the cache rules written for
+      // static assets. So it is denied the year and given `no-cache`, like the HTML.
+      if (/(^|[\\/])sw\.js$/.test(filePath)) {
+        res.header('Cache-Control', 'no-cache');
+        return;
+      }
       if (/\.(js|mjs|css|woff2?|png|jpg|jpeg|gif|webp|svg|ico)$/i.test(filePath)) {
         res.header('Cache-Control', 'public, max-age=31536000, immutable');
       } else {
@@ -501,12 +595,16 @@ export function createApp(clientDir?: string) {
     });
   }
 
-  app.post('/api/upload', async (req, reply) => {
-    if (!requireUploadUser(req, reply)) return;
-
-    const rateKey = resolveUploadRateKey(req);
-    if (!checkUploadRate(rateKey)) {
-      return reply.code(429).send({ error: 'Rate limit' });
+  /**
+   * The body of the multipart route.
+   *
+   * The route itself is only three lines because the in-flight slot is claimed and released around it, and
+   * that is what stops the cap from being something a future second upload route has to remember to apply.
+   */
+  async function handleMultipartUpload(req: any, reply: any, userId: string): Promise<void> {
+    if (!checkUploadRate('user:' + userId)) {
+      await reply.code(429).send({ error: 'Rate limit' });
+      return;
     }
 
     const tmpPath = path.join(os.tmpdir(), 'wn-upload-' + crypto.randomBytes(8).toString('hex'));
@@ -518,17 +616,20 @@ export function createApp(clientDir?: string) {
     } catch (e: any) {
       const code = String(e?.code || '');
       if (code.startsWith('FST_FIELDS_LIMIT') || code.startsWith('FST_FILES_LIMIT') || code.startsWith('FST_PARTS_LIMIT')) {
-        return reply.code(400).send({ error: 'No file' });
+        await reply.code(400).send({ error: 'No file' });
+        return;
       }
       if (code.startsWith('FST_REQ_FILE_TOO_LARGE')) {
-        return reply.code(413).send({ error: 'File too large' });
+        await reply.code(413).send({ error: 'File too large' });
+        return;
       }
       throw e;
     }
-    if (!part) return reply.code(400).send({ error: 'No file' });
+    if (!part) { await reply.code(400).send({ error: 'No file' }); return; }
     if (!MIME_RE.test(part.mimetype)) {
       part.file.resume();
-      return reply.code(400).send({ error: 'Invalid file type' });
+      await reply.code(400).send({ error: 'Invalid file type' });
+      return;
     }
 
     // the file may be a gigabyte, so it never sits in memory: it lands in a temp file and every
@@ -543,16 +644,67 @@ export function createApp(clientDir?: string) {
       part.file.pipe(out);
     }).catch(() => -1);
 
-    if (size < 0) {
+    if (size < 0 || size > MAX_UPLOAD_SIZE) {
       cleanup();
-      return reply.code(413).send({ error: 'File too large' });
+      await reply.code(413).send({ error: 'File too large' });
+      return;
     }
-    if (size > MAX_UPLOAD_SIZE) {
+    if (!chargeUploadBytes(userId, size)) {
       cleanup();
-      return reply.code(413).send({ error: 'File too large' });
+      await reply.code(429).send({ error: 'Daily upload quota exceeded' });
+      return;
     }
 
     await storeTempUpload(reply, tmpPath, size, part.filename || 'upload', part.mimetype);
+  }
+
+  /** The body of the streamed route, which arrives as the ciphertext itself rather than a form. */
+  async function handleRawUpload(req: any, reply: any, userId: string): Promise<void> {
+    if (!checkUploadRate('user:' + userId)) {
+      await reply.code(429).send({ error: 'Rate limit' });
+      return;
+    }
+
+    const mimeType = String((req.query as any)?.type || 'application/octet-stream');
+    if (!MIME_RE.test(mimeType)) { await reply.code(400).send({ error: 'Invalid file type' }); return; }
+    const name = String((req.query as any)?.name || 'media.png').slice(0, 128);
+
+    const declared = Number((req.headers as any)?.['content-length'] || 0);
+    if (Number.isFinite(declared) && declared > MAX_UPLOAD_SIZE) {
+      await reply.code(413).send({ error: 'File too large' });
+      return;
+    }
+
+    const tmpPath = path.join(os.tmpdir(), 'wn-upload-' + crypto.randomBytes(8).toString('hex'));
+    // the registered parser hands the stream through untouched, so nothing has read it yet
+    const body = (req as any).body;
+    const source = body && typeof body.pipe === 'function' ? body : req.raw;
+    const size = await drainToTempFile(source, tmpPath);
+    if (size < 0 || size > MAX_UPLOAD_SIZE) {
+      try { fs.unlinkSync(tmpPath); } catch { /* already gone */ }
+      await reply.code(413).send({ error: 'File too large' });
+      return;
+    }
+    if (!chargeUploadBytes(userId, size)) {
+      try { fs.unlinkSync(tmpPath); } catch { /* already gone */ }
+      await reply.code(429).send({ error: 'Daily upload quota exceeded' });
+      return;
+    }
+
+    await storeTempUpload(reply, tmpPath, size, name, mimeType);
+  }
+
+  app.post('/api/upload', async (req, reply) => {
+    const uploadUser = requireUploadUser(req, reply);
+    if (!uploadUser) return;
+    if (!claimUploadSlot(uploadUser)) {
+      return reply.code(429).send({ error: 'Too many uploads in progress' });
+    }
+    try {
+      await handleMultipartUpload(req, reply, uploadUser);
+    } finally {
+      releaseUploadSlot(uploadUser);
+    }
     return reply;
   });
 
@@ -565,39 +717,21 @@ export function createApp(clientDir?: string) {
    * the same gigabyte the global chat already did.
    */
   app.post('/api/upload-raw', async (req, reply) => {
-    if (!requireUploadUser(req, reply)) return;
-
-    const rateKey = resolveUploadRateKey(req);
-    if (!checkUploadRate(rateKey)) {
-      return reply.code(429).send({ error: 'Rate limit' });
+    const uploadUser = requireUploadUser(req, reply);
+    if (!uploadUser) return;
+    if (!claimUploadSlot(uploadUser)) {
+      return reply.code(429).send({ error: 'Too many uploads in progress' });
     }
-
-    const mimeType = String((req.query as any)?.type || 'application/octet-stream');
-    if (!MIME_RE.test(mimeType)) return reply.code(400).send({ error: 'Invalid file type' });
-    const name = String((req.query as any)?.name || 'media.png').slice(0, 128);
-
-    const declared = Number((req.headers as any)?.['content-length'] || 0);
-    if (Number.isFinite(declared) && declared > MAX_UPLOAD_SIZE) {
-      return reply.code(413).send({ error: 'File too large' });
+    try {
+      await handleRawUpload(req, reply, uploadUser);
+    } finally {
+      releaseUploadSlot(uploadUser);
     }
-
-    const tmpPath = path.join(os.tmpdir(), 'wn-upload-' + crypto.randomBytes(8).toString('hex'));
-    // the registered parser hands the stream through untouched, so nothing has read it yet
-    const body = (req as any).body;
-    const source = body && typeof body.pipe === 'function' ? body : req.raw;
-    const size = await drainToTempFile(source, tmpPath);
-    if (size < 0) {
-      try { fs.unlinkSync(tmpPath); } catch { /* already gone */ }
-      return reply.code(413).send({ error: 'File too large' });
-    }
-
-    await storeTempUpload(reply, tmpPath, size, name, mimeType);
     return reply;
   });
 
   app.register(async (fastify) => {
-    
-    
+
     fastify.addHook('preValidation', async (request, reply) => {
       if (String(request.headers.upgrade || '').toLowerCase() !== 'websocket') return;
       const origin = request.headers.origin;
@@ -670,9 +804,6 @@ export async function startServer(clientDir?: string, dataDir?: string) {
 
   const app = createApp(clientDir);
 
-  
-  
-  
   app.server.on('connection', (socket) => { socket.on('error', () => {}); });
   app.server.on('clientError', (err, socket) => {
     try { socket.end('HTTP/1.1 400 Bad Request\r\n\r\n'); } catch {}
@@ -685,9 +816,49 @@ export async function startServer(clientDir?: string, dataDir?: string) {
   try {
     await app.listen(listenOpts);
     console.log(`Server running on ${HOST}:${PORT}${httpsOpts ? ' (HTTPS/WSS)' : ''}`);
-    return app;
   } catch (err) {
     console.error('Server failed:', err);
     process.exit(1);
   }
+
+  // `once`, not `on`: a second signal is left to the default behaviour, so an operator who wants the process
+  // gone now still can.
+  process.once('SIGTERM', () => {
+    console.log('Received SIGTERM, shutting down');
+    shutdownServer(app)
+      .then(() => process.exit(0))
+      .catch((e: unknown) => { console.error('Shutdown failed:', (e as Error).message); process.exit(1); });
+  });
+  process.once('SIGINT', () => {
+    console.log('Received SIGINT, shutting down');
+    shutdownServer(app)
+      .then(() => process.exit(0))
+      .catch((e: unknown) => { console.error('Shutdown failed:', (e as Error).message); process.exit(1); });
+  });
+
+  return app;
+}
+
+/**
+ * Shuts down in an order, instead of dying where it happens to be standing.
+ *
+ * `scripts/start.js` sends SIGTERM on every restart, and the default response to one is to stop mid-stride:
+ * the listener is not closed, sockets in the middle of a `saveMessage` are abandoned with their promise
+ * unresolved, the write-ahead log is not checkpointed, and session writes that were deliberately left in
+ * memory are lost. A restart every few days is not a rare event, so this is a normal path rather than a
+ * shutdown path.
+ *
+ * Sockets first, because a graceful close is a handshake and a peer that went away without a clean goodbye
+ * never answers it - the restart would sit waiting rather than finishing. Then the app, which stops accepting
+ * and waits for the requests in flight; then the writes that were only in memory; and last the database,
+ * whose close checkpoints the log.
+ *
+ * Deliberately does not exit the process: `startServer` owns the exit code, so this can also be driven
+ * directly by a test or an embedder.
+ */
+export async function shutdownServer(app: FastifyInstance): Promise<void> {
+  terminateAllConnections();
+  await app.close();
+  await flushSessionWrites();
+  closeDatabase();
 }

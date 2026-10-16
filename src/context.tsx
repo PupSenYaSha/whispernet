@@ -18,16 +18,15 @@ export type AdminReport = {
   timestamp: number;
 };
 
-
 export interface ConnectionState {
   status: ConnectionStatus;
   messages: Message[];
   users: User[];
   nickname: string;
   userId: string | null;
-  settings: AppSettings;
-  ws: WebSocket | null;
+settings: AppSettings;
   reconnectAttempts: number;
+
   authError: string | null;
   e2eeReady: boolean;
   needsKeySetup: boolean;
@@ -65,6 +64,8 @@ export interface ConnectionState {
   searchOpen: boolean;
   searchQuery: string;
   searchLoading: boolean;
+  /** Progress of the registration proof, 0..1, or null when no search is running. */
+  powProgress: number | null;
   /**
    * The message the reader asked to be taken to.
    *
@@ -111,6 +112,14 @@ export interface ConnectionState {
   pinned: Record<string, Message[]>;
 }
 
+/**
+ * Whether the server has anything older to give for this window, and the timestamp to ask from.
+ *
+ * `oldest` has to be derived from the messages actually held, never remembered separately. The message list
+ * is now capped, so a cursor tracked on its own is a cursor pointing at a message that has been evicted -
+ * and asking the server for everything older than a message we no longer have comes back with either
+ * nothing or a page of rows we already display, which is a "load older" button that does nothing.
+ */
 export interface HistoryWindow {
   hasMore: boolean;
   oldest: number | null;
@@ -121,31 +130,41 @@ export type ConnectionAction =
   | { type: 'ADD_MESSAGE'; message: Message }
   | { type: 'SET_MESSAGES'; messages: Message[] }
   | { type: 'PREPEND_MESSAGES'; messages: Message[] }
-  | { type: 'SET_HISTORY_STATE'; hasMore: boolean; oldest: number | null }
+  | { type: 'SET_HISTORY_STATE'; hasMore: boolean }
   | { type: 'SET_DM_MESSAGES'; channel: string; messages: Message[] }
   | { type: 'PREPEND_DM_MESSAGES'; channel: string; messages: Message[] }
-  | { type: 'SET_DM_HISTORY_STATE'; channel: string; hasMore: boolean; oldest: number | null }
-| { type: 'ADD_DM_MESSAGE'; channel: string; message: Message }
+  | { type: 'SET_DM_HISTORY_STATE'; channel: string; hasMore: boolean }
+  | { type: 'ADD_DM_MESSAGE'; channel: string; message: Message }
   | { type: 'SET_USERS'; users: User[] }
   | { type: 'ADD_USER'; user: User }
   | { type: 'REMOVE_USER'; userId: string }
-  | { type: 'SET_USER'; userId: string; nickname: string }
-  | { type: 'SET_WS'; ws: WebSocket | null }
+| { type: 'SET_USER'; userId: string; nickname: string }
   | { type: 'SET_RECONNECT_ATTEMPTS'; attempts: number }
+
+  | { type: 'SET_POW_PROGRESS'; progress: number | null }
   | { type: 'SET_AUTH_ERROR'; error: string | null }
   | { type: 'UPDATE_SETTINGS'; settings: Partial<AppSettings> }
   | { type: 'SET_E2EE_READY'; ready: boolean }
   | { type: 'SET_KEY_SETUP_NEEDED'; needed: boolean }
   | { type: 'SET_ACTIVE_CHANNEL'; channel: ActiveChannel }
   | { type: 'SET_CONTACTS'; contacts: Contact[] }
-  | { type: 'SET_DM_NAME'; userId: string; nickname: string }
+| { type: 'SET_DM_NAME'; userId: string; nickname: string }
+  /**
+   * Every contact's name in one action.
+   *
+   * `dm_contacts` names the whole list at once, and it used to dispatch `SET_DM_NAME` per contact - which
+   * meant one reducer run and one full serialisation of the map for every contact, on a list that reaches
+   * several hundred, every time a message arrived.
+   */
+  | { type: 'SET_DM_NAMES'; names: Record<string, string> }
+
   | { type: 'SET_SEARCH_RESULTS'; results: { id: string; nickname: string; online: boolean }[] }
   | { type: 'SET_MESSAGE_SEARCH_RESULTS'; results: Message[] }
   | { type: 'DELETE_MESSAGE'; messageId: string }
   | { type: 'ADD_REACTION'; messageId: string; emoji: string; userId: string }
   | { type: 'REMOVE_REACTION'; messageId: string; emoji: string; userId: string }
   | { type: 'UPDATE_MESSAGE'; messageId: string; text: string; encrypted?: any; editedAt: number }
-  | { type: 'SET_MESSAGE_TEXT'; messageId: string; text: string }
+  | { type: 'SET_MESSAGE_TEXT'; messageId: string; text: string; fileKeyEntry?: string }
   | { type: 'SET_REPLY'; reply: ReplyTarget }
   | { type: 'CLEAR_GENERAL' }
   | { type: 'SET_AVATARS'; avatars: Record<string, AvatarUpdate> }
@@ -166,14 +185,24 @@ export type ConnectionAction =
   | { type: 'JUMP_TO'; messageId: string | null }
   | { type: 'BUMP_UNREAD'; channel: string; delta: number }
   | { type: 'CLEAR_UNREAD'; channel: string }
-  | { type: 'SET_PINNED'; channel: string; messages: Message[] }
+/**
+   * Pins or unpins one message in a conversation.
+   *
+   * Carries the id rather than the resulting list, because deciding what the list becomes has to happen
+   * against committed state: two pins toggled in the same tick both read the same snapshot and the second
+   * one undid the first, along with every other conversation's pins.
+   */
+  | { type: 'TOGGLE_PIN'; channel: string; messageId: string }
   | { type: 'RESET' };
+
 
 export interface ConnectionContextType {
   state: ConnectionState;
   dispatch: React.Dispatch<any>;
   connect: (nickname: string, password: string, isRegister: boolean) => void;
   reconnect: () => void;
+  /** Abandons a registration proof search; the form becomes usable again. */
+  cancelPow: () => void;
   disconnect: () => void;
   logout: () => void;
   sendMessage: (text: string, quoted?: ReplyTarget) => void;
@@ -189,7 +218,14 @@ export interface ConnectionContextType {
   deleteMessage: (messageId: string) => void;
   addReaction: (messageId: string, emoji: string) => void;
   removeReaction: (messageId: string, emoji: string) => void;
-  editMessage: (messageId: string, text: string) => void;
+/**
+   * Corrects a message, resolving to whether it was actually sent.
+   *
+   * Awaited by the composer, which empties itself on the answer: a correction silently dropped after the
+   * composer was cleared loses the words the user typed with nothing to show for it.
+   */
+  editMessage: (messageId: string, text: string) => Promise<boolean>;
+
   setReply: (reply: ReplyTarget) => void;
   editingTarget: Message | null;
   setEditing: (msg: Message | null) => void;
@@ -202,7 +238,7 @@ export interface ConnectionContextType {
   updateSettings: (settings: Partial<AppSettings>) => void;
 getMyPublicKey: () => JsonWebKey | null;
   getPublicKey: (userId: string) => JsonWebKey | null;
-  decryptMedia: (message: { id: string; text: string; fileKey?: Record<string, string> }) => Promise<string | null>;
+  decryptMedia: (message: { id: string; text: string; fileKey?: Record<string, string>; fileKeyEntry?: string }) => Promise<string | null>;
   /** Keeps a decrypted media object URL alive while a bubble is showing it. */
   retainMedia: (id: string) => void;
   releaseMedia: (id: string) => void;

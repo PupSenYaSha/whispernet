@@ -11,11 +11,10 @@ import {
   MAX_ONE_TIME_PREKEYS,
   PREKEY_BUNDLE_VERSION,
   KEY_PREFIX,
+  storageKey,
 } from './constants';
+import { wipe } from './wipe';
 
-const IK_KEY = KEY_PREFIX.identityKey;
-const SPK_KEY = KEY_PREFIX.signedPreKey;
-const OPK_KEY = KEY_PREFIX.oneTimePreKeys;
 /**
  * Signed prekeys this account has already rotated away from, kept long enough to still answer a message
  * that was built against one of them.
@@ -26,13 +25,27 @@ const OPK_KEY = KEY_PREFIX.oneTimePreKeys;
  * dead with nothing to retry against. Retaining the recent past of the rotation is what makes that
  * window survivable - it is the same reason the specification keeps old prekeys around.
  */
-const SPK_HISTORY_KEY = 'wn_signal_spk_history';
 /** Roughly two rotation periods, which is longer than any plausible delivery delay. */
 const SPK_HISTORY_MAX = 5;
 const SPK_HISTORY_MAX_AGE_MS = 60 * 24 * 60 * 60 * 1000;
 
+/**
+ * Base64 in slices.
+ *
+ * `String.fromCharCode(...bytes)` throws once the array is long enough to exceed the argument limit. That
+ * is bounded here by `MAX_ONE_TIME_PREKEYS` and so is not reachable today, but the failure it would cause is
+ * worth naming: this is the encoder for every value the prekey store writes, the throw would land inside the
+ * `catch` that wraps the save, and the store would stop being written *entirely* with nothing anywhere
+ * saying so. `session.ts` hit exactly this and carries its own chunked copy for the same reason.
+ */
+const B64_CHUNK = 0x8000;
 function bufToBase64(buf: ArrayBuffer): string {
-  return btoa(String.fromCharCode(...new Uint8Array(buf)));
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += B64_CHUNK) {
+    binary += String.fromCharCode.apply(null, Array.from(bytes.subarray(i, i + B64_CHUNK)) as unknown as number[]);
+  }
+  return btoa(binary);
 }
 
 function base64ToBuf(b64: string): ArrayBuffer {
@@ -43,9 +56,17 @@ function base64ToBuf(b64: string): ArrayBuffer {
 }
 
 async function deriveKey(password: string, salt: Uint8Array): Promise<CryptoKey> {
-  const passKey = await crypto.subtle.importKey(
-    'raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey']
-  );
+  // The password as bytes, cleared as soon as the import has taken it. `secureStore.ts` does the same for its
+  // identical buffer and this did not, which makes the omission a difference between two copies of one habit
+  // rather than a decision. See ./wipe for what clearing does and does not buy - the `password` string is
+  // still there either way.
+  const passwordBytes = new TextEncoder().encode(password);
+  let passKey: CryptoKey;
+  try {
+    passKey = await crypto.subtle.importKey('raw', passwordBytes, 'PBKDF2', false, ['deriveKey']);
+  } finally {
+    wipe(passwordBytes);
+  }
   return crypto.subtle.deriveKey(
     { name: 'PBKDF2', salt: salt as unknown as ArrayBuffer, iterations: PBKDF2_ITER, hash: 'SHA-256' },
     passKey, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt']
@@ -58,6 +79,22 @@ async function encryptValue(key: CryptoKey, value: string): Promise<string> {
     { name: 'AES-GCM', iv }, key, new TextEncoder().encode(value)
   );
   return JSON.stringify({ iv: bufToBase64(iv.buffer), data: bufToBase64(ciphertext) });
+}
+
+/**
+ * Whether a stored value has the shape of an encrypted envelope.
+ *
+ * A shape test rather than a decryption attempt, and the difference matters: a wrong password and a
+ * plaintext value both make `decryptValue` return null, but only one of them is a secret sitting on disk
+ * that should be deleted rather than retried.
+ */
+function looksEncrypted(value: string): boolean {
+  try {
+    const parsed = JSON.parse(value);
+    return typeof parsed?.iv === 'string' && typeof parsed?.data === 'string';
+  } catch {
+    return false;
+  }
 }
 
 async function decryptValue(key: CryptoKey, encrypted: string): Promise<string | null> {
@@ -82,28 +119,85 @@ function isPreKeyExpired(createdAt: number, maxAgeMs: number): boolean {
 
 export class PreKeyManager {
   private identityKeyPair: ReturnType<typeof generateIdentityKeyPair> | null = null;
+  /**
+   * Bumped on `init` and `destroy`. Timers can be cancelled, but a promise that has already passed an `await`
+   * cannot - so a save or a load that resumes after this manager has moved on writes into whatever owns the
+   * storage now. See the same field on `SessionManager` for the long version.
+   */
+  private generation = 0;
   private signedPreKey: SignedPreKeyRecord | null = null;
   /** Signed prekeys that have been rotated out of `signedPreKey` but can still answer a message. */
   private signedPreKeyHistory: SignedPreKeyRecord[] = [];
   private oneTimePreKeys: PreKeyRecord[] = [];
   private publishedOpkKeyId: number | null = null;
+  /**
+   * The id the next generated one-time prekey gets.
+   *
+   * Monotonic on purpose, and it has to be a separate piece of state rather than something derived from
+   * `oneTimePreKeys.length`. That length used to be the source, and keys are consumed from the *front* of
+   * the array, so every time fifty of a hundred were spent the count fell to fifty and the next fifty were
+   * handed ids fifty-one to a hundred - ids that were still in use by the keys sitting further down the
+   * same array. `peekOneTimePreKey` and `consumeOneTimePreKey` both match on the first id they find, so an
+   * initiator whose published bundle named one of those ids was answered with whichever of the two
+   * happened to come first. If that was not the pair the server actually published, the handshake derives
+   * a different secret on the far side and the conversation simply never opens - intermittently, and with
+   * nothing in the logs to say why. The supply also grew past the hundred it is capped at, a generation at
+   * a time.
+   *
+   * It is persisted with the keys and raised past whatever is already stored, so it survives a reload and
+   * cannot be rewound by a state written before it existed.
+   */
+  private nextOpkKeyId = 1;
   private encryptionKey: CryptoKey | null = null;
   private saveTimeout: ReturnType<typeof setTimeout> | null = null;
   private rotationTimer: ReturnType<typeof setInterval> | null = null;
 
+  /**
+   * The account this manager's store belongs to, and the storage keys it resolves to.
+   *
+   * Per account, and the reason is not tidiness. One namespace for the whole browser profile is one
+   * namespace for every account that has ever been signed in to it, and the failure is not a lost
+   * conversation but a *given away* one: the second account's password fails to decrypt the first account's
+   * identity key, `loadEncrypted` leaves `this.identityKeyPair` as it was - the first account's - and
+   * `initialize()` returns early because a key is already there. This device then publishes the first
+   * account's identity key, signed prekey and one-time prekey to the second account's server row, so every
+   * contact who does X3DH against it builds their session on somebody else's identity key.
+   *
+   * An empty id means the bare legacy keys, which only a manager built outside the app ever uses.
+   */
+  private accountId = '';
+  private ikKey: string = KEY_PREFIX.identityKey;
+  private spkKey: string = KEY_PREFIX.signedPreKey;
+  private spkHistoryKey: string = KEY_PREFIX.signedPreKeyHistory;
+  private opkKey: string = KEY_PREFIX.oneTimePreKeys;
+  private prekeySaltKey: string = KEY_PREFIX.prekeySalt;
+
   constructor() {}
 
-  async init(password: string): Promise<void> {
-    const saltB64 = localStorage.getItem('wn_signal_prekey_salt');
+  async init(password: string, accountId?: string): Promise<void> {
+    // Taken as a number, not `this.generation++`, because the awaits below are checked against *this* call.
+    // `deriveKey` is slow enough for a `destroy()` to land inside it, and without the check a torn-down
+    // manager is handed a key again and goes on to load a store into itself.
+    const generation = this.generation + 1;
+    this.generation = generation;
+    this.accountId = accountId ?? '';
+    this.ikKey = storageKey(KEY_PREFIX.identityKey, this.accountId);
+    this.spkKey = storageKey(KEY_PREFIX.signedPreKey, this.accountId);
+    this.spkHistoryKey = storageKey(KEY_PREFIX.signedPreKeyHistory, this.accountId);
+    this.opkKey = storageKey(KEY_PREFIX.oneTimePreKeys, this.accountId);
+    this.prekeySaltKey = storageKey(KEY_PREFIX.prekeySalt, this.accountId);
+    const saltB64 = localStorage.getItem(this.prekeySaltKey);
     let salt: Uint8Array;
     if (saltB64) {
       salt = new Uint8Array(base64ToBuf(saltB64));
     } else {
       salt = crypto.getRandomValues(new Uint8Array(16));
-      localStorage.setItem('wn_signal_prekey_salt', bufToBase64(salt.buffer as ArrayBuffer));
+      localStorage.setItem(this.prekeySaltKey, bufToBase64(salt.buffer as ArrayBuffer));
     }
     this.encryptionKey = await deriveKey(password, salt);
+    if (generation !== this.generation) return;
     await this.loadEncrypted();
+    if (generation !== this.generation) return;
     this.startRotationTimer();
   }
 
@@ -168,11 +262,10 @@ export class PreKeyManager {
     const needed = MAX_ONE_TIME_PREKEYS - this.oneTimePreKeys.length;
     if (needed <= 0) return;
 
-    const newKeys = generateOneTimePreKeys(
-      this.oneTimePreKeys.length + 1,
-      this.oneTimePreKeys.length + needed
-    );
-    this.oneTimePreKeys.push(...newKeys);
+    // a contiguous run off the counter, and the counter moves with it - see the note on `nextOpkKeyId`
+    const first = this.nextOpkKeyId;
+    this.nextOpkKeyId = first + needed;
+    this.oneTimePreKeys.push(...generateOneTimePreKeys(first, needed));
     await this.save();
   }
 
@@ -184,10 +277,25 @@ export class PreKeyManager {
   }
 
   private async loadEncrypted(): Promise<void> {
+    const generation = this.generation;
     try {
-      const ikData = localStorage.getItem(IK_KEY);
+      const ikData = localStorage.getItem(this.ikKey);
+      // An unencrypted value is a store written by a build that fell back to plaintext, and it holds the
+      // account's private identity key. It cannot be read as a ciphertext, so there is nothing to keep -
+      // and leaving it would mean a private key outliving the fix by however long nobody opens the app.
+      if (ikData && this.encryptionKey && !looksEncrypted(ikData)) {
+        console.warn('[signal] found unencrypted identity key material; removing it');
+        this.clearMaterial();
+        localStorage.removeItem(this.ikKey);
+        localStorage.removeItem(this.spkKey);
+        localStorage.removeItem(this.spkHistoryKey);
+        localStorage.removeItem(this.opkKey);
+        return;
+      }
       if (ikData && this.encryptionKey) {
         const decrypted = await decryptValue(this.encryptionKey, ikData);
+        // The store this read belongs to may have been torn down while it was being decrypted.
+        if (generation !== this.generation) return;
         if (decrypted) {
           const parsed = JSON.parse(decrypted);
           this.identityKeyPair = {
@@ -197,6 +305,18 @@ export class PreKeyManager {
             ed25519PublicKey: parsed.ed25519PublicKey ? new Uint8Array(parsed.ed25519PublicKey) : new Uint8Array(0),
             ed25519PrivateKey: parsed.ed25519PrivateKey ? new Uint8Array(parsed.ed25519PrivateKey) : new Uint8Array(0),
           };
+        } else {
+          // Encrypted, and it does not open under this account's password.
+          //
+          // The material this manager already holds belongs to whoever was signed in before it, and the
+          // `if (decrypted)` guard used to step over it: the fields kept their previous values, so a
+          // `destroy()` that cleared nothing left the *previous account's* identity key in place, and
+          // `initialize()`'s `if (this.identityKeyPair) return` then declined to make this account one of
+          // its own. What got published to the server afterwards was somebody else's key.
+          //
+          // An unopenable blob is not recoverable, so there is nothing to salvage; keeping foreign material
+          // in memory to try again later is the part that cannot be justified.
+          this.clearMaterial();
         }
       } else if (ikData) {
         const parsed = JSON.parse(ikData);
@@ -209,9 +329,11 @@ export class PreKeyManager {
         };
       }
 
-      const spkData = localStorage.getItem(SPK_KEY);
+      const spkData = localStorage.getItem(this.spkKey);
       if (spkData && this.encryptionKey) {
         const decrypted = await decryptValue(this.encryptionKey, spkData);
+        // Same rule as the identity key above: a blob that does not open is not "leave what was there".
+        if (!decrypted) this.signedPreKey = null;
         if (decrypted) {
           const parsed = JSON.parse(decrypted);
           this.signedPreKey = {
@@ -237,11 +359,22 @@ export class PreKeyManager {
         };
       }
 
-      this.signedPreKeyHistory = await this.loadSignedPreKeyHistory();
+      const history = await this.loadSignedPreKeyHistory();
+      // An unreadable history is an empty one; never the previous account's.
+      if (generation !== this.generation) return;
+      this.signedPreKeyHistory = history;
 
-      const opkData = localStorage.getItem(OPK_KEY);
+      const opkData = localStorage.getItem(this.opkKey);
       if (opkData && this.encryptionKey) {
         const decrypted = await decryptValue(this.encryptionKey, opkData);
+        if (!decrypted) {
+          // The supply and the two counters beside it go together: the id counter is persisted *with* the
+          // keys so that a state written before it existed cannot rewind the numbering, which means keeping
+          // a counter whose keys have just been discarded would hand out ids that are already spent.
+          this.oneTimePreKeys = [];
+          this.publishedOpkKeyId = null;
+          this.nextOpkKeyId = 1;
+        }
         if (decrypted) {
           const parsed = JSON.parse(decrypted);
           if (Array.isArray(parsed)) {
@@ -261,6 +394,7 @@ export class PreKeyManager {
               },
             })) : [];
             this.publishedOpkKeyId = typeof parsed.publishedKeyId === 'number' ? parsed.publishedKeyId : null;
+            this.nextOpkKeyId = typeof parsed.nextKeyId === 'number' && parsed.nextKeyId > 0 ? parsed.nextKeyId : 1;
           }
         }
       } else if (opkData) {
@@ -282,11 +416,31 @@ export class PreKeyManager {
             },
           })) : [];
           this.publishedOpkKeyId = typeof parsed.publishedKeyId === 'number' ? parsed.publishedKeyId : null;
+          this.nextOpkKeyId = typeof parsed.nextKeyId === 'number' && parsed.nextKeyId > 0 ? parsed.nextKeyId : 1;
         }
       }
     } catch (e) {
+      // Fail closed, the same way `SessionManager.loadEncrypted` does. A store that could not be read has to
+      // leave nothing behind, because what it leaves behind would be treated as this account's.
+      this.clearMaterial();
       console.error('[signal] failed to load prekey material:', e);
     }
+  }
+
+  /**
+   * Empties every field of loaded prekey material.
+   *
+   * The point is not that a *load* can fail - it is what happens afterwards. Nothing in this class can tell a
+   * freshly loaded key from one that was left over, so a key that survived a failed load is a key that gets
+   * published, signed with, and treated as this account's own until something overwrites it.
+   */
+  private clearMaterial(): void {
+    this.identityKeyPair = null;
+    this.signedPreKey = null;
+    this.signedPreKeyHistory = [];
+    this.oneTimePreKeys = [];
+    this.publishedOpkKeyId = null;
+    this.nextOpkKeyId = 1;
   }
 
   private toStoredSpk(k: SignedPreKeyRecord): Record<string, unknown> {
@@ -310,7 +464,7 @@ export class PreKeyManager {
   }
 
   private async loadSignedPreKeyHistory(): Promise<SignedPreKeyRecord[]> {
-    const raw = localStorage.getItem(SPK_HISTORY_KEY);
+    const raw = localStorage.getItem(this.spkHistoryKey);
     if (!raw) return [];
     let decoded: any = raw;
     if (this.encryptionKey) {
@@ -358,17 +512,66 @@ export class PreKeyManager {
    * message could be opened at all, and every conversation would be permanently unreadable.
    */
   async rekey(newPassword: string): Promise<void> {
+    const SALT = this.prekeySaltKey;
     const salt = crypto.getRandomValues(new Uint8Array(16));
-    localStorage.setItem('wn_signal_prekey_salt', bufToBase64(salt.buffer as ArrayBuffer));
-    this.encryptionKey = await deriveKey(newPassword, salt);
-    if (this.saveTimeout) {
-      clearTimeout(this.saveTimeout);
-      this.saveTimeout = null;
+
+    // Everything needed to undo this, taken before anything is touched.
+    const oldSalt = localStorage.getItem(SALT);
+    const oldValues: [string, string | null][] = [
+      [this.ikKey, localStorage.getItem(this.ikKey)],
+      [this.spkKey, localStorage.getItem(this.spkKey)],
+      [this.spkHistoryKey, localStorage.getItem(this.spkHistoryKey)],
+      [this.opkKey, localStorage.getItem(this.opkKey)],
+    ];
+    const previousKey = this.encryptionKey;
+
+    try {
+      // Derive first, then write the material, and only then move the salt.
+      //
+      // It used to write the salt first, which made one failed write unrecoverable rather than merely
+      // unsuccessful: a new salt over material still sealed under the old key means the next launch derives
+      // a different key, cannot open the store, and there is nothing left anywhere to recover it from - the
+      // private prekeys are simply gone, and no incoming message can ever be opened again. Quota is the
+      // realistic way to hit that, and a password change is exactly the moment the store is largest.
+      //
+      // The salt going last is what makes the failure repairable. While the old salt is still in charge the
+      // only thing out of step is the blob, and the blob is the part this function can put back.
+      const newKey = await deriveKey(newPassword, salt);
+      this.encryptionKey = newKey;
+      if (this.saveTimeout) {
+        clearTimeout(this.saveTimeout);
+        this.saveTimeout = null;
+      }
+      await this.doSave();
+
+      // Confirm every value reads back under the new key before committing the salt, so a store that was
+      // partly written is caught here rather than on the next launch, when nothing can be done about it.
+      //
+      // All four, and by decrypting rather than by checking the shape. `doSave` swallows a write failure of
+      // its own accord, and a shape check passes on the *old* ciphertext just as happily as on the new - so a
+      // partial rewrite would sail through it and then strand one blob under a key the salt no longer names.
+      for (const key of [this.ikKey, this.spkKey, this.spkHistoryKey, this.opkKey]) {
+        const written = localStorage.getItem(key);
+        if (written === null) continue;
+        if (!(await decryptValue(this.encryptionKey, written))) {
+          throw new Error(`the rewrapped ${key} did not read back`);
+        }
+      }
+      localStorage.setItem(SALT, bufToBase64(salt.buffer as ArrayBuffer));
+    } catch (e) {
+      this.encryptionKey = previousKey;
+      for (const [key, value] of oldValues) {
+        if (value === null) localStorage.removeItem(key);
+        else localStorage.setItem(key, value);
+      }
+      if (oldSalt === null) localStorage.removeItem(SALT);
+      else localStorage.setItem(SALT, oldSalt);
+      throw e;
     }
-    await this.doSave();
   }
 
   private async doSave(): Promise<void> {
+    const generation = this.generation;
     try {
       const ikData = this.identityKeyPair ? JSON.stringify({
         privateKey: Array.from(this.identityKeyPair.privateKey),
@@ -383,6 +586,7 @@ export class PreKeyManager {
 
       const opkData = JSON.stringify({
         publishedKeyId: this.publishedOpkKeyId,
+        nextKeyId: this.nextOpkKeyId,
         keys: this.oneTimePreKeys.map((k) => ({
           keyId: k.keyId,
           privateKey: Array.from(k.keyPair.privateKey),
@@ -390,25 +594,72 @@ export class PreKeyManager {
         })),
       });
 
-      if (this.encryptionKey) {
-        if (ikData) localStorage.setItem(IK_KEY, await encryptValue(this.encryptionKey, ikData));
-        if (spkData) localStorage.setItem(SPK_KEY, await encryptValue(this.encryptionKey, spkData));
-        if (spkHistoryData) localStorage.setItem(SPK_HISTORY_KEY, await encryptValue(this.encryptionKey, spkHistoryData));
-        localStorage.setItem(OPK_KEY, await encryptValue(this.encryptionKey, opkData));
-      } else {
-        if (ikData) localStorage.setItem(IK_KEY, ikData);
-        if (spkData) localStorage.setItem(SPK_KEY, spkData);
-        if (spkHistoryData) localStorage.setItem(SPK_HISTORY_KEY, spkHistoryData);
-        localStorage.setItem(OPK_KEY, opkData);
+      // Refused rather than written in the clear, and the failure is loud. This used to fall through to storing
+      // the identity key pair and every prekey as raw JSON, so a save with no key available would have put
+      // the account's private signing and agreement keys into `localStorage` in the clear.
+      //
+      // Unlike the session manager's version of this, it was never reachable either: `initialize()` - the
+      // only thing that populates the state - is called after `init()` has set the key, and `destroy()`
+      // leaves the key in place. But this manager is the one that *does* expose `initialize()` as a public
+      // method, so the ordering that protects it is a fact about two call sites rather than something the
+      // class enforces. A leaked identity key is not a lost conversation, it is the thing that would let
+      // somebody else read as this account, so the refusal is not optional.
+      if (!this.encryptionKey) {
+        console.error('[signal] refusing to persist prekey material unencrypted; discarding instead');
+        localStorage.removeItem(this.ikKey);
+        localStorage.removeItem(this.spkKey);
+        localStorage.removeItem(this.spkHistoryKey);
+        localStorage.removeItem(this.opkKey);
+        return;
       }
+      if (ikData) localStorage.setItem(this.ikKey, await encryptValue(this.encryptionKey, ikData));
+      // Four awaits, so four chances for `destroy()` to land mid-write. Checked once here and then again
+      // before the last write, because a partial set of keys belonging to a torn-down manager is worse than
+      // none: it is a store that will not open under any password.
+      if (generation !== this.generation) return;
+      if (spkData) localStorage.setItem(this.spkKey, await encryptValue(this.encryptionKey, spkData));
+      if (spkHistoryData) localStorage.setItem(this.spkHistoryKey, await encryptValue(this.encryptionKey, spkHistoryData));
+      if (generation !== this.generation) return;
+      localStorage.setItem(this.opkKey, await encryptValue(this.encryptionKey, opkData));
     } catch (e) {
       console.error('[signal] failed to persist prekey material:', e);
     }
   }
 
   destroy(): void {
+    // Invalidates the promise chain, not just the timers. See `generation`.
+    this.generation++;
     if (this.saveTimeout) clearTimeout(this.saveTimeout);
     if (this.rotationTimer) clearInterval(this.rotationTimer);
+    // The in-memory material goes with them. This is "turn every key off" and "sign out", and it is the whole
+    // reason `App.tsx`'s `logout()` calls `stopSignalState()`: without it the previous account's private
+    // identity key, prekeys and every chain key stayed loaded for whoever signed in next, in a tab that
+    // looked signed out.
+    this.clearMaterial();
+  }
+
+  /**
+   * The store this manager would write, as `[key, value]` pairs.
+   *
+   * For `rekeySignalState`, which has to roll *both* stores back together: each manager's own `rekey`
+   * restores only its own half, which is what let a failure in the second one leave the first committed.
+   */
+  storageSnapshot(): [string, string | null][] {
+    return [
+      [this.prekeySaltKey, localStorage.getItem(this.prekeySaltKey)],
+      [this.ikKey, localStorage.getItem(this.ikKey)],
+      [this.spkKey, localStorage.getItem(this.spkKey)],
+      [this.spkHistoryKey, localStorage.getItem(this.spkHistoryKey)],
+      [this.opkKey, localStorage.getItem(this.opkKey)],
+    ];
+  }
+
+  /** Puts back a `storageSnapshot`, including removing keys that were not there. */
+  restoreStorage(snapshot: [string, string | null][]): void {
+    for (const [key, value] of snapshot) {
+      if (value === null) localStorage.removeItem(key);
+      else localStorage.setItem(key, value);
+    }
   }
 
   initialize(): void {
@@ -419,7 +670,9 @@ export class PreKeyManager {
       this.identityKeyPair.ed25519PrivateKey,
       1
     );
+    this.nextOpkKeyId = 1;
     this.oneTimePreKeys = generateOneTimePreKeys(1, MAX_ONE_TIME_PREKEYS);
+    this.nextOpkKeyId = MAX_ONE_TIME_PREKEYS + 1;
 
     this.save();
     this.startRotationTimer();
@@ -467,10 +720,6 @@ export class PreKeyManager {
     return this.oneTimePreKeys.find((k) => k.keyId === keyId);
   }
 
-  
-  
-  
-  
   private selectPublishedOpk(): PreKeyRecord | null {
     if (this.publishedOpkKeyId != null) {
       const existing = this.oneTimePreKeys.find((k) => k.keyId === this.publishedOpkKeyId);

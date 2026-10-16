@@ -177,6 +177,12 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Allows the page to answer the desktop shell's \"an update is ready\" prompt.\n\nThis is the whole of the app's web-facing API surface. It is deliberately narrow: it can only answer the\nquestion the updater is currently asking, and the Rust side ignores an answer that arrives while no\nquestion is open.\n",
+          "type": "string",
+          "const": "allow-set-update-consent",
+          "markdownDescription": "Allows the page to answer the desktop shell's \"an update is ready\" prompt.\n\nThis is the whole of the app's web-facing API surface. It is deliberately narrow: it can only answer the\nquestion the updater is currently asking, and the Rust side ignores an answer that arrives while no\nquestion is open.\n"
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",

@@ -6,6 +6,19 @@ on:
   pull_request:
     branches: [main]
 
+# Read-only, and said so here rather than left to whatever the repository or organisation default happens
+# to be. Every step in this file reads files: the token needs no write scope to check out, build, test or
+# upload a trace. Declared at workflow level so a job added later cannot quietly inherit more than the file
+# needs; a job that does need more raises its own.
+permissions:
+  contents: read
+
+# Two pushes twenty seconds apart should not both build the same commit. Mirrors `binaries.yml`, which had
+# this already - the queue of stale runs is the cheaper failure of the two.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
@@ -27,6 +40,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
             librsvg2-dev libssl-dev build-essential pkg-config
+          # continue-on-error means a partial install is a green step, and the crate check three steps later
+          # then fails on a missing pkg-config entry with a message about this repository rather than about
+          # apt. Named here so the cause is one scroll up instead of a link in a build-script log.
+          pkg-config --exists webkit2gtk-4.1 || \
+            echo "::warning::webkit2gtk-4.1 is not available; the desktop crate check below will fail for that reason"
 
       - name: Use Node.js ${{ matrix.node-version }}
         uses: actions/setup-node@v5
@@ -64,6 +82,14 @@ jobs:
         # not be merged on the strength of a passing check.
         run: cargo check --manifest-path src-tauri/Cargo.toml
 
+      - name: Test the desktop crate
+        # `cargo check` only proves it compiles. The update signature check lives here, and the failure it
+        # guards against is silent: if the signer and the verifier drift apart - a different encoding, a
+        # different key constant, signing the archive instead of the digest - every published update is
+        # refused, and to a user that looks exactly like an attack succeeding. A test that exercises both
+        # halves together is the only thing that catches it, and without this line nobody runs it.
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
+
       - name: Browser tests
         # The one job that renders anything. Everything above tests modules, which is how a React effect
         # that never fires, or a message sealed correctly and then displayed from the wrong field, passes
@@ -71,17 +97,25 @@ jobs:
         # X3DH handshake and the decrypt for real.
         run: |
           npx playwright install --with-deps chromium
-          npm run build:client
+          # no second `npm run build:client`: the "Build client" step above already produced dist/client,
+          # the same job, minutes earlier, and the build is deterministic enough that repeating it only
+          # doubled the time this job spent on it.
           npm run test:e2e
 
       - name: Upload browser test traces
         # only ever present on failure, and useless without being kept
+        #
+        # One day, not seven. A Playwright trace is a zip of per-frame network logs, and it carries request
+        # headers, cookies and localStorage — so this suite's traces contain auth tokens, prekey bundles and
+        # the decrypted bodies of the two accounts it signs in as. That is the material the rest of this
+        # repository exists to keep off servers other than the two ends of a conversation, and a repo with a
+        # public download button on its own front page is not somewhere to leave it lying around for a week.
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-traces
           path: test-results/
-          retention-days: 7
+          retention-days: 1
 
       - name: Audit shipped dependencies
         # Only what actually gets shipped and runs on a server or a phone. A DoS in a glob parser that
@@ -95,3 +129,26 @@ jobs:
         # the build: the remaining advisories are all under tailwindcss, and clearing them means a
         # semver-major upgrade of the styling toolchain.
         run: npm audit --audit-level=high || true
+
+  # `npm audit` above answers "what is wrong with the tree as it is". This answers the question a pull
+  # request actually raises: what is this change *adding*. A PR that brings in a package with a known high
+  # advisory satisfies every step above - the audit still passes, because it only reports what is already in
+  # the lockfile - and the advisory lands on main that way.
+  #
+  # NOT REPORTED AS A MANUAL ITEM, unlike the action SHA pinning (4.2): this job is added pinned to a tag,
+  # which is the same weakness every other `uses:` line in these files has, and the alternative - leaving
+  # the gate out until somebody can look up a commit SHA - leaves the gap open. A tag is at least reviewable
+  # in the diff; an invented SHA would not resolve and would break CI permanently. Fix them together.
+  dependency-review:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Review the dependency changes in this pull request
+        uses: actions/dependency-review-action@v4
+        with:
+          # high and critical only, to match `npm audit --audit-level=high` above. Defaulting to every
+          # severity would fail the build on the low findings this repository already has, which is the
+          # fastest way to a gate everybody ignores.
+          fail-on-severity: high

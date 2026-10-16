@@ -39,6 +39,9 @@ let generation = 0;
 export function setOwnMessageCachePassword(next: string): void {
   if (next === password) return;
   generation++;
+  // the queued write belongs to the account that is being left, so it is dropped rather than fired against
+  // the new one's key
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   password = next || '';
   if (password) {
     // a different password means whatever is on disk was written under the old one
@@ -52,32 +55,71 @@ export function setOwnMessageCachePassword(next: string): void {
 }
 
 async function hydrate(withPassword: string): Promise<void> {
+  const mine = generation;
   const stored = await secureGet<Record<string, string>>(STORAGE_KEY, withPassword);
   if (!stored) return;
+  // The derivation this waited on is six hundred thousand iterations - seconds - and a sign-out in the
+  // middle of one used to be undone the moment it resolved: the map was repopulated with the words of an
+  // account nobody was signed in to any more. `persist` checks the generation for exactly this reason on
+  // the way to disk; the read needs it too, for the same reason.
+  if (mine !== generation) return;
   for (const [id, text] of Object.entries(stored)) {
     if (isValidClientMessageId(id) && typeof text === 'string') memory.set(id, text);
   }
 }
 
 let pending: Promise<void> = Promise.resolve();
+/** Counts every mutation, so a write can tell whether anything happened while it was in flight. */
+let changes = 0;
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * Queues one write a second behind the last change.
+ *
+ * Sending used to queue a write unconditionally, one per message. `persist` reads the map when it runs, so
+ * twenty messages in a row queued twenty sequential writes of the *same* latest snapshot - and each one
+ * costs a full 600,000-iteration derivation. `drafts.ts` has debounced exactly this shape for exactly this
+ * reason; this box is written on the same keystroke-heavy path and had not been given it.
+ */
+function schedulePersist(): void {
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    pending = pending.then(persist, persist);
+  }, 1000);
+}
 
 async function persist(): Promise<void> {
   if (!password || !dirty) return;
-  dirty = false;
   const withPassword = password;
   const mine = generation;
+  const at = changes;
   const all: Record<string, string> = {};
   // insertion order is the oldest-first order the map keeps, so the tail is the most recent
   const entries = [...memory.entries()];
   for (const [id, text] of entries.slice(Math.max(0, entries.length - MAX_ENTRIES))) all[id] = text;
-  await secureSet(STORAGE_KEY, withPassword, all);
+  const saved = await secureSet(STORAGE_KEY, withPassword, all);
   // the account changed while the key was being derived: the box has already been cleared, and putting
   // it back would undo the sign-out that just happened
-  if (mine !== generation) await secureRemove(STORAGE_KEY);
+  if (mine !== generation) {
+    await secureRemove(STORAGE_KEY);
+    return;
+  }
+  // The flag is given up only once the box actually holds this snapshot, and only if nothing was added
+  // while it was being written. `secureSet` used to report nothing at all, so a quota error was
+  // indistinguishable from a successful write: `dirty` went false on the way in, the message was gone,
+  // and nothing was left to retry from. A message the sender can no longer read back is exactly the
+  // failure this box exists to prevent, so it is not left to chance either way.
+  if (saved && changes === at) dirty = false;
+  else if (!saved && changes === at) schedulePersist();
 }
 
 /** Waits for the write in flight, which is what a sign-out or a test needs before it moves on. */
 export function flushOwnMessageCache(): Promise<void> {
+  // a queued write is the same as one in flight, and both have to be flushed before anything that reads
+  // the box back - so this is the escape hatch out of the debounce rather than a second code path
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
+  pending = pending.then(persist, persist);
   return pending;
 }
 
@@ -157,10 +199,11 @@ export function rememberOwnMessageText(id: string, text: string): void {
     const keys = [...memory.keys()];
     for (const k of keys.slice(0, keys.length - MAX_ENTRIES)) memory.delete(k);
   }
+  changes++;
   dirty = true;
-  // writes are chained rather than fired in parallel: two concurrent writes would race on the box, and
-  // the slower of the two could land first and lose the newer messages
-  pending = pending.then(persist, persist);
+  // debounced, and chained when it does run: two writes at once would race on the box, and the slower of
+  // the two could land first and lose the newer messages
+  schedulePersist();
 }
 
 export function recallOwnMessageText(id: unknown): string | null {
@@ -169,8 +212,17 @@ export function recallOwnMessageText(id: unknown): string | null {
 }
 
 export function forgetOwnMessages(): void {
+  // First, because this is the box being emptied on the way out of an account, and `persist` decides
+  // whether to write by comparing the generation it captured against the current one. Without the bump, a
+  // write that was already inside `secureSet` came back afterwards, found the generation unchanged, and
+  // put the signed-out account's outgoing plaintext straight back into storage. `App.tsx` happened to call
+  // `setOwnMessageCachePassword('')` in the same synchronous block, which masked it - but this is the
+  // function whose contract is "forget them", and it was not holding up its end of that on its own.
+  generation++;
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   memory.clear();
   dirty = false;
+  changes++;
   secureRemove(STORAGE_KEY);
 }
 
@@ -184,6 +236,8 @@ export function forgetOwnMessages(): void {
  */
 export function rekeyOwnMessageCache(newPassword: string): Promise<void> {
   generation++;
+  // any queued write is under the old password and has to go, not wait its turn behind this
+  if (saveTimer) { clearTimeout(saveTimer); saveTimer = null; }
   password = newPassword;
   if (!newPassword) {
     memory.clear();

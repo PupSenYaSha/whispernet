@@ -122,8 +122,16 @@ describe('an admin banning themselves', () => {
     expect(byNick.payload.code).toBe('FORBIDDEN');
 
     // the connection was not dropped, and signing in again still works
+    //
+    // On a *fresh* connection. A socket that already holds an account now refuses a second `auth_login`
+    // rather than re-authenticating as somebody else, which used to leave two `clients` registry entries
+    // pointing at one socket - every later broadcast delivered to it twice, and one of the account's three
+    // session slots spent without the owner ever seeing a device appear. So this asserts what it means to
+    // assert - that the account is not banned - by signing in the way a client actually does.
     admin.clear();
-    const again = await admin.login(nick);
+    const fresh = new TestClient(server.url, 'selfban-again');
+    clients.push(fresh);
+    const again = await fresh.login(nick);
     expect(again.type, 'the account was banned by its own administrator').toBe('auth_success');
   });
 

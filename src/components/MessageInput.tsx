@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useConnection } from '../context';
-import { mediaErrorKey, MAX_UPLOAD_BYTES } from '../upload';
+import { mediaErrorKey, isAbortError, MAX_UPLOAD_BYTES } from '../upload';
 import { MAX_MESSAGE_CHARS } from '../limits';
-import { getDraft, setDraft } from '../drafts';
+import { getDraft, setDraft, subscribeDrafts } from '../drafts';
 
 /**
  * Where the half-typed message for a conversation is kept.
@@ -64,6 +64,28 @@ export function MessageInput() {
   // the composer is an uncontrolled textarea, so React reuses the same node when the channel
   // changes: without this a half typed message would follow the user into the next chat
   const channelRef = useRef(dmTarget || 'general');
+
+  /**
+   * Puts a saved draft back in the box, if there is one and nothing has been typed since.
+   *
+   * Called twice over: once when the conversation changes, and once when the encrypted box finishes
+   * opening. The second call is the one that used to not exist - `hydrate` is behind a 600,000-iteration
+   * derivation, so switching to a chat during it found an empty tab, showed an empty composer, and the
+   * next keystroke wrote over the draft on disk without it ever having been shown.
+   */
+  const restoreDraft = useCallback((next: string) => {
+    const restored = getDraft(next);
+    if (!restored) return;
+    const ta = textareaRef.current;
+    // something has been typed and not sent: that is newer than anything in storage, and overwriting it
+    // would lose what the user believes is still there
+    if (!ta || ta.value.trim()) return;
+    ta.value = restored;
+    setHasText(restored.trim().length > 0);
+    ta.style.height = 'auto';
+    ta.style.height = Math.min(ta.scrollHeight, 120) + 'px';
+  }, []);
+
   useEffect(() => {
     const next = dmTarget || 'general';
     if (channelRef.current === next) return;
@@ -71,13 +93,11 @@ export function MessageInput() {
     setDraft(draftKey(channelRef.current), textareaRef.current?.value || '');
     channelRef.current = next;
     clearComposer();
-    const restored = getDraft(next);
-    if (restored && textareaRef.current) {
-      textareaRef.current.value = restored;
-      setHasText(restored.trim().length > 0);
-      autoResize();
-    }
-  }, [dmTarget, clearComposer]);
+    restoreDraft(next);
+  }, [dmTarget, clearComposer, restoreDraft]);
+
+  // the draft for a conversation already open arrives after this composer mounted, so it needs a nudge
+  useEffect(() => subscribeDrafts(() => restoreDraft(channelRef.current)), [restoreDraft]);
 
   // the draft follows what is typed, and is dropped when the message actually goes
   const onComposerChange = (value: string) => {
@@ -104,8 +124,20 @@ export function MessageInput() {
     if (!val || !isConnected) return;
     if (val.length > MAX_MESSAGE_CHARS) { setError(t('message_too_long')); return; }
     if (isEditing && editingTarget) {
-      if (val !== editingTarget.text) editMessage(editingTarget.id, val);
-      clearComposer();
+      // The correction is what they typed, so an unchanged box has nothing to send: just stop editing.
+      if (val === editingTarget.text) { clearComposer(); return; }
+      // the same guard the send path has, because a correction waits on the peer's key and on the ratchet
+      // exactly as a send does
+      setSending(true);
+      setError(null);
+      try {
+        // and the composer is only emptied once the correction is actually out. It used to clear itself
+        // unconditionally over a fire-and-forget send, so a lost edit looked exactly like a sent one.
+        if (await editMessage(editingTarget.id, val)) clearComposer();
+        else setError(t('edit_failed'));
+      } finally {
+        setSending(false);
+      }
       return;
     }
     setSending(true);
@@ -123,7 +155,6 @@ export function MessageInput() {
       setSending(false);
     }
   };
-
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -148,7 +179,10 @@ export function MessageInput() {
         await sendImage(file);
       }
     } catch (e) {
-      setError(t(mediaErrorKey(e)));
+      // a cancelled upload is not a failure: the user stopped it, or signing out did, and being told
+      // "upload failed" about something they abandoned themselves is noise that trains them to ignore the
+      // message that actually matters
+      if (!isAbortError(e)) setError(t(mediaErrorKey(e)));
     }
     setUploading(false);
   };

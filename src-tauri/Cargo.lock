@@ -4070,6 +4070,7 @@ version = "1.0.0"
 dependencies = [
  "hex",
  "percent-encoding",
+ "ring",
  "serde",
  "serde_json",
  "sha2",

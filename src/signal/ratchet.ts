@@ -53,7 +53,7 @@ export function buildHeader(transcriptHash: Uint8Array, ratchetPublicKey: Uint8A
 
 export function createRatchetState(): SessionState {
   return {
-    version: 3,
+    version: 4,
     registrationId: 0,
     currentRatchetPublicKey: null,
     rootKey: new Uint8Array(32),
@@ -72,6 +72,10 @@ export function createRatchetState(): SessionState {
     remoteIdentityKey: null,
     previousSendingRatchetPublicKey: null,
     previousSendingSkippedKeys: new Map(),
+    // the receiving-side window of the chain stepped off; see SessionState
+    previousReceivingRatchetPublicKey: null,
+    previousReceivingChainLength: 0,
+    previousReceivingSkippedKeys: new Map(),
     sentMessageKeys: new Map(),
   };
 }
@@ -106,6 +110,12 @@ export function cloneSessionState(state: SessionState): SessionState {
     previousSendingSkippedKeys: new Map(
       [...state.previousSendingSkippedKeys.entries()].map(([n, k]) => [n, k.slice()])
     ),
+    previousReceivingRatchetPublicKey: state.previousReceivingRatchetPublicKey
+      ? state.previousReceivingRatchetPublicKey.slice()
+      : null,
+    previousReceivingSkippedKeys: new Map(
+      [...state.previousReceivingSkippedKeys.entries()].map(([n, k]) => [n, k.slice()])
+    ),
     sentMessageKeys: new Map(
       [...state.sentMessageKeys.entries()].map(([n, k]) => [n, k.slice()])
     ),
@@ -119,8 +129,18 @@ export function cloneSessionState(state: SessionState): SessionState {
  * window of them for exactly that. Beyond the window a message is treated as lost, which is the right
  * answer: the envelope copy of the same message is still readable, and holding ratchet state for every
  * message ever sent would be holding the keys that open them.
+ *
+ * 256 rather than the 2000 `MAX_SKIP` allows, and the bound is about *how much can be in flight* rather
+ * than about how much history exists. Nothing here has a send window of 2000 messages: the app's transport
+ * is one websocket and the receiver is a human reading a conversation, so the number of this side's
+ * messages that can plausibly still be travelling when the peer ratchets is bounded by the gap between the
+ * two directions, which is small. Meanwhile the 2000 figure was being paid for twice over: every key is
+ * serialised as ~135 bytes of JSON on every save, `previousSendingSkippedKeys` takes the *whole* map on
+ * every step, and 200 sessions at that size does not fit in a 5-10 MB `localStorage`. Eight busy
+ * conversations used to be enough to take the whole account past quota - at which point `doSave` caught
+ * the error and gave up, silently, for every conversation.
  */
-export const MAX_SENT_KEYS_RETAINED = 2000;
+export const MAX_SENT_KEYS_RETAINED = 256;
 
 /** Records the key used for a message on the chain currently being sent on. */
 export function recordSentMessageKey(state: SessionState, messageNumber: number, messageKey: Uint8Array): void {
@@ -203,6 +223,9 @@ export function advanceReceivingChain(
 ): Uint8Array | null {
   if (!state.receivingChainKey) return null;
 
+  // A number behind the counter is a message that arrived early or out of order, and its key is held. Note
+  // that the check is against the *live* counter only: a body naming the chain this side has stepped off is
+  // looked up before this is reached, in `takePreviousReceivingKey`, which is why it can afford to be here.
   if (messageNumber < state.receivingMessageNumber) {
     const key = state.skippedMessageKeys.get(messageNumber);
     if (key) state.skippedMessageKeys.delete(messageNumber);
@@ -255,7 +278,17 @@ export function ratchetStep(
 
   state.sendingMessageNumber = 0;
   state.receivingMessageNumber = 0;
-  state.skippedMessageKeys.clear();
+  // Same window, receiving side: the keys derived on the chain being stepped off are moved rather than
+  // dropped, so a body that arrives late under the old ratchet key still opens. They were cleared here
+  // outright, which meant a peer that got ahead of us by a couple of messages and then ratcheted left
+  // those messages permanently unreadable - and `openOne` answers an unreadable ratchet body by resetting
+  // the session, so two late messages cost the whole conversation.
+  state.previousReceivingChainLength = state.receivingMessageNumber;
+  state.previousReceivingSkippedKeys = state.skippedMessageKeys;
+  state.previousReceivingRatchetPublicKey = state.receivingRatchetPublicKey
+    ? state.receivingRatchetPublicKey.slice()
+    : null;
+  state.skippedMessageKeys = new Map();
 
   const { rootKey, chainKey } = dhRatchet(
     state.rootKey,
@@ -300,6 +333,31 @@ export function takePreviousChainKey(
   const key = state.previousSendingSkippedKeys.get(messageNumber);
   if (!key) return null;
   state.previousSendingSkippedKeys.delete(messageNumber);
+  return key;
+}
+
+/**
+ * The message key for a body that belongs to the receiving chain this side has stepped off.
+ *
+ * The receiving-side twin of `takePreviousChainKey`, under the same three conditions - the header must
+ * name the chain being stepped off, the number must be inside the part of it that was read, and the key is
+ * deleted on the way out so one body cannot open twice. The length check matters for the same reason it does
+ * on the sending side: `previousReceivingChainLength` records how far the receiving counter had got, so a
+ * number beyond it is not a late message from this chain but a forged position, and a key would not be
+ * looked up for it anyway.
+ */
+export function takePreviousReceivingKey(
+  state: SessionState,
+  ratchetPublicKey: Uint8Array,
+  messageNumber: number
+): Uint8Array | null {
+  const previous = state.previousReceivingRatchetPublicKey;
+  if (!previous || messageNumber < 0 || messageNumber >= state.previousReceivingChainLength) return null;
+  if (previous.length !== ratchetPublicKey.length) return null;
+  if (!previous.every((v, i) => v === ratchetPublicKey[i])) return null;
+  const key = state.previousReceivingSkippedKeys.get(messageNumber);
+  if (!key) return null;
+  state.previousReceivingSkippedKeys.delete(messageNumber);
   return key;
 }
 

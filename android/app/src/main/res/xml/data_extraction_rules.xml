@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Android 12+ backup and device-to-device transfer rules.
+
+    Both are declined outright. This app holds a Signal identity key, an app-lock verifier, encrypted drafts
+    and a cache of decrypted messages, all of it inside the WebView's storage - and "encrypted at rest with
+    a key held by this device" is precisely the claim that uploading the directory to somebody else's cloud
+    would undermine. Auto Backup would have copied all of it to Google Drive, and on some builds
+    device-to-device transfer copies it to the receiving phone's Google account, which `allowBackup="false"`
+    alone does not always stop. This file is here so that a later build cannot quietly turn either one back
+    on by editing one attribute.
+
+    Losing the data is the intended cost: reinstalling means signing in again, which is what a messenger
+    should do.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" />
+        <exclude domain="file" />
+        <exclude domain="database" />
+        <exclude domain="sharedpref" />
+        <exclude domain="external" />
+    </device-transfer>
+</data-extraction-rules>

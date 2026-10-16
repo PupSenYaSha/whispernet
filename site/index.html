@@ -5,9 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>WhisperNet — Безопасный мессенджер</title>
   <meta name="description" content="Минималистичный мессенджер со сквозным шифрованием на базе Signal Protocol">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+  <!--
+    No webfont request, and that is the point rather than an omission. This is the page a stranger is most
+    likely to arrive on from a link, so its traffic pattern is the one that most identifies them as
+    somebody considering an encrypted messenger - and loading Inter from Google would hand Google the IP
+    and referrer of every visit, to say nothing of everyone behind the same connection. The application
+    makes exactly this argument in its own markup and ships four self-hosted Inter files to honour it; the
+    site was quietly contradicting it. It also never worked: the site's own CSP is `default-src 'self'`,
+    which blocks both the stylesheet and the inline `onload` that would have switched it on, so every
+    visitor has been reading this in the system fallback all along.
+  -->
   <link rel="stylesheet" href="style.css?v=2">
   <link rel="icon" type="image/png" href="favicon.png">
   <meta property="og:title" content="WhisperNet — Secure Messenger">
@@ -246,7 +253,15 @@
     </div>
   </section>
 
-  <!-- Download -->
+  <!--
+    Download.
+
+    Two things to update when the version is bumped, and they are easy to miss because nothing fails:
+    the locally served files under site/downloads/ (rebuild and copy them), and the three GitHub links
+    below, whose *asset filenames* embed the version even though the URL does not. `releases/latest/download`
+    is used rather than a tag so the URL itself never goes stale - GitHub redirects it to whatever is newest -
+    but the filename after it still has to match the asset the release actually publishes.
+  -->
   <section id="download" class="section">
     <div class="container">
       <h2 class="section-title" data-ru="Скачать" data-en="Download">Скачать</h2>
@@ -264,7 +279,7 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
               <span data-ru="Скачать" data-en="Download">Скачать</span>
             </a>
-            <a href="https://github.com/PupSenYaSha/whispernet/releases/download/v1.0.0/WhisperNet_1.0.0_x64-setup.exe" class="btn btn-sm btn-glass" target="_blank" rel="noopener noreferrer" download>GitHub</a>
+            <a href="https://github.com/PupSenYaSha/whispernet/releases/latest/download/WhisperNet_1.0.0_x64-setup.exe" class="btn btn-sm btn-glass" target="_blank" rel="noopener noreferrer" download>GitHub</a>
           </div>
         </div>
         <div class="download-card glass">
@@ -279,7 +294,7 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
               <span data-ru="Скачать" data-en="Download">Скачать</span>
             </a>
-            <a href="https://github.com/PupSenYaSha/whispernet/releases/download/v1.0.0/WhisperNet.apk" class="btn btn-sm btn-glass" target="_blank" rel="noopener noreferrer" download>GitHub</a>
+            <a href="https://github.com/PupSenYaSha/whispernet/releases/latest/download/WhisperNet.apk" class="btn btn-sm btn-glass" target="_blank" rel="noopener noreferrer" download>GitHub</a>
           </div>
         </div>
         <div class="download-card glass">
@@ -294,7 +309,7 @@
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
               <span data-ru="Скачать" data-en="Download">Скачать</span>
             </a>
-            <a href="https://github.com/PupSenYaSha/whispernet/releases/download/v1.0.0/WhisperNet_1.0.0_amd64.deb" class="btn btn-sm btn-glass" target="_blank" rel="noopener noreferrer" download>GitHub</a>
+            <a href="https://github.com/PupSenYaSha/whispernet/releases/latest/download/WhisperNet_1.0.0_amd64.deb" class="btn btn-sm btn-glass" target="_blank" rel="noopener noreferrer" download>GitHub</a>
           </div>
         </div>
       </div>

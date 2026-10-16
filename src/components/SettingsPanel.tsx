@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import type { AccentColor, Session } from '../types';
 import { useConnection } from '../context';
 import { cn } from '../utils';
@@ -91,9 +91,6 @@ function PrivacyNotice() {
     </div>
   );
 }
-
-
-
 
 /**
  * Turning the passcode on and off.
@@ -311,14 +308,29 @@ export function SettingsPanel({ onClose, closing, inline }: { onClose: () => voi
   >(null);
   const [banNick, setBanNick] = useState('');
   const [pendingBan, setPendingBan] = useState<string | null>(null);
-  const [banListOpen, setBanListOpen] = useState(false);
+const [banListOpen, setBanListOpen] = useState(false);
   const [keysNotice, setKeysNotice] = useState<string | null>(null);
   const [passwordOpen, setPasswordOpen] = useState(false);
+  const keysNoticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const screenshotProt = state.settings.screenshotProtection;
 const setScreenshotProt = useCallback((v: boolean) => {
-  updateSettings({ screenshotProtection: v });
-}, [updateSettings]);
+    updateSettings({ screenshotProtection: v });
+  }, [updateSettings]);
 
+  // the notice's own clock, or a settings panel closed inside 2.5 s left a timer behind calling
+  // setState on a component that is no longer there
+  useEffect(() => () => {
+    if (keysNoticeTimerRef.current) { clearTimeout(keysNoticeTimerRef.current); keysNoticeTimerRef.current = null; }
+  }, []);
+
+  const noticeFor = (text: string) => {
+    setKeysNotice(text);
+    if (keysNoticeTimerRef.current) clearTimeout(keysNoticeTimerRef.current);
+    keysNoticeTimerRef.current = setTimeout(() => {
+      keysNoticeTimerRef.current = null;
+      setKeysNotice(null);
+    }, 2500);
+  };
 
   const reportGroups = useMemo(() => {
     const map = new Map<string, { targetId: string; targetNick?: string; count: number; lastTimestamp: number; reasons: { reason: string; reporterNick?: string; channel: string; source?: 'profile' | 'message' }[] }>();
@@ -449,11 +461,10 @@ const setScreenshotProt = useCallback((v: boolean) => {
               onClick={async () => {
                 try {
                   await exportKeys();
-                  setKeysNotice(t('keys_exported'));
+                  noticeFor(t('keys_exported'));
                 } catch {
-                  setKeysNotice(t('keys_export_failed'));
+                  noticeFor(t('keys_export_failed'));
                 }
-                setTimeout(() => setKeysNotice(null), 2500);
               }}
               className="w-full py-2.5 rounded-xl border border-border-default text-fg-primary text-[13px] font-medium hover:bg-bg-tertiary transition-colors"
             >
@@ -654,6 +665,24 @@ const setScreenshotProt = useCallback((v: boolean) => {
     </div>
   );
 
+  /**
+   * Changing the password, rendered by both layouts.
+   *
+   * It lived inside the phone's settings page only, so on the desktop drawer - which is what `ChatArea`
+   * renders, and the layout nearly everybody uses - "Change" set a flag nothing read: no dialog, no error
+   * and no way to change the password at all. One instance, placed by each layout above it, at the `z-[70]`
+   * `ChangePasswordModal` already sits at.
+   */
+  const changePasswordModal = passwordOpen && (
+    <ChangePasswordModal
+      onCancel={() => setPasswordOpen(false)}
+      onChanged={() => {
+        setPasswordOpen(false);
+        noticeFor(t('password_changed'));
+      }}
+    />
+  );
+
   if (inline) {
     return (
       <div className="h-full flex flex-col bg-bg-secondary">
@@ -697,15 +726,7 @@ const setScreenshotProt = useCallback((v: boolean) => {
             onConfirm={() => { setConfirmAction(null); resetEncryptionIdentity(); window.location.reload(); }}
             onCancel={() => setConfirmAction(null)} />
         )}
-        {passwordOpen && (
-          <ChangePasswordModal
-            onCancel={() => setPasswordOpen(false)}
-            onChanged={() => {
-              setPasswordOpen(false);
-              setKeysNotice(t('password_changed'));
-            }}
-          />
-        )}
+        {changePasswordModal}
         {confirmAction?.kind === 'revokeSession' && (
           <ConfirmModal
             title={t('confirm_revoke_title')}
@@ -785,6 +806,8 @@ const setScreenshotProt = useCallback((v: boolean) => {
           }}
           onCancel={() => setConfirmAction(null)} />
       )}
+      {/* above the drawer and the backdrop, which are z-50 and z-40 */}
+      {changePasswordModal}
     </>
   );
 }

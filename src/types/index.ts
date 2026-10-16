@@ -49,6 +49,19 @@ export interface Message {
    * message had no text to show and rendered blank until the page was reloaded.
    */
   encrypted?: any;
+  /**
+   * The attachment key that came out of the sealed body, as `<iv>:<key>`.
+   *
+   * A private attachment carries its key inside the message text, which is stripped on the way in so that a
+   * quote bubble, a search result or a copy cannot carry a key into somebody else's chat. That stripped
+   * text is what `text` holds, so the key has to be kept somewhere else - and it used not to be kept
+   * anywhere, which meant `decryptMedia` looked for a marker that had already been removed and every
+   * private photo and video stayed a broken bubble showing its own ciphertext.
+   *
+   * Deliberately not part of `text`: this is the only copy, it is what opens the attachment, and nothing
+   * that renders or transmits the message should ever see it.
+   */
+  fileKeyEntry?: string;
   /** The sender's own stamp on an outgoing direct message, used to match the local copy of the text. */
   clientId?: string;
 }
@@ -111,7 +124,6 @@ export interface AppSettings {
   /** Milliseconds between echoes of a conversation being read, if the reader ever looks away. */
   readReceiptsDelayMs: number;
 }
-
 
 declare global {
   interface Window {

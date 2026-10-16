@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { startTestServer, TestClient, uniqueNick, type StartedServer } from '../helpers';
+import { saveMessage, deleteMessage, cleanupExpiredMessages } from '../../server/database';
 
 let server: StartedServer;
 const clients: TestClient[] = [];
@@ -185,6 +186,63 @@ describe('message length ceilings', () => {
     a.send('chat_message', { text: 'quoting you', quoted: { id: priv.payload.id, text: 'anything', sender: 'x' } });
     const got = await b.waitFor('chat_message');
     expect(got.payload.quotedMessageText ?? null).toBeNull();
+  });
+});
+
+describe('the search index itself', () => {
+  /**
+   * What search actually reads.
+   *
+   * The test above — "removes the entry from the index after the message is deleted" — passed for two
+   * years while the index kept every deleted message, because `searchMessages` falls back to an `instr()`
+   * scan whenever the index path yields nothing. A stale index entry makes the FTS query return a rowid,
+   * the join to `messages` then comes back empty, the code reads that as "no results" and falls through to
+   * the fallback, which correctly finds nothing either. The user-visible answer was right; the index was
+   * not, and it was accumulating plaintext of deleted messages on disk forever.
+   *
+   * Nothing above could see that, so this asks the index directly.
+   */
+  const indexed = async (marker: string): Promise<boolean> => {
+    const { getDb } = await import('../../server/database');
+    return getDb()
+      .prepare('SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?')
+      .all(`"${marker}"`).length > 0;
+  };
+
+  it('drops the entry when a message is deleted', async () => {
+    const marker = 'zzqidxdel' + Date.now();
+    await saveMessage('idx-del', 'idx-user', 'idxuser', 'body ' + marker, Date.now());
+    expect(await indexed(marker)).toBe(true);
+
+    await deleteMessage('idx-del', 'idx-user');
+
+    expect(await indexed(marker), 'the text of a deleted message is still searchable in the index').toBe(false);
+  });
+
+  it('drops the entry when a message is swept away', async () => {
+    const marker = 'zzqidxexp' + Date.now();
+    await saveMessage('idx-exp', 'idx-user', 'idxuser', 'body ' + marker, Date.now(), undefined, 'general', undefined, undefined, undefined, Date.now() - 60_000);
+    expect(await indexed(marker)).toBe(true);
+
+    await cleanupExpiredMessages();
+
+    expect(await indexed(marker)).toBe(false);
+  });
+
+  it('does not report the database as corrupt while tidying up', async () => {
+    // A contentless FTS5 table refuses a delete for a rowid it never indexed with SQLITE_CORRUPT, which
+    // reads as "database disk image is malformed". Rows written straight into `messages` — by the legacy
+    // JSON migration, or by a test seeding the table — are in exactly that position, and the sweep used to
+    // print one of these per message. Caught by asserting the call completes without throwing.
+    const { getDb } = await import('../../server/database');
+    const d = getDb();
+    d.prepare('DELETE FROM messages').run();
+    d.prepare(
+      `INSERT INTO messages (id, sender_id, sender_nickname, text, timestamp, channel, expires_at)
+       VALUES (?, 'raw-user', 'rawuser', ?, ?, 'general', ?)`,
+    ).run('raw-1', 'never indexed by saveMessage', Date.now(), Date.now() - 60_000);
+
+    await expect(cleanupExpiredMessages()).resolves.toBeTypeOf('number');
   });
 });
 

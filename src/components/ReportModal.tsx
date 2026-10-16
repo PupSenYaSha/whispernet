@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { createPortal } from 'react-dom';
 import type { AvatarUpdate } from '../types';
 import { useConnection } from '../context';
@@ -36,7 +36,6 @@ export function ReportModal({ targetId, targetNickname, avatar, messageId, onClo
   const { state, dispatch, t, reportUser, closeReport } = useConnection();
   const [reason, setReason] = useState<string>('');
   const [comment, setComment] = useState('');
-  const pendingRef = useRef(false);
 
   const status = state.reportStatus;
   const done = status === 'sent';
@@ -50,7 +49,7 @@ export function ReportModal({ targetId, targetNickname, avatar, messageId, onClo
 
   // without this the button stayed on "Sending…" for good when the answer never came
   useEffect(() => {
-    if (status !== 'pending') { pendingRef.current = false; return; }
+    if (status !== 'pending') return;
     const timer = setTimeout(() => dispatch({ type: 'SET_REPORT_STATUS', status: 'failed' }), SUBMIT_TIMEOUT_MS);
     return () => clearTimeout(timer);
   }, [status, dispatch]);
@@ -63,7 +62,6 @@ export function ReportModal({ targetId, targetNickname, avatar, messageId, onClo
       dispatch({ type: 'SET_REPORT_STATUS', status: 'failed' });
       return;
     }
-    pendingRef.current = true;
     dispatch({ type: 'SET_REPORT_STATUS', status: 'pending' });
   };
 

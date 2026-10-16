@@ -5,8 +5,20 @@ import type { PreKeyBundle, KeyPair, SignalPreKeyMessage } from './types';
 const preKeyManager = new PreKeyManager();
 const sessionManager = new SessionManager();
 
-export async function initSessionManager(password: string): Promise<void> {
-  await sessionManager.init(password);
+/**
+ * The account whose key material the two managers currently hold, and the reason the stores are namespaced.
+ *
+ * Both managers are module singletons, so a second sign-in in the same tab re-initialises the same objects.
+ * Without an account id they would look at the same two `localStorage` keys whatever account was signed in,
+ * which is how a second account's sign-in ended up deleting the first account's session store and
+ * publishing the first account's identity key. Recorded here only for the comment's sake; the managers carry
+ * their own.
+ */
+let accountId = '';
+
+export async function initSessionManager(password: string, forAccountId = accountId): Promise<void> {
+  accountId = forAccountId;
+  await sessionManager.init(password, forAccountId);
   sessionManager.startCleanupTimer();
 }
 
@@ -36,19 +48,49 @@ export async function rekeySignalState(newPassword: string): Promise<void> {
 }
 
 /** Installs the listeners. Called once, after the managers are ready. */
+let removeFlushHandlers: (() => void) | null = null;
+
 export function installSignalFlushHandlers(): () => void {
   if (typeof window === 'undefined') return () => {};
+  // one set at a time: a second sign-in in the same tab used to leave the first set attached, so every
+  // page exit wrote the state twice
+  removeFlushHandlers?.();
   const onLeave = () => flushSignalState();
   window.addEventListener('pagehide', onLeave);
   window.addEventListener('beforeunload', onLeave);
   window.addEventListener('blur', onLeave);
   document.addEventListener('visibilitychange', onLeave);
-  return () => {
+  removeFlushHandlers = () => {
     window.removeEventListener('pagehide', onLeave);
     window.removeEventListener('beforeunload', onLeave);
     window.removeEventListener('blur', onLeave);
     document.removeEventListener('visibilitychange', onLeave);
+    if (removeFlushHandlers === uninstall) removeFlushHandlers = null;
   };
+  const uninstall = removeFlushHandlers;
+  return uninstall;
+}
+
+/**
+ * Stops the managers writing anything at all.
+ *
+ * For "turn every key off", which is not the same as signing out. The flush handlers exist so that a tab
+ * closed inside the write debounce does not lose ratchet state - unrecoverable, since the messages already
+ * sent under the discarded key can never be opened again by anybody. But they fire on `pagehide`, which is
+ * exactly what happens next in the recovery path: delete the keys, then reload. The flush cancelled the
+ * debounce, ran the write out at once with the live key still in hand, and put the whole identity key and
+ * every chain key straight back into localStorage, milliseconds after they had been deleted. Whether it
+ * won that race was down to how fast the browser got to the event.
+ *
+ * So the listeners come off first and the managers are told there is nothing to save. Anything that wants
+ * to write after this gets nothing written.
+ */
+export function stopSignalState(): void {
+  removeFlushHandlers?.();
+  removeFlushHandlers = null;
+  sessionManager.stopCleanupTimer();
+  sessionManager.destroy();
+  preKeyManager.destroy();
 }
 
 export async function initPreKeyManager(password: string): Promise<void> {
@@ -65,13 +107,10 @@ export function getMyIdentityKeyPair(): KeyPair | null {
   return { privateKey: ik.privateKey, publicKey: ik.publicKey };
 }
 
-
-
 export function getMyIdentityKeyBase64(): string | null {
   const ik = preKeyManager.getIdentityKeyPair();
   return ik ? arrayToBase64(ik.publicKey) : null;
 }
-
 
 export function bytesToBase64(bytes: Uint8Array): string {
   return arrayToBase64(bytes);
@@ -80,9 +119,6 @@ export function bytesToBase64(bytes: Uint8Array): string {
 export function base64ToBytes(b64: string): Uint8Array {
   return base64ToArray(b64);
 }
-
-
-
 
 export function decodeServerBundle(raw: any): PreKeyBundle | null {
   if (!raw || typeof raw !== 'object') return null;
@@ -115,15 +151,12 @@ export function decodeServerBundle(raw: any): PreKeyBundle | null {
   return bundle;
 }
 
-
 export function getPeerIdentityKeyBase64(bundle: any): string | null {
   if (!bundle) return null;
   if (typeof bundle.identityKey === 'string') return bundle.identityKey;
   const bytes = toBytes(bundle.identityKey);
   return bytes ? arrayToBase64(bytes) : null;
 }
-
-
 
 export function serializeX3dhMessage(msg: any): any {
   if (!msg) return msg;
@@ -176,7 +209,7 @@ function toBytes(value: any): Uint8Array | null {
   if (typeof value === 'string') return base64ToArray(value);
   if (value instanceof Uint8Array) return value;
   if (Array.isArray(value)) return Uint8Array.from(value);
-  
+
   if (typeof value === 'object') {
     const n = Object.keys(value).length;
     if (n === 0) return new Uint8Array(0);
@@ -231,8 +264,14 @@ export function createSessionWithRemote(
  * Held here rather than spent on arrival, because spending it is irreversible: a body that turns out to
  * be forged must not cost the account a key. `commitResponderPreKey` spends it, and it is only called
  * once the first message has actually opened.
+ *
+ * Keyed by conversation, not kept in one slot. It used to be a single variable, so two handshakes in
+ * flight at once - which happens whenever two people who have never written to each other both send their
+ * first message, and neither has opened it - overwrote each other. The first conversation to be committed
+ * then spent the second one's key, marking a prekey consumed that its own handshake had never borrowed,
+ * and leaving its own key marked available for a replay.
  */
-let pendingOneTimePreKeyId: number | null = null;
+const pendingOneTimePreKeys = new Map<string, number>();
 
 export function createResponderSession(
   myId: string,
@@ -256,11 +295,12 @@ export function createResponderSession(
   };
 
   let oneTimePreKey: KeyPair | null = null;
+  const sessionId = sessionManager.getSessionId(myId, remoteId);
   if (x3dhMessage.oneTimePreKey) {
     const borrowed = preKeyManager.peekOneTimePreKey(x3dhMessage.oneTimePreKey.keyId);
     if (borrowed) {
       oneTimePreKey = { privateKey: borrowed.keyPair.privateKey, publicKey: borrowed.keyPair.publicKey };
-      pendingOneTimePreKeyId = borrowed.keyId;
+      pendingOneTimePreKeys.set(sessionId, borrowed.keyId);
     }
   }
 
@@ -280,21 +320,25 @@ export function createResponderSession(
 }
 
 /**
- * Spends the borrowed one-time prekey, now that a message has opened under it.
+ * Spends the borrowed one-time prekey for a conversation, now that a message has opened under it.
  *
  * Until this runs the key is still in the account's supply, so a server replaying captured handshakes
  * gains nothing: each replay borrows a key, fails to produce a message that opens, and gives it back.
+ *
+ * Takes the conversation because the borrow belongs to it. With a single slot shared by every handshake,
+ * two conversations waiting to be committed would spend each other's keys - one prekey marked consumed that
+ * no message ever used, and one still available for a replay.
  */
-export function commitResponderPreKey(): void {
-  if (pendingOneTimePreKeyId == null) return;
-  const id = pendingOneTimePreKeyId;
-  pendingOneTimePreKeyId = null;
+export function commitResponderPreKey(sessionId: string): void {
+  const id = pendingOneTimePreKeys.get(sessionId);
+  if (id == null) return;
+  pendingOneTimePreKeys.delete(sessionId);
   preKeyManager.consumeOneTimePreKey(id);
 }
 
 /** Gives a borrowed key back when the handshake it was borrowed for did not open. */
-export function releaseResponderPreKey(): void {
-  pendingOneTimePreKeyId = null;
+export function releaseResponderPreKey(sessionId: string): void {
+  pendingOneTimePreKeys.delete(sessionId);
 }
 
 export function getRemoteIdentityStatus(sessionId: string, identityKey: Uint8Array | null | undefined): 'ok' | 'unknown' | 'changed' {
@@ -311,9 +355,6 @@ export function getSessionId(userId1: string, userId2: string): string {
   return sessionManager.getSessionId(userId1, userId2);
 }
 
-
-
-
 export function resetSession(userId1: string, userId2: string): void {
   sessionManager.deleteSession(sessionManager.getSessionId(userId1, userId2));
 }
@@ -322,14 +363,16 @@ export async function encryptWithSignal(
   sessionId: string,
   plaintext: string
 ): Promise<{ ciphertext: string; ratchetPublicKey: string; messageNumber: number }> {
-  const ciphertext = await sessionManager.encryptMessage(sessionId, plaintext);
-  const session = sessionManager.getSession(sessionId);
-  if (!session) throw new Error('No session');
+  // The header comes from the seal itself. It used to be read back off the session afterwards, which put
+  // the number on the wire at the mercy of anything that moved the counter in the meantime: a rekey from
+  // the cleanup timer reset it to zero, and the frame went out numbered -1 and was refused as out of order.
+  // Two sends racing - the device fan-out does exactly that - could also report each other's number.
+  const { ciphertext, messageNumber, ratchetPublicKey } = await sessionManager.encryptMessage(sessionId, plaintext);
 
   return {
     ciphertext: arrayToBase64(ciphertext),
-    ratchetPublicKey: arrayToBase64(session.state.currentRatchetPublicKey || new Uint8Array(0)),
-    messageNumber: session.state.sendingMessageNumber - 1,
+    ratchetPublicKey: arrayToBase64(ratchetPublicKey),
+    messageNumber,
   };
 }
 

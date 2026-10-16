@@ -4,6 +4,7 @@ import path from 'path';
 import os from 'os';
 import fs from 'fs';
 import crypto from 'crypto';
+import { searchSolution } from '../src/registerPow';
 
 const PASSWORD = 'pass123456';
 const INFO = 'vitest';
@@ -13,18 +14,28 @@ export interface StartedServer {
   url: string;
   port: number;
   dataDir: string;
-  stop: () => Promise<void>;
+  stop: (opts?: { keepData?: boolean }) => Promise<void>;
 }
 
-export async function startTestServer(env: Record<string, string> = {}): Promise<StartedServer> {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wn-test-'));
+export async function startTestServer(env: Record<string, string> = {}, opts: { dataDir?: string } = {}): Promise<StartedServer> {
+  // A caller can hand back the directory a previous server used, which is how a restart is tested: a fresh
+  // process against the same files, rather than a second database that happens to start empty.
+  const dataDir = opts.dataDir ?? fs.mkdtempSync(path.join(os.tmpdir(), 'wn-test-'));
   process.env.DATA_DIR = dataDir;
   process.env.DISABLE_RATE_LIMITS = '1';
   process.env.ADMIN_KEY = 'test-admin-key';
   // Tests that exercise the account creation budget set this themselves. Everything else gets a
   // generous number, so a test file that happens to create a dozen accounts is not refused partway
   // through for a reason it is not testing.
-  for (const [k, v] of Object.entries({ MAX_REGISTRATIONS_PER_IP: '1000', ...env })) process.env[k] = v;
+  // POW_BITS defaults low for the suite: a full-difficulty search is seconds, and several hundred
+  // registrations would turn the suite into a benchmark. It is not switched off - every registration still
+  // does real work and the real two-phase exchange, just far less of it.
+  // Every test client connects over loopback and says which address it is really from with
+  // `x-forwarded-for`, because a suite cannot give every case its own source address any other way. That
+  // header is only believed when TRUST_PROXY says there is a proxy in front - it used to be believed for a
+  // loopback peer, which is what let a client choose its own address - so the harness declares it here
+  // rather than each file having to. `tests/integration/proxy-trust.test.ts` covers the undeclared case.
+  for (const [k, v] of Object.entries({ MAX_REGISTRATIONS_PER_IP: '1000', MAX_ACCOUNTS_PER_DEVICE: '1000', POW_BITS: '8', TRUST_PROXY: '1', ...env })) process.env[k] = v;
   const distDir = path.resolve('dist/client');
   const { setDataDir, initializeDatabase } = await import('../server/database');
   setDataDir(dataDir);
@@ -38,8 +49,11 @@ export async function startTestServer(env: Record<string, string> = {}): Promise
     port,
     dataDir,
     url: `ws://127.0.0.1:${port}/ws`,
-    stop: async () => {
+    stop: async (opts: { keepData?: boolean } = {}) => {
       await app.close();
+      // `keepData` is for the restart test: the point is to come back to the same files, so the directory
+      // must outlive the process that opened it.
+      if (opts.keepData) return;
       try { fs.rmSync(dataDir, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); } catch { /* temp dir cleanup is best effort */ }
     },
   };
@@ -50,6 +64,8 @@ export class TestClient {
   ws!: WebSocket;
   /** The upload token the server issued on sign-in, kept so a test can upload as this account. */
   uploadToken = '';
+  /** The account id the server assigned, for tests that have to address a conversation at it. */
+  userId = '';
   private authResolve: ((m: any) => void) | null = null;
 
   constructor(private url: string, public label = 'client') { }
@@ -63,6 +79,7 @@ export class TestClient {
         const m = JSON.parse(data.toString());
         this.logs.push(m);
         if (m.type === 'auth_success' && typeof m.payload?.uploadToken === 'string') this.uploadToken = m.payload.uploadToken;
+        if (m.type === 'auth_success' && typeof m.payload?.userId === 'string') this.userId = m.payload.userId;
         if ((m.type === 'auth_success' || m.type === 'auth_failure' || m.type === 'twofactor_required') && this.authResolve) {
           this.authResolve(m);
           this.authResolve = null;
@@ -79,15 +96,49 @@ export class TestClient {
     return new Promise((r) => { this.authResolve = r; });
   }
 
+  /**
+   * Waits for the server to answer an authentication attempt, including a request for proof of work.
+   *
+   * A registration with no proof comes back as a challenge rather than a success or a refusal, and the
+   * suite should not have to notice: every test that registers an account goes through the real two-phase
+   * flow, which is the point of having it. Turning the proof off in tests would have been easier and would
+   * have left the default path with nothing covering it.
+   */
+  private waitAuthOrChallenge(): Promise<any> {
+    return new Promise((resolve) => {
+      this.authResolve = (m: any) => {
+        if (m.type !== 'auth_pow_challenge') resolve(m);
+      };
+      const poll = setInterval(() => {
+        const challenge = this.logs.find((x) => x.type === 'auth_pow_challenge');
+        if (challenge) { clearInterval(poll); resolve(challenge); }
+      }, 20);
+      setTimeout(() => { clearInterval(poll); resolve(null); }, 10000);
+    });
+  }
+
   private ensureOpen(): Promise<this> {
     return this.ws && this.ws.readyState === 1 ? Promise.resolve(this) : this.connect();
   }
 
   async register(nickname: string, extra: Record<string, any> = {}): Promise<any> {
     await this.ensureOpen();
-    const p = this.waitAuth();
-    this.send('auth_register', { nickname, password: PASSWORD, deviceId: 'd' + nickname + UNIQ, deviceInfo: INFO, ...extra });
-    return Promise.race([p, new Promise((_, rj) => setTimeout(() => rj(new Error('auth timeout ' + this.label)), 10000))]);
+    const payload = { nickname, password: PASSWORD, deviceId: 'd' + nickname + UNIQ, deviceInfo: INFO, ...extra };
+    const p = this.waitAuthOrChallenge();
+    this.send('auth_register', payload);
+    const res = await Promise.race([p, new Promise((_, rj) => setTimeout(() => rj(new Error('auth timeout ' + this.label)), 10000))]);
+    if (res?.type !== 'auth_pow_challenge') return res;
+
+    // Solve and try once more, on the same socket and with the same nickname and password, so the server
+    // sees exactly the frame a real client sends second.
+    const challenge = res.payload.challenge as string;
+    const bits = Number(res.payload.bits);
+    const nonce = searchSolution(challenge, bits);
+    if (nonce === null) return res;
+    this.authResolve = null;
+    const retry = this.waitAuth();
+    this.send('auth_register', { ...payload, powChallenge: challenge, powNonce: nonce });
+    return Promise.race([retry, new Promise((_, rj) => setTimeout(() => rj(new Error('auth timeout ' + this.label)), 10000))]);
   }
 
   async login(nickname: string, extra: Record<string, any> = {}): Promise<any> {
@@ -104,6 +155,26 @@ export class TestClient {
       const iv = setInterval(() => {
         const hit = this.logs.find((m) => m.type === type);
         if (hit) { clearInterval(iv); resolve(hit); }
+      }, 30);
+      setTimeout(() => { clearInterval(iv); resolve(null); }, timeout);
+    });
+  }
+
+  /**
+   * Waits for the first message matching any of the given types.
+   *
+   * For assertions that something must *not* arrive, where `waitFor` would only confirm the one type it was
+   * given. A negative assertion still needs to watch the socket: the failure mode this catches is traffic
+   * landing on the wrong connection, and proving it means proving it went somewhere else.
+   */
+  waitForAny(types: string[], timeout = 5000): Promise<any | null> {
+    const hit = () => this.logs.find((m) => types.includes(m.type));
+    const found = hit();
+    if (found) return Promise.resolve(found);
+    return new Promise((resolve) => {
+      const iv = setInterval(() => {
+        const h = hit();
+        if (h) { clearInterval(iv); resolve(h); }
       }, 30);
       setTimeout(() => { clearInterval(iv); resolve(null); }, timeout);
     });

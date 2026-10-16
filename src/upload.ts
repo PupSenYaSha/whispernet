@@ -42,12 +42,11 @@ export function mediaProxyUrl(remoteUrl: string): string {
 export async function uploadFile(
   blob: Blob,
   filename: string = 'encrypted.bin',
-  onProgress?: (percent: number) => void
+  onProgress?: (percent: number) => void,
+  signal?: AbortSignal
 ): Promise<string> {
   const form = new FormData();
-  
-  
-  
+
   const type = blob.type && blob.type !== 'application/octet-stream' ? blob.type : 'image/png';
   form.append('file', type === blob.type ? blob : new Blob([blob], { type }), filename);
 
@@ -56,6 +55,8 @@ export async function uploadFile(
   const res = await fetch('/api/upload', {
     method: 'POST',
     body: form,
+    // omitted when there is nothing to abort on, so nothing else about the request changes
+    ...(signal ? { signal } : {}),
     headers: uploadToken ? { 'X-WN-Upload-Token': uploadToken } : undefined,
   });
 
@@ -72,18 +73,40 @@ export async function uploadFile(
 }
 
 /**
+ * Whether a throw is the caller having cancelled, rather than something going wrong.
+ *
+ * `fetch` reports a cancellation as an `AbortError`, which is indistinguishable from a network failure if
+ * all the caller sees is the error. It matters because the two want opposite treatment: a failed upload
+ * should tell the user to try again, and a cancelled one should say nothing at all - the user is the one
+ * who cancelled it, and being told "upload failed" after they closed the dialog is noise at best.
+ *
+ * The signal is checked as well as the error name, because a stream that failed mid-body and a request
+ * aborted between the two are not guaranteed to agree on which error they produce.
+ */
+export function isAbortError(error: unknown, signal?: AbortSignal | null): boolean {
+  if (signal?.aborted) return true;
+  return !!error && typeof error === 'object' && (error as { name?: unknown }).name === 'AbortError';
+}
+
+/**
  * Uploads a body as it is produced, rather than as one finished buffer.
  *
  * A multipart form has to be handed over as a Blob, so a large encrypted attachment had to exist
  * whole before the request could start. Posting the stream directly means the request begins with the
  * first chunk and the file is never resident. `duplex: 'half'` is what tells fetch a request body is a
  * stream rather than a buffer; without it the browser refuses the call.
+ *
+ * `signal` is what makes a gigabyte stoppable. Without it an upload could only be abandoned by closing
+ * the tab: switching conversation, signing out, or a component unmounting left the request running, and it
+ * kept pushing bytes at a server nobody was waiting for. `fetch` rejects with an `AbortError` when the
+ * signal fires, which callers can tell from a network failure by the signal's own state.
  */
 export async function uploadStream(
   stream: ReadableStream<Uint8Array>,
   filename: string = 'media.png',
   mimeType: string = 'image/png',
-  onProgress?: (percent: number) => void
+  onProgress?: (percent: number) => void,
+  signal?: AbortSignal
 ): Promise<string> {
   const q = new URLSearchParams({ name: filename, type: mimeType });
   if (onProgress) onProgress(5);
@@ -92,6 +115,8 @@ export async function uploadStream(
     method: 'POST',
     body: stream,
     duplex: 'half',
+    // omitted entirely when there is nothing to abort on, so nothing else about the request changes
+    ...(signal ? { signal } : {}),
     headers: {
       'Content-Type': 'application/octet-stream',
       ...(uploadToken ? { 'X-WN-Upload-Token': uploadToken } : {}),

@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useConnection } from '../context';
 import { TopBar } from './TopBar';
 import { MessageList } from './MessageList';
@@ -12,6 +12,8 @@ export function ChatArea({ showContacts: _showContacts, isMobile, onBack }: { sh
   const [showSettings, setShowSettings] = useState(false);
   const [settingsClosing, setSettingsClosing] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  /** The drawer's exit animation, on a clock that is cleaned up. See `handleCloseSettings`. */
+  const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isDm = state.activeChannel !== 'general';
   const currentMessages = isDm ? state.dmMessages[state.activeChannel] || [] : state.messages;
   const window_ = isDm ? (state.dmHistory[state.activeChannel] || null) : state.generalHistory;
@@ -32,8 +34,18 @@ export function ChatArea({ showContacts: _showContacts, isMobile, onBack }: { sh
 
   const handleCloseSettings = () => {
     setSettingsClosing(true);
-    setTimeout(() => { setShowSettings(false); setSettingsClosing(false); }, 250);
+    // This used to be a bare `setTimeout`, so a conversation closed inside those 250 ms left the panel
+    // mounted with `settingsClosing` stuck true - a drawer frozen mid-animation that nothing could close.
+    if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
+    closeTimerRef.current = setTimeout(() => {
+      closeTimerRef.current = null;
+      setShowSettings(false);
+      setSettingsClosing(false);
+    }, 250);
   };
+  useEffect(() => () => {
+    if (closeTimerRef.current) { clearTimeout(closeTimerRef.current); closeTimerRef.current = null; }
+  }, []);
 
   return (
     <div className="flex-1 flex flex-col min-h-0">
@@ -51,6 +63,7 @@ export function ChatArea({ showContacts: _showContacts, isMobile, onBack }: { sh
         jumpToMessageId={state.jumpToMessageId}
         pinnedIds={pinned.map((m) => m.id)}
         channel={state.activeChannel}
+        compact={!!state.settings.compactMode}
       />
       <div className="border-t border-border-default">
         <MessageInput />

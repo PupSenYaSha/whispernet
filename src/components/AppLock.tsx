@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { useConnection } from '../context';
-import { appLockLockedOut, unlockAppLock } from '../appLock';
+import { appLockLockedOut, clearAppLockCode, unlockAppLock } from '../appLock';
 import type { AppLockSettings } from '../appLock';
 
 /**
@@ -14,15 +14,14 @@ import type { AppLockSettings } from '../appLock';
  */
 export function AppLockGate({ onUnlocked }: { onUnlocked: () => void }) {
   const { t } = useConnection();
-  const [checking, setChecking] = useState(true);
   const [code, setCode] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [damaged, setDamaged] = useState(false);
   const [lockedFor, setLockedFor] = useState(appLockLockedOut());
   const inputRef = useRef<HTMLInputElement>(null);
   const busyRef = useRef(false);
 
   useEffect(() => {
-    setChecking(false);
     inputRef.current?.focus();
   }, []);
 
@@ -45,8 +44,6 @@ export function AppLockGate({ onUnlocked }: { onUnlocked: () => void }) {
     return () => window.removeEventListener('keydown', onKey);
   });
 
-  if (checking) return null;
-
   const submit = async () => {
     if (!code || busyRef.current) return;
     busyRef.current = true;
@@ -63,51 +60,83 @@ export function AppLockGate({ onUnlocked }: { onUnlocked: () => void }) {
       setError(t('app_lock_wait'));
       return;
     }
+    if (result.reason === 'damaged') {
+      // The code is set but its stored hash cannot be read, so there is nothing to compare an entry
+      // against. Refusing every code forever would strand the owner; letting one through would leave a lock
+      // on screen that nothing enforces. Neither is right, so the stored hash is cleared and the gate
+      // stands down - which an attacker able to damage the entry could have done by deleting it anyway.
+      setDamaged(true);
+      setCode('');
+      setError(t('app_lock_damaged'));
+      return;
+    }
     setCode('');
     setLockedFor(appLockLockedOut());
     setError(t('app_lock_wrong'));
     inputRef.current?.focus();
   };
 
+  const standDown = async () => {
+    busyRef.current = true;
+    await clearAppLockCode();
+    busyRef.current = false;
+    setDamaged(false);
+    setError(null);
+    onUnlocked();
+  };
+
   return (
     <div className="fixed inset-0 z-[200] bg-bg-primary flex flex-col items-center justify-center p-6">
-      {checking ? null : (
-        <div className="w-full max-w-[280px] text-center" style={{ animation: 'fadeSlideIn 0.25s ease-out' }}>
-          <div className="w-16 h-16 rounded-2xl bg-accent-primary/15 flex items-center justify-center mx-auto mb-5">
-            <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-accent-primary))" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
-            </svg>
-          </div>
-          <h2 className="text-[17px] font-semibold text-fg-primary mb-1">{t('app_lock_title')}</h2>
-          <p className="text-[13px] text-fg-muted mb-6 leading-relaxed">{t('app_lock_desc')}</p>
-
-          <input
-            ref={inputRef}
-            type="password"
-            inputMode="numeric"
-            autoComplete="off"
-            value={code}
-            onChange={(e) => setCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 12))}
-            placeholder={t('app_lock_enter')}
-            aria-label={t('app_lock_enter')}
-            className="w-full px-4 py-3.5 rounded-2xl bg-bg-tertiary border border-border-default text-[20px] tracking-[0.4em] text-center text-fg-primary placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary"
-          />
-
-          {error && (
-            <p className="mt-3 text-[13px] text-status-error" role="alert">
-              {lockedFor > 0 ? `${error} ${Math.ceil(lockedFor / 1000)}s` : error}
-            </p>
-          )}
-
-          <button
-            onClick={submit}
-            disabled={!code || lockedFor > 0}
-            className="mt-5 w-full py-3.5 rounded-2xl bg-accent-primary text-accent-text text-[15px] font-semibold hover:opacity-90 transition-opacity disabled:opacity-40"
-          >
-            {t('unlock')}
-          </button>
+      {/* Nothing is waited for here, so there is no uncovered first frame - see the note above. */}
+      <div className="w-full max-w-[280px] text-center" style={{ animation: 'fadeSlideIn 0.25s ease-out' }}>
+        <div className="w-16 h-16 rounded-2xl bg-accent-primary/15 flex items-center justify-center mx-auto mb-5">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="rgb(var(--color-accent-primary))" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
+          </svg>
         </div>
-      )}
+        <h2 className="text-[17px] font-semibold text-fg-primary mb-1">{t('app_lock_title')}</h2>
+        <p className="text-[13px] text-fg-muted mb-6 leading-relaxed">{t('app_lock_desc')}</p>
+
+        {damaged ? (
+          <>
+            <p className="text-[13px] text-status-error mb-5 leading-relaxed" role="alert">{t('app_lock_damaged')}</p>
+            <button
+              onClick={standDown}
+              className="mt-0 w-full py-3.5 rounded-2xl bg-accent-primary text-accent-text text-[15px] font-semibold hover:opacity-90 transition-opacity"
+            >
+              {t('app_lock_damaged_reset')}
+            </button>
+          </>
+        ) : (
+          <>
+            <input
+              ref={inputRef}
+              type="password"
+              inputMode="numeric"
+              autoComplete="off"
+              value={code}
+              onChange={(e) => setCode(e.target.value.replace(/[^0-9]/g, '').slice(0, 12))}
+              placeholder={t('app_lock_enter')}
+              aria-label={t('app_lock_enter')}
+              className="w-full px-4 py-3.5 rounded-2xl bg-bg-tertiary border border-border-default text-[20px] tracking-[0.4em] text-center text-fg-primary placeholder:text-fg-muted focus:outline-none focus:ring-2 focus:ring-accent-primary"
+            />
+
+            {error && (
+              <p className="mt-3 text-[13px] text-status-error" role="alert">
+                {lockedFor > 0 ? `${error} ${Math.ceil(lockedFor / 1000)}s` : error}
+              </p>
+            )}
+
+            <button
+              onClick={submit}
+              disabled={!code || lockedFor > 0}
+              className="mt-5 w-full py-3.5 rounded-2xl bg-accent-primary text-accent-text text-[15px] font-semibold hover:opacity-90 transition-opacity disabled:opacity-40"
+            >
+              {t('unlock')}
+            </button>
+          </>
+        )}
+      </div>
     </div>
   );
 }

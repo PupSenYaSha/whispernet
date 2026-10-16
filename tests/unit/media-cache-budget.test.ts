@@ -160,4 +160,45 @@ describe('the decrypted media cache', () => {
     expect(cache.tracked()).toBe(0);
     expect(revoked).toContain('blob:a');
   });
+
+  /**
+   * Replacing an entry for the same message.
+   *
+   * `put` used to go straight over the top of what was there: the recorded size was overwritten and the new
+   * one added to the total without the old one being taken off. That inflation was permanent, because the
+   * entry could never be correctly subtracted on the way out either - the size recorded for it was no longer
+   * the size it had contributed. So the budget drifted upward on every replacement and `bytes()` went on
+   * reporting a figure that was simply wrong, which is the one thing this class exists to be trusted about.
+   *
+   * The url it replaced was dropped without being revoked, so a decrypted copy of the previous file stayed
+   * alive for the life of the document.
+   */
+  it('accounts for a replaced entry instead of double-counting it', () => {
+    const cache = new MediaCache();
+
+    cache.put('a', 'blob:first', 100 * MB);
+    expect(cache.bytes()).toBe(100 * MB);
+
+    // the same message decrypted again, at a different size
+    cache.put('a', 'blob:second', 40 * MB);
+    expect(cache.bytes(), 'the replaced entry was still being counted').toBe(40 * MB);
+    expect(revoked, 'the url it replaced was leaked').toContain('blob:first');
+
+    // repeated replacement cannot walk the count up
+    for (let i = 0; i < 20; i++) cache.put('a', `blob:round${i}`, 10 * MB);
+    expect(cache.bytes()).toBe(10 * MB);
+    expect(cache.bytes()).toBeLessThanOrEqual(BYTE_BUDGET);
+  });
+
+  it('releases the claim a replaced entry was holding', () => {
+    const cache = new MediaCache();
+    cache.put('a', 'blob:first', 1024);
+    cache.retain('a');
+    expect(cache.tracked()).toBe(1);
+
+    // a bubble that was showing it has gone, and the message is decrypted again
+    cache.put('a', 'blob:second', 1024);
+    cache.release('a');
+    expect(cache.tracked()).toBe(0);
+  });
 });

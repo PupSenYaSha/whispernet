@@ -97,17 +97,17 @@ describe('changing the account password', () => {
     const { alice, bob, A, B } = await conversation();
     const s = id(A, B);
 
-    const before = await alice.encryptMessage(s, 'written before the change');
+    const before = (await alice.encryptMessage(s, 'written before the change')).ciphertext;
     await bob.decryptMessage(s, before, wireNumber(alice, s), alice.getSession(s)!.state.currentRatchetPublicKey!);
 
     await alice.rekey(NEW_PASSWORD);
 
-    const after = await alice.encryptMessage(s, 'written after the change');
+    const after = (await alice.encryptMessage(s, 'written after the change')).ciphertext;
     const text = await bob.decryptMessage(s, after, wireNumber(alice, s), alice.getSession(s)!.state.currentRatchetPublicKey!);
     expect(text).toBe('written after the change');
 
     // and the far side still encrypts into it, which is what proves the change was not one-way
-    const reply = await bob.encryptMessage(s, 'reply from the other device');
+    const reply = (await bob.encryptMessage(s, 'reply from the other device')).ciphertext;
     const back = await alice.decryptMessage(s, reply, wireNumber(bob, s), bob.getSession(s)!.state.currentRatchetPublicKey!);
     expect(back).toBe('reply from the other device');
   });
@@ -143,8 +143,8 @@ describe('changing the account password', () => {
     const s = id(A, B);
 
     // two messages sent without either being read, so the second leaves the first in the skipped set
-    const first = await alice.encryptMessage(s, 'first');
-    const second = await alice.encryptMessage(s, 'second');
+    const first = (await alice.encryptMessage(s, 'first')).ciphertext;
+    const second = (await alice.encryptMessage(s, 'second')).ciphertext;
     await alice.rekey(NEW_PASSWORD);
 
     // and they still arrive afterwards, in order, which is the case a naive re-wrap gets wrong by

@@ -8,8 +8,12 @@ on:
         required: true
         default: 'v1.0.0'
 
+# Read-only by default. `verify` only reads files and echoes version strings, and it used to inherit this
+# workflow's `contents: write` along with the three jobs that genuinely upload a release. The three jobs that
+# publish raise their own scope below, so adding a fourth read-only job cannot accidentally be handed the
+# ability to rewrite a release.
 permissions:
-  contents: write
+  contents: read
 
 # two dispatches for the same tag would interleave their uploads
 concurrency:
@@ -22,10 +26,18 @@ env:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    # deliberately no `contents: write`: this job compares version strings and cannot upload.
     outputs:
       version: ${{ steps.check.outputs.version }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          # the tag being released, not whichever ref the operator happened to have selected in the UI.
+          # Without this the artefacts are built from that ref's HEAD and uploaded as `inputs.tag`, and the
+          # `verify` job cannot tell: it only compares version strings, which every ref still agrees on. A
+          # dispatch from a branch ten commits ahead of `main` publishes those commits' binaries as the
+          # release, and `gh release upload --clobber` replaces whatever was already there.
+          ref: ${{ github.event.inputs.tag }}
       - name: Read the version the build will report
         id: check
         run: |
@@ -47,8 +59,13 @@ jobs:
   windows:
     needs: verify
     runs-on: windows-latest
+    permissions:
+      # `gh release upload` below. Only this job and the other two that publish a release have it.
+      contents: write
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag }}
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -80,18 +97,46 @@ jobs:
             "$hash  $($_.Name)" | Set-Content -Path "$($_.FullName).sha256" -NoNewline -Encoding ascii
           }
           Get-ChildItem dist\build | Select-Object Name, Length
+
+      # Signs the portable archive.
+      #
+      # Only the portable zip is signed, because only it is what the updater installs. A digest published
+      # beside a payload is still worth editing by whoever can edit the release, so the digest alone proves
+      # nothing about who built it - the signature is what proves that, and it is over the 32 digest bytes
+      # rather than over the archive, which would mean hashing fifty megabytes on every build to say the same
+      # thing.
+      #
+      # Refuses to publish without the key rather than publishing an unsigned update. An unsigned release
+      # looks identical to a signed one until someone swaps the binary, which is the moment it matters most.
+      - name: Sign the portable archive
+        shell: bash
+        env:
+          # Passed straight through: the signer accepts base64 of the 32 raw bytes, which is how a repository
+          # secret holds a key anyway, so there is no conversion step here to get wrong.
+          UPDATE_SIGNING_KEY_BASE64: ${{ secrets.UPDATE_SIGNING_KEY_BASE64 }}
+        run: |
+          if [ -z "$UPDATE_SIGNING_KEY_BASE64" ]; then
+            echo "::error::UPDATE_SIGNING_KEY_BASE64 is not set. Refusing to publish an update the app will refuse to install."
+            exit 1
+          fi
+          node scripts/sign-update.mjs "dist/build/WhisperNet_${{ needs.verify.outputs.version }}_x64-portable.zip"
+
       - name: Upload assets
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "$TAG" dist/build/*.exe dist/build/*.zip dist/build/*.sha256 --clobber
+          gh release upload "$TAG" dist/build/*.exe dist/build/*.zip dist/build/*.sha256 dist/build/*.sig --clobber
 
   linux:
     needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag }}
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -125,8 +170,12 @@ jobs:
   android:
     needs: verify
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.inputs.tag }}
       - uses: actions/setup-node@v5
         with:
           node-version: 22
@@ -160,22 +209,59 @@ jobs:
       - name: Set up the release signing key
         # the APK has to be signed with a real key: a debug key is shared, derivable by anyone and
         # leaves the build debuggable
+        #
+        # Every secret arrives through `env:` and is referenced by name. Interpolating `${{ secrets.X }}`
+        # into the `run:` body instead means the expression is substituted into a shell command line before
+        # the shell sees it - so a password containing a `"` closes the string early and the rest of it is
+        # parsed as shell, and one containing a newline injects a command. That is a property of the
+        # operator's password, not of an attacker, which is why it goes unnoticed until the day somebody
+        # picks a password with a quote in it and the release fails in a way that reads as tampering.
+        #
+        # The keystore itself is written under `$RUNNER_TEMP` and deleted as soon as `assembleRelease` is
+        # done. It used to be decoded to `android/app/whispernet-release.jks`, which is gitignored - and
+        # then stayed there for the rest of the job, through `gradlew`, `cp`, `sha256sum` and
+        # `gh release upload`. A Gradle daemon crash-loop, a `--scan`, or any future artifact upload sweeps
+        # the release key of a real store into an artifact.
         env:
           KEYSTORE_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
           set -euo pipefail
           if [ -z "${KEYSTORE_B64:-}" ]; then
             echo "::error::ANDROID_KEYSTORE_BASE64 is not set; refusing to publish a debug-signed APK"
             exit 1
           fi
-          printf '%s' "$KEYSTORE_B64" | base64 -d > android/app/whispernet-release.jks
-          echo "WHISPERNET_KEYSTORE=$PWD/android/app/whispernet-release.jks" >> "$GITHUB_ENV"
-          echo "WHISPERNET_KEYSTORE_PASSWORD=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" >> "$GITHUB_ENV"
-          echo "WHISPERNET_KEY_ALIAS=${{ secrets.ANDROID_KEY_ALIAS }}" >> "$GITHUB_ENV"
-          echo "WHISPERNET_KEY_PASSWORD=${{ secrets.ANDROID_KEY_PASSWORD }}" >> "$GITHUB_ENV"
+          echo "::add-mask::$KEYSTORE_PASSWORD"
+          echo "::add-mask::$KEY_PASSWORD"
+          echo "::add-mask::$KEYSTORE_B64"
+          KEYSTORE="$RUNNER_TEMP/whispernet-release.jks"
+          printf '%s' "$KEYSTORE_B64" | base64 -d > "$KEYSTORE"
+          {
+            echo "WHISPERNET_KEYSTORE=$KEYSTORE"
+            echo "WHISPERNET_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "WHISPERNET_KEY_ALIAS=$KEY_ALIAS"
+            echo "WHISPERNET_KEY_PASSWORD=$KEY_PASSWORD"
+          } >> "$GITHUB_ENV"
       - name: Build APK
         working-directory: android
         run: chmod +x gradlew && ./gradlew assembleRelease -no-daemon
+      - name: Destroy the release signing key
+        # Separate step so it runs whatever `assembleRelease` did: `if: always()` because the case that
+        # matters is the failing one. `rm -f` on a file that is not there is not an error.
+        if: always()
+        run: rm -f "$WHISPERNET_KEYSTORE"
+      - name: Verify the APK is signed with the release key
+        # `assembleRelease` succeeds on a debug-signed build: the signing config is conditional on the
+        # keystore being found, and a keystore that is missing simply leaves `signingConfig` unset, which
+        # is how a release gets published that upgrades nothing and cannot be replaced by a real one.
+        # `apksigner verify` fails on an unsigned or wrongly-signed APK, and `--print-certs` prints the
+        # certificate the file actually carries, so the log shows which key signed the download button.
+        run: |
+          set -euo pipefail
+          APKSIGNER="${ANDROID_HOME:-$ANDROID_SDK_ROOT}/build-tools/36.0.0/apksigner"
+          "$APKSIGNER" verify --print-certs android/app/build/outputs/apk/release/app-release.apk
       - name: Upload asset
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

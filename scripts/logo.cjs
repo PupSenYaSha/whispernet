@@ -1,6 +1,5 @@
 
 
-
 function roundedRectPath(ctx, s, radius) {
   ctx.beginPath();
   ctx.moveTo(radius, 0);
@@ -14,9 +13,6 @@ function roundedRectPath(ctx, s, radius) {
   ctx.quadraticCurveTo(0, 0, radius, 0);
   ctx.closePath();
 }
-
-
-
 
 function drawLogo(ctx, size) {
   const s = size;

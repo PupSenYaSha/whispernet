@@ -80,11 +80,13 @@
   const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   const nav = document.querySelector('.nav');
-  const onScroll = () => {
-    nav.classList.toggle('scrolled', window.scrollY > 40);
-  };
-  window.addEventListener('scroll', onScroll, { passive: true });
-  onScroll();
+  if (nav) {
+    const onScroll = () => {
+      nav.classList.toggle('scrolled', window.scrollY > 40);
+    };
+    window.addEventListener('scroll', onScroll, { passive: true });
+    onScroll();
+  }
 
   const sectionEls = Array.from(document.querySelectorAll('section[id]'));
   const navMap = new Map();
@@ -92,28 +94,40 @@
     const id = a.getAttribute('href').slice(1);
     if (id) navMap.set(id, a);
   });
-  const onSpy = () => {
-    const probe = window.scrollY + 160;
-    let current = '';
-    for (const s of sectionEls) {
-      if (s.offsetTop <= probe) current = s.id;
-    }
-    navMap.forEach((a, id) => a.classList.toggle('active', id === current));
-  };
-  window.addEventListener('scroll', onSpy, { passive: true });
-  onSpy();
-
-  const observer = new IntersectionObserver((entries) => {
-    entries.forEach(entry => {
-      if (entry.isIntersecting) {
-        entry.target.classList.add('visible');
-        observer.unobserve(entry.target);
+  if (sectionEls.length && navMap.size) {
+    const onSpy = () => {
+      const probe = window.scrollY + 160;
+      let current = '';
+      for (const s of sectionEls) {
+        if (s.getBoundingClientRect().top + window.scrollY <= probe) current = s.id;
       }
-    });
-  }, { threshold: 0.15, rootMargin: '0px 0px -40px 0px' });
+      navMap.forEach((a, id) => a.classList.toggle('active', id === current));
+    };
+    window.addEventListener('scroll', onSpy, { passive: true });
+    onSpy();
+  }
 
-  document.querySelectorAll('.feature-card, .security-card, .download-card, .doc-card, .faq-item, .hero-stats').forEach(el => {
-    if (prefersReducedMotion) {
+  const revealTargets = document.querySelectorAll('.feature-card, .security-card, .download-card, .doc-card, .faq-item, .hero-stats');
+
+  // Nothing here is load-bearing, so a browser without the observer should simply skip the effect rather
+  // than throw out of the rest of this block. It used to be constructed unguarded, which meant the
+  // remaining initialisation never ran on a browser without it.
+  const Observer = window.IntersectionObserver;
+  const observer = typeof Observer === 'function'
+    ? new Observer((entries) => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('visible');
+            observer.unobserve(entry.target);
+          }
+        });
+      }, { threshold: 0.15, rootMargin: '0px 0px -40px 0px' })
+    : null;
+
+  revealTargets.forEach(el => {
+    if (prefersReducedMotion || !observer) {
+      // Shown rather than left blank: an element that only becomes visible via JS is invisible to anyone
+      // whose browser cannot run the observer at all.
       el.classList.add('visible');
     } else {
       el.classList.add('animate-in');

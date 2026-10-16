@@ -1,0 +1,33 @@
+# Permissions for the app's own commands.
+#
+# ## Why this file exists at all
+#
+# `capabilities/default.json` grants the page nothing, and that used to be enough - because with no
+# `src-tauri/permissions/` directory there is no `__app-acl__` entry in `gen/schemas/acl-manifests.json`,
+# so `has_app_acl_manifest` is false in `tauri-2.11.6/src/webview/mod.rs`, and the ACL is consulted only
+# `if plugin_command.is_some() || has_app_acl_manifest || !is_local`. `set_update_consent` is not
+# plugin-prefixed, this manifest did not exist, and `is_local` is true because `frontendDist` is a remote
+# URL. None of the three conditions held, so `set_update_consent` ran for any script on the app origin
+# without ever being checked.
+#
+# Adding this file is what makes the manifest exist, and therefore what turns the check on. The entry below
+# is what makes the one command the app has actually work when it does - without it the command would be
+# refused everywhere, which is a louder failure than the one being fixed.
+#
+# ## Adding a command
+#
+# Any future `#[tauri::command]` needs an entry here as well, or it will be reachable from the page with
+# no permission check at all - the same gap, in a file that will look correct.
+
+"$schema" = "../gen/schemas/acl-manifests.json"
+
+[[permission]]
+identifier = "allow-set-update-consent"
+description = """
+Allows the page to answer the desktop shell's "an update is ready" prompt.
+
+This is the whole of the app's web-facing API surface. It is deliberately narrow: it can only answer the
+question the updater is currently asking, and the Rust side ignores an answer that arrives while no
+question is open.
+"""
+commands.allow = ["set_update_consent"]

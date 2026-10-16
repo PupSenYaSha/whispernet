@@ -3,7 +3,7 @@ import {
   createSessionWithRemote, createResponderSession, encryptWithSignal, decryptWithSignal,
   hasSession, resetSession, getSessionId, getMyIdentityKeyBase64, decodeServerBundle,
   serializeX3dhMessage, deserializeX3dhMessage, installSignalFlushHandlers, flushSignalState,
-  commitResponderPreKey, releaseResponderPreKey, getPinnedIdentityKey,
+  commitResponderPreKey, releaseResponderPreKey, getPinnedIdentityKey, stopSignalState,
 } from './signal/integration';
 import { getDeviceId } from './deviceId';
 import type { PreKeyBundle } from './signal/types';
@@ -90,6 +90,15 @@ export function isDmBody(value: any): value is DmBody {
 
 /** Brings the key material up for an account, once the password is known. */
 export async function startRatchet(userId: string, password: string): Promise<void> {
+  // Everything this module remembers about *other people* is dropped first, before the new account's own
+  // material is read in. The caches below are keyed by peer id and by device id, and both come from the
+  // server, so a second account signing in to the same tab could otherwise inherit the first one's - most
+  // sharply in `ownBundles`, which holds this account's own devices, because `sealForDevices` seals an
+  // outgoing message to every entry in it. A bundle from the previous account would be sealed to and sent.
+  ratchetUnavailable.clear();
+  identityChanged.clear();
+  forgetBundleForAll();
+  ownBundles.length = 0;
   myId = userId;
   await initPreKeyManager(password);
   await initSessionManager(password);
@@ -185,8 +194,6 @@ export function forgetBundle(userId: string): void {
   ratchetUnavailable.delete(userId);
 }
 
-
-
 /**
  * The remote name a session is filed under.
  *
@@ -262,12 +269,16 @@ export async function sealForDevices(
 
   const bodies: { deviceId: string; body: DmBody }[] = [];
   const failedDevices: string[] = [];
+  // How many of the sealed bodies are for the *peer*. The recipient's own other screens are targets here
+  // too, so `bodies.length > 0` does not mean the message can reach the person it was written to.
+  let forPeer = 0;
   for (const target of targets) {
     try {
       bodies.push({
         deviceId: target.deviceId,
         body: await sealForDevice(target.accountId, target.deviceId, target.bundle, plaintext),
       });
+      if (target.accountId === peerId) forPeer++;
     } catch (e) {
       console.warn(`[ratchet] no body for device ${target.deviceId}:`, (e as Error).message);
       failedDevices.push(target.deviceId);
@@ -278,6 +289,17 @@ export async function sealForDevices(
     // Nothing could be sealed, and an empty fan-out would be a message delivered to nobody. Rather than
     // drop it, fall back to the one shape that needs no prekey - and say so, because a fallback that
     // arrives without being announced is exactly the failure mode this replaced.
+    ratchetUnavailable.add(peerId);
+    return { payload: { kind: 'envelope', ...(await fallback()) }, ratchet: false, failedDevices };
+  }
+
+  // Same, for the case that is not obvious: the peer's bundles were empty - they are offline, or the
+  // prekey fetch timed out - while this account happens to have a second device signed in. The loop above
+  // sealed a body for that second device and nothing else, and the `bodies.length === 1` line below turned
+  // it into a *bare* body addressed to the sender's own laptop. The recipient could not open it, and
+  // `failedDevices` was empty, so the caller reported a clean delivery and the message simply never
+  // arrived. The peer's absence has to be an absence, not a quiet success.
+  if (forPeer === 0) {
     ratchetUnavailable.add(peerId);
     return { payload: { kind: 'envelope', ...(await fallback()) }, ratchet: false, failedDevices };
   }
@@ -367,24 +389,48 @@ async function openOne(
       // body does not say. Each candidate is tried, and exactly one of them can possibly open: a session
       // is pinned to the identity key that was used to build it, so a body sealed for another device
       // fails the check rather than being opened by the wrong session.
+      // The sessions this call actually built, as opposed to the ones it merely tried.
+      //
+      // Resetting the whole candidate list here used to be the obvious thing to do, and it was wrong.
+      // `candidateRemotes` is every session this device holds with that person *plus* every session it
+      // holds with its own other devices - so a body that no candidate could open wiped all of them. The
+      // commonest such body is one that was never meant for this device at all: `sealForDevices`
+      // deliberately gives the *sending* device no copy of its own message, so every own-message echo is a
+      // bare body its author provably cannot open, and the server sends it back. With `App.tsx` reading
+      // every frame it is handed, that meant each message a user sent tore down their own session with that
+      // peer - discarding the out-of-order key windows and forcing a fresh handshake, and burning a
+      // one-time prekey, on the next send.
+      //
+      // Worse on a history page, where the messages are opened with `Promise.all`: those resets run
+      // outside the per-session decrypt lock and delete the session while other decrypts are still using
+      // it. Those messages decrypt, and then the ones after them in the same page cannot.
+      //
+      // A session this call created from a handshake that then failed is genuinely worthless and has to go.
+      // A session that existed beforehand is not evidence of anything except that it is not this body's.
+      const created = new Set<string>();
       for (const remote of candidateRemotes(peerId)) {
         try {
           if (body.x3dh && !hasSession(myId, remote)) {
             const x3dh = deserializeX3dhMessage(body.x3dh);
-            if (x3dh) createResponderSession(myId, remote, x3dh, base64ToBytes(body.ratchetPublicKey));
+            if (x3dh) {
+              createResponderSession(myId, remote, x3dh, base64ToBytes(body.ratchetPublicKey));
+              created.add(remote);
+            }
           }
           const sessionId = getSessionId(myId, remote);
           const opened = await decryptWithSignal(sessionId, body.ciphertext, body.ratchetPublicKey, body.messageNumber);
-          commitResponderPreKey();
+          // Named by conversation: a borrow belongs to the session that made it, so a handshake in flight
+          // with somebody else cannot spend this one's prekey.
+          commitResponderPreKey(sessionId);
           return opened;
         } catch {
           // the borrowed one-time prekey goes back rather than being spent on a handshake nobody proved
-          releaseResponderPreKey();
+          releaseResponderPreKey(getSessionId(myId, remote));
         }
       }
-      // Nothing opened it. A session that cannot open anything is worse than none, so it goes and the
-      // next message starts fresh rather than failing the same way for the rest of the conversation.
-      for (const remote of candidateRemotes(peerId)) resetSession(myId, remote);
+      // Nothing opened it. Only the sessions built here are cleared - see above for what the wider version
+      // used to cost.
+      for (const remote of created) resetSession(myId, remote);
       ratchetUnavailable.delete(peerId);
     }
     return null;
@@ -490,16 +536,28 @@ export async function safetyNumber(peerIdentityKeyB64?: string | null): Promise<
  */
 export function resetEncryptionIdentity(): boolean {
   if (!ready) return false;
+  // Before anything is deleted, not after. The flush handlers this function's own `startRatchet` installed
+  // fire on `pagehide`, which is the very next thing the caller does; they cancel the debounce and write the
+  // state straight back out with the key still in hand, so the identity key and every chain key went back
+  // into localStorage milliseconds after being removed. Whether that race was won was down to the browser.
+  // Taking the managers offline first makes the deletion the last word.
+  stopSignalState();
   for (const key of Object.keys(localStorage)) {
-    if (key.startsWith('wn_signal_') || key === 'wn_own_dm_text') {
+    if (key.startsWith('wn_signal_') || key === 'wn_own_dm_text' || key === 'wn_own_dm_text__salt') {
       try { localStorage.removeItem(key); } catch { /* private mode */ }
     }
   }
-  try { localStorage.removeItem('wn_signal_prekey_salt'); } catch { /* as above */ }
+  // the drafts box is sealed under the account password and is destroyed with everything else here: both
+  // of these are per-account material and there is nothing in this path that preserves them
+  for (const key of ['wn_drafts', 'wn_drafts__salt']) {
+    try { localStorage.removeItem(key); } catch { /* as above */ }
+  }
   ratchetUnavailable.clear();
   identityChanged.clear();
   forgetBundleForAll();
   ownBundles.length = 0;
+  myId = '';
+  ready = false;
   return true;
 }
 

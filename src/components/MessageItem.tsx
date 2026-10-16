@@ -2,7 +2,7 @@ import type { Message } from '../types';
 import { useState, useRef, useEffect, useMemo, memo } from 'react';
 import { createPortal } from 'react-dom';
 import { useConnection } from '../context';
-import { cn, formatTime, messageControls } from '../utils';
+import { cn, formatTime, messageControls, safeMediaUrl } from '../utils';
 import { Avatar } from './Avatar';
 import { ReportModal } from './ReportModal';
 import { useEscapeKey } from '../useEscapeKey';
@@ -11,7 +11,13 @@ import { hasReadUpTo } from '../presence';
 import { EMOJI_GROUPS, QUICK_EMOJI } from '../emojis';
 import { mediaProxyUrl } from '../upload';
 
-function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15px]', animate = false, isPinned = false, channel }: { message: Message; showAvatar?: boolean; fontSizeClass?: string; animate?: boolean; isPinned?: boolean; channel?: string }) {
+/**
+ * Compact mode, which is a setting rather than a theme.
+ *
+ * The setting was stored and toggled and read by nothing, so the switch in Settings moved and nothing
+ * happened. Vertical padding is what it means here: the two places that decide how tall a row is.
+ */
+function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15px]', animate = false, isPinned = false, channel, compact = false }: { message: Message; showAvatar?: boolean; fontSizeClass?: string; animate?: boolean; isPinned?: boolean; channel?: string; compact?: boolean }) {
   const { state, deleteMessage: deleteMsg, addReaction, removeReaction, setEditing, decryptMedia, retainMedia, releaseMedia, setReply, openProfile, copyMessageText, forwardMessage, togglePin, jumpTo, t } = useConnection();
   const isSystem = message.senderId === 'system';
   const isOwn = message.isOwn;
@@ -29,12 +35,28 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
   const [toast, setToast] = useState<string | null>(null);
   const reactionPickerRef = useRef<HTMLDivElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeChannel = channel || message.channel || 'general';
 
+  /**
+   * The one toast this bubble shows, on a clock of its own.
+   *
+   * It used to schedule a fresh timer per call without cancelling the last, so a second toast was cut off
+   * early by the first one's timer, and nothing cleared them on unmount. One timer, replaced rather than
+   * stacked.
+   */
   const flash = (text: string) => {
     setToast(text);
-    setTimeout(() => setToast((cur) => (cur === text ? null : cur)), 1600);
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = setTimeout(() => {
+      flashTimerRef.current = null;
+      setToast((cur) => (cur === text ? null : cur));
+    }, 1600);
   };
+
+  useEffect(() => () => {
+    if (flashTimerRef.current) { clearTimeout(flashTimerRef.current); flashTimerRef.current = null; }
+  }, []);
 
   // one clock for every bubble: each of them computed its countdown from its own render, so a
   // "24h" label froze at whatever it showed when the message arrived
@@ -90,7 +112,10 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
   useEffect(() => {
     let cancelled = false;
     setMediaFailed(false);
-    if (isMedia && message.fileKey) {
+    // Either key source counts. A private attachment keeps its key on `fileKeyEntry`, a public one in the
+    // wrapped map, and gating on the map alone meant a private photo was never even offered to
+    // `decryptMedia` — it fell through to the raw ciphertext and rendered as a broken image.
+    if (isMedia && (message.fileKey || message.fileKeyEntry)) {
       decryptMedia(message).then((url) => {
         if (cancelled) return;
         if (url) setMediaUrl(url);
@@ -156,14 +181,15 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
       <div className={`flex flex-col max-w-[78%] ${isOwn ? 'items-end' : 'items-start'}`}>
         {!isOwn && showAvatar && (
           <button onClick={() => openProfile(message.senderId)}
-            className="text-[12px] font-semibold text-accent-primary mb-1 px-1 hover:underline cursor-pointer bg-transparent border-0 p-0 appearance-none">
+            className={cn('text-[12px] font-semibold text-accent-primary px-1 hover:underline cursor-pointer bg-transparent border-0 p-0 appearance-none', compact ? 'mb-0.5' : 'mb-1')}>
             {message.senderNickname}
           </button>
         )}
 
         <div className="relative">
           <div className={cn(
-            'px-3.5 py-2.5 leading-relaxed relative',
+            'leading-relaxed relative',
+            compact ? 'px-3 py-1.5' : 'px-3.5 py-2.5',
             fontSizeClass,
             isOwn
               ? 'bg-bubble-mine text-bubble-mine-text rounded-2xl rounded-br-sm'
@@ -181,7 +207,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
             {(() => {
               if (mediaTag) {
                 const tag = mediaTag.kind;
-                if (message.fileKey) {
+                if (message.fileKey || message.fileKeyEntry) {
                   if (mediaFailed) {
                     return <p className="whitespace-pre-wrap break-words text-status-error text-[13px]">{t('media_decrypt_error')}</p>;
                   }
@@ -207,7 +233,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
                       onClick={() => { setLightbox({ url: mediaUrl, isVideo: false }); }} />
                   );
                 }
-                const safeUrl = /^(https?:\/\/)/i.test(mediaTag.url) ? mediaTag.url : null;
+                const safeUrl = safeMediaUrl(mediaTag.url);
 
                 if (!safeUrl) {
                   return <p className="whitespace-pre-wrap break-words text-status-error text-[13px]">{t('invalid_url')}</p>;
@@ -329,7 +355,7 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
             </div>
           )}
 
-          <div className="flex items-center gap-0.5 mt-1.5 px-1" ref={menuRef}>
+          <div className={cn('flex items-center gap-0.5 px-1', compact ? 'mt-0.5' : 'mt-1.5')} ref={menuRef}>
             {isPinned && (
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-accent-primary flex-shrink-0 -ml-0.5" aria-label={t('pinned')}>
                 <path d="M12 17v5" /><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z" />
@@ -533,6 +559,10 @@ function MenuItem({ label, onClick, danger }: { label: string; onClick: () => vo
 function ForwardPicker({ onClose, onPick }: { onClose: () => void; onPick: (to: string) => void }) {
   const { state, t } = useConnection();
   const [query, setQuery] = useState('');
+  // A portalled modal that registers no escape layer is worse than one that does: Escape fell through to
+  // whatever was underneath - the lightbox, the settings drawer, the conversation itself - while this
+  // stayed open. The Android back button reads the same stack.
+  useEscapeKey(onClose, true, 95);
   const contacts = state.contacts.filter((c) =>
     !query.trim() || c.nickname.toLowerCase().includes(query.trim().toLowerCase())
   );

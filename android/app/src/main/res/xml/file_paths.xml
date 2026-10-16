@@ -1,5 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-    <external-path name="my_images" path="." />
-    <cache-path name="my_cache_images" path="." />
+    <!--
+        Narrowed deliberately.
+
+        The Capacitor template ships `<external-path name="my_images" path="." />`, which publishes the
+        *whole* shared-storage root through this app's FileProvider: every app that can obtain a granted URI
+        from it can then read anything on the device's shared storage, not just this app's pictures. The
+        authority is not exported, but the grant is what matters, and a grant handed out for one image should
+        not turn into a handle on the user's documents.
+
+        `cache-path` is all that is actually needed - the WebView copies a picked image into the cache before
+        anything reads it - and `external-files-path` covers the app's own external directory if something
+        ever writes there. Neither is the shared root.
+    -->
+    <cache-path name="whispernet_cache" path="." />
+    <external-files-path name="whispernet_external" path="." />
 </paths>
