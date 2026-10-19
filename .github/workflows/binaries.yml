@@ -30,7 +30,7 @@ jobs:
     outputs:
       version: ${{ steps.check.outputs.version }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           # the tag being released, not whichever ref the operator happened to have selected in the UI.
           # Without this the artefacts are built from that ref's HEAD and uploaded as `inputs.tag`, and the
@@ -63,7 +63,7 @@ jobs:
       # `gh release upload` below. Only this job and the other two that publish a release have it.
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag }}
       - uses: actions/setup-node@v5
@@ -134,7 +134,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag }}
       - uses: actions/setup-node@v5
@@ -173,7 +173,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.inputs.tag }}
       - uses: actions/setup-node@v5
