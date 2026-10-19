@@ -42,21 +42,46 @@ const CACHEABLE_DESTINATIONS = new Set(['style', 'script', 'font', 'image']);
 /** Never cached, whatever the destination says. See the note at the top of this file. */
 const NEVER_CACHED_PREFIXES = ['/api/'];
 
-self.addEventListener('install', () => {
+self.addEventListener('install', (event) => {
+  // Precache the shell, or rather the *one* file a cold offline start needs.
+  //
+  // The write guard below refuses to store `no-cache` responses, and the server sends exactly that for the
+  // shell so a stale bundle can never be pinned - which is right, and which meant nothing was ever in the
+  // cache under the key the navigate-failure branch looks in. The branch was documented as unreachable and
+  // then still consulted, so it could only ever miss: close the app with no connection, reopen it, and get
+  // the browser's network-error page instead of the app.
+  //
+  // Fetched with `cache: 'reload'` so this is a genuine network read and not whatever is in the HTTP cache,
+  // and stored under the same `CACHE_NAME`, which `BUILD_ID` rotates. That is what keeps the shell pinned
+  // no worse than everything else: a deploy that changes the worker rotates the cache with it.
+  event.waitUntil(
+    caches.open(CACHE_NAME)
+      .then((cache) => cache.put('./index.html', fetch('./index.html', { cache: 'reload' })))
+      // A failed precache must not fail the install - the app is fully usable online, which is the
+      // overwhelmingly common case - and it must not reject, or `skipWaiting` never runs and the new worker
+      // never activates.
+      .catch(() => { /* offline at install time; the running page carries on */ })
+  );
   self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) =>
-      // Only this app's own caches. An origin's Cache Storage is shared by every service worker ever
-      // registered on it - ours, anything the user's other apps put there, anything a page on this host
-      // has left behind - and a blanket delete is the kind of thing that throws away another app's data
-      // in a tab that has nothing to do with us.
-      Promise.all(keys.filter((k) => k !== CACHE_NAME && k.startsWith('whispernet-')).map((k) => caches.delete(k)))
-    )
+    Promise.all([
+      caches.keys().then((keys) =>
+        // Only this app's own caches. An origin's Cache Storage is shared by every service worker ever
+        // registered on it - ours, anything the user's other apps put there, anything a page on this host
+        // has left behind - and a blanket delete is the kind of thing that throws away another app's data
+        // in a tab that has nothing to do with us.
+        Promise.all(keys.filter((k) => k !== CACHE_NAME && k.startsWith('whispernet-')).map((k) => caches.delete(k)))
+      ),
+      // Inside `waitUntil`, which is where it has to be. `claim()` is asynchronous and outside it the
+      // worker's lifetime is not extended for the takeover: terminated in that window and every already-open
+      // tab keeps running the *old* worker, and so the old cache generation, for good. That is precisely the
+      // pinning this file's BUILD_ID stamp exists to prevent, defeated by the one call that adopts them.
+      self.clients.claim(),
+    ])
   );
-  self.clients.claim();
 });
 
 self.addEventListener('fetch', (event) => {
@@ -95,12 +120,14 @@ self.addEventListener('fetch', (event) => {
       // the user sees as a generic network error instead of the app's own offline screen. Always resolve to
       // a Response or rethrow.
       //
-      // There is no shell fallback, and there could not be one. The shell is served `no-cache` and the write
-      // guard above refuses to store `no-cache` responses, so nothing under that key was ever going to be
-      // there: the branch was unreachable and its comment described a two-tier fallback that did not exist.
-      // The cached `script`/`style` entries still serve the *running* page offline; a cold offline start
-      // rethrows, which is the browser's own network-error page.
-      const hit = await caches.match(event.request);
+      // The cached shell, stored by `install`. Served only on this branch - the catch - so a cached copy can
+      // never shadow a fresh one, which is the failure a `no-cache` shell is guarding against.
+      //
+      // `./index.html` rather than `event.request`, because the request here is a navigation whose URL is
+      // whatever the user opened (`/`, or a deep link), and the precache put the entry under one fixed name.
+      // `ignoreSearch` covers a query string on either side.
+      const hit = (await caches.match(event.request, { ignoreSearch: true }))
+        || (await caches.match('./index.html', { ignoreSearch: true }));
       if (hit) return hit;
       throw err;
     })

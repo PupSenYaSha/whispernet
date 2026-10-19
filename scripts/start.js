@@ -3,7 +3,7 @@ import { writeFileSync, unlinkSync } from 'fs';
 import { fileURLToPath } from 'url';
 import path from 'path';
 import { createServer } from 'http';
-import { readFileSync, existsSync, statSync } from 'fs';
+import { readFileSync, existsSync, statSync, realpathSync } from 'fs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -101,7 +101,35 @@ function serveStatic(req, res) {
     return;
   }
 
-  if (!existsSync(filePath) || !statSync(filePath).isFile()) {
+  // Lexical containment is necessary and not sufficient: `path.relative` compares strings and never follows
+  // a link, so a symlink or NTFS junction anywhere under `site/` is served as ordinary content pointing
+  // wherever it happens to point. `site/downloads/` is the likely place for one - it is gitignored and
+  // populated by a copy step outside the repository, so it is the one directory nobody reviews. The real
+  // path is therefore checked as well, and the same test is applied to it.
+  let realPath = null;
+  try {
+    realPath = realpathSync(filePath);
+  } catch {
+    realPath = null;
+  }
+  if (realPath !== null && !isInsideSite(realPath)) {
+    send(res, 403, { 'Content-Type': 'text/plain; charset=utf-8' }, 'Forbidden');
+    return;
+  }
+
+  // `statSync` is guarded rather than being the second half of an `existsSync(...) &&` chain. `existsSync`
+  // swallows its own errors and returns false, so `statSync` only runs when the path existed a moment ago -
+  // and a file deleted, or a permission changed, between the two calls throws from inside a `request`
+  // listener, which Node's HTTP server does not catch. The whole marketing site would go down over one
+  // missing file.
+  let isFile = false;
+  try {
+    isFile = statSync(filePath).isFile();
+  } catch {
+    isFile = false;
+  }
+
+  if (!isFile) {
     // a download that was never copied into site/downloads must not be a dead link: send the
     // visitor to the release asset instead, so the button keeps working on a fresh clone
     const download = /^\/downloads\/([A-Za-z0-9._-]+)$/.exec(url);

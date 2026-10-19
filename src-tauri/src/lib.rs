@@ -298,6 +298,31 @@ fn append_log(dir: &Path, msg: &str) {
     let Ok(mut slot) = cell.lock() else { return };
     if slot.is_none() {
         let _ = fs::create_dir_all(dir);
+        // Prune the previous runs' logs first, once per process.
+        //
+        // A new file is made per run, on purpose, so nothing is ever opened for append behind a link - but
+        // nothing ever removed the old ones either, so a launch every day for a year left three hundred
+        // and sixty-five files in the app's data directory. Thirty days is enough to read a failed update
+        // report from, and the entries are matched by name and age only, so this cannot follow a link out
+        // of the directory any more than writing them could not.
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !name.starts_with("update-") || !name.ends_with(".log") {
+                    continue;
+                }
+                let old = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .map(|m| SystemTime::now().duration_since(m).map(|d| d.as_secs()))
+                    .unwrap_or(Ok(0))
+                    .unwrap_or(0)
+                    > 30 * 24 * 60 * 60;
+                if old {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
         let stamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
@@ -473,17 +498,34 @@ fn watcher(app: tauri::AppHandle) {
         });
         while let Ok(raw) = rx.try_recv() {
             let raw = raw.trim().to_string();
-            let mut title = serde_json::from_str::<String>(&raw)
-                .unwrap_or_else(|_| raw.clone());
-            let mut prot = false;
-            if let Ok(inner) = serde_json::from_str::<String>(&raw) {
-                if let Ok(payload) = serde_json::from_str::<PagePayload>(&inner) {
-                    if !payload.title.is_empty() {
-                        title = payload.title;
-                    }
-                    prot = payload.prot;
-                }
+            // Every one of these is "no answer", and no answer now means *hold what you had*.
+            //
+            // The watcher polls every two seconds starting two seconds after launch, and `document.title`
+            // is empty until the app sets it. An unparseable payload therefore arrives on every cold start
+            // and after every navigation, and `prot` defaulted to false — so the very first poll answered
+            // the question "is the page capturable?" with "yes" and switched screenshot protection off for
+            // the whole page-load window. `setup` had turned it on a moment earlier, and the window was
+            // capturable from launch until the app rendered, in a messenger whose entire value is that the
+            // screen is not readable. `eval_with_callback` also hands back an empty string when the script
+            // fails, which lands here the same way.
+            //
+            // An empty title is the other no-answer case, and it had a second effect: the fallback left
+            // `title` holding the raw inner JSON, which is not empty, so the window title became the
+            // literal string `{"title":"","prot":false}`.
+            if raw.is_empty() {
+                continue;
             }
+            let Ok(inner) = serde_json::from_str::<String>(&raw) else {
+                continue;
+            };
+            let Ok(payload) = serde_json::from_str::<PagePayload>(&inner) else {
+                continue;
+            };
+            if payload.title.is_empty() {
+                continue;
+            }
+            let title = payload.title;
+            let prot = payload.prot;
             if !title.is_empty() {
                 // The title is the page's own `document.title`, which the app builds out of the signed-in
                 // account's nickname. It used to be pattern-matched against "502", "503", "504" and
@@ -606,6 +648,21 @@ fn download(app: &tauri::AppHandle, url: &str, dest: &Path) -> Result<(), String
     let mut file = File::create(dest).map_err(|e| format!("create file: {}", e))?;
     let mut buf = vec![0u8; 1024 * 1024];
     let mut done: u64 = 0;
+    // Bounded on both the declared length and what actually arrives.
+    //
+    // Nothing downstream caps this: `MAX_EXTRACT_BYTES` bounds what comes *out* of the archive, and the
+    // archive itself is written until the response ends. A release host that has been compromised, or an
+    // `UPDATE_URL` pointed somewhere hostile, could stream until the disk was full — and on the machine of
+    // the one person who was already convinced to install an update. The declared length is checked first so
+    // the common case costs one `Content-Length` and never touches the disk; the running total is checked as
+    // well, because the header is the server's claim and this is a server that has already been described as
+    // able to misbehave.
+    if total > MAX_DOWNLOAD_BYTES {
+        return Err(format!(
+            "update is {} bytes, over the {} byte limit",
+            total, MAX_DOWNLOAD_BYTES
+        ));
+    }
     loop {
         let n = reader
             .read(&mut buf)
@@ -613,9 +670,13 @@ fn download(app: &tauri::AppHandle, url: &str, dest: &Path) -> Result<(), String
         if n == 0 {
             break;
         }
+        done += n as u64;
+        if done > MAX_DOWNLOAD_BYTES {
+            let _ = std::fs::remove_file(dest);
+            return Err("download exceeded the size limit".to_string());
+        }
         file.write_all(&buf[..n])
             .map_err(|e| format!("write file: {}", e))?;
-        done += n as u64;
         if total > 0 {
             let percent = (done as f64 / total as f64 * 100.0).round() as u64;
             push_update(
@@ -794,7 +855,12 @@ fn verify_update(app: &tauri::AppHandle, release: &Release, zip_path: &Path, zip
     let Some(asset) = digest_asset else {
         log_msg(app, &format!("no {} published; refusing to install", expected_name));
         if unverified_updates_allowed() {
-            log_msg(app, "ALLOW_UNVERIFIED_UPDATES is set; installing anyway");
+            // Said in those words, because it is what happens. These two branches return before
+            // `sha256_handle` and before `verify_update_signature` are ever reached, so the archive is
+            // unpacked and installed having been checked against *nothing at all* - not even for the
+            // damage a truncated or substituted download would do. The escape hatch is documented as being
+            // about the signature, and it is not.
+            log_msg(app, "ALLOW_UNVERIFIED_UPDATES is set; installing a build that was checked against nothing - not even a digest");
             return Ok(file);
         }
         return Err(format!(
@@ -807,7 +873,8 @@ fn verify_update(app: &tauri::AppHandle, release: &Release, zip_path: &Path, zip
     let Some(captured) = regex_capture_hex(&text) else {
         log_msg(app, "digest asset unparseable; refusing to install");
         if unverified_updates_allowed() {
-            log_msg(app, "ALLOW_UNVERIFIED_UPDATES is set; installing anyway");
+            // as above: nothing has been hashed and nothing will be signed-checked
+            log_msg(app, "ALLOW_UNVERIFIED_UPDATES is set; installing a build that was checked against nothing - not even a digest");
             return Ok(file);
         }
         return Err("update refused: the published digest could not be read".into());
@@ -851,6 +918,8 @@ fn regex_capture_hex(text: &str) -> Option<String> {
 /// with it — the check catches a corrupted transfer, not a hostile one. Generous enough for a Tauri build:
 /// the installer and the executable together are well under a hundred megabytes.
 const MAX_EXTRACT_BYTES: u64 = 512 * 1024 * 1024;
+/// Ceiling on the archive itself, checked while it is downloaded rather than once it is on disk.
+const MAX_DOWNLOAD_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_EXTRACT_ENTRIES: usize = 64;
 
 fn extract_update(app: &tauri::AppHandle, file: File, dest_dir: &Path) -> Result<(), String> {
@@ -891,6 +960,30 @@ fn extract_update(app: &tauri::AppHandle, file: File, dest_dir: &Path) -> Result
                 .unwrap_or(false);
         if unsafe_name {
             return Err(format!("unsafe entry in update package: {}", name));
+        }
+        // Reserved DOS device names, which the checks above cannot see.
+        //
+        // `NUL`, `CON`, `COM1`, `LPT1` and their numbered forms contain no separator, no dot and no colon,
+        // so every test above passes - and on Windows `File::create("NUL")` opens the device rather than a
+        // file. A write then goes nowhere the archive names, and a read comes back empty, which is a quieter
+        // outcome than a refusal but not one that should be reachable at all. Only a signed archive gets
+        // this far, so this is about not trusting one source's idea of what is a safe name.
+        if name
+            .split('/')
+            .next_back()
+            .map(|s| {
+                let base = s.split('.').next().unwrap_or("").to_ascii_uppercase();
+                base == "NUL"
+                    || base == "CON"
+                    || base == "PRN"
+                    || base == "AUX"
+                    || (base.len() == 4
+                        && (base.starts_with("COM") || base.starts_with("LPT"))
+                        && base[3..].parse::<u32>().map(|n| (1..=9).contains(&n)).unwrap_or(false))
+            })
+            .unwrap_or(false)
+        {
+            return Err(format!("reserved device name in update package: {}", name));
         }
         let file_name = if name.ends_with(".exe") {
             exe_name.clone()

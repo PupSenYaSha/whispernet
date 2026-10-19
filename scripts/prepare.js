@@ -34,8 +34,27 @@ const pkg = JSON.parse(readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
 const BUILD_TOOLS = ['vite', 'tsx', 'typescript'];
 const required = [...Object.keys(pkg.dependencies || {}), ...BUILD_TOOLS];
 
+// The build tools are `devDependencies`, and `npm ci` legitimately omits them whenever the environment says
+// it only wants what ships: `NODE_ENV=production` or `npm_config_omit=dev`. So on a host configured that
+// way, every tool below is "missing", the install that follows is an `npm ci` that omits them for the same
+// reason, and this exits non-zero having changed nothing.
+//
+// The failure then surfaces as a timeout against the server rather than as "your environment will not let me
+// build", because `npm start` is backgrounded by `deploy.sh` and its exit code never reaches the operator.
+// Said plainly here instead: the check is skipped, because the tools were omitted deliberately, and `vite`
+// is needed at runtime to build the client.
+const buildToolsOmitted = process.env.NODE_ENV === 'production'
+  || /\bdev\b/.test(process.env.npm_config_omit || '')
+  || process.env.NPM_CONFIG_PRODUCTION === 'true';
+const requiredHere = buildToolsOmitted ? Object.keys(pkg.dependencies || {}) : required;
+
+if (buildToolsOmitted) {
+  console.log('[prepare] NODE_ENV=production or npm omit=dev is set; the build tools will not be installed,');
+  console.log('[prepare] so the client cannot be built here. Run `npm ci --include=dev` first.');
+}
+
 const require_ = createRequire(path.join(ROOT, 'package.json'));
-const unresolved = () => required.filter((name) => {
+const unresolved = () => requiredHere.filter((name) => {
   try {
     require_.resolve(name);
     return false;

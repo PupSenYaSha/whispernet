@@ -232,7 +232,22 @@ export function createApp(clientDir?: string) {
     // from being used.
     const secure = req.protocol === 'https' || req.headers['x-forwarded-proto'] === 'https';
     const wsScheme = secure ? 'wss:' : 'ws:';
-    reply.header('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://${mediaHost} http://${mediaHost}; media-src 'self' blob: https://${mediaHost} http://${mediaHost}; connect-src 'self' ${wsScheme}//${cspHost}; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'; font-src 'self'`);
+    // This header, not the one in `src-tauri/tauri.conf.json`, is what the desktop shell actually runs under.
+    //
+    // Tauri's `security.csp` is only consulted for the custom protocol, which serves a *local* frontendDist.
+    // This one points at a remote host, so the webview navigates straight there and the custom protocol is
+    // never involved - making the whole CSP block in `tauri.conf.json` inert. It is left in place because it
+    // documents the intent and because it takes effect the moment the shell is pointed at a local build;
+    // changing it here would fix nothing, and someone "fixing" the config would be fixing the wrong file.
+    //
+    // `frame-src 'none'` is present and `frame-ancestors` alone was not enough: the first stops this page
+    // embedding anything, the second only stops this page being embedded. A messenger has no use for either
+    // direction, and a framing primitive against a page that renders conversation is worth not having.
+    //
+    // `http://${mediaHost}` is deliberately kept: it is what `MEDIA_STORAGE=local` serves over loopback, and
+    // the alternative breaks self-hosting for a media URL that is ciphertext anyway - substituting it yields
+    // a decryption failure, not a read.
+    reply.header('Content-Security-Policy', `default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://${mediaHost} http://${mediaHost}; media-src 'self' blob: https://${mediaHost} http://${mediaHost}; connect-src 'self' ${wsScheme}//${cspHost}; frame-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'self'; object-src 'none'; font-src 'self'`);
     const origin = req.headers.origin;
     if (origin) {
       let allowedHost = '';

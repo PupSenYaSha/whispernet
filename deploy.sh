@@ -44,6 +44,13 @@ LOG="$(mktemp "$STATE_DIR/server-XXXXXXXX.log")"
 # must be exported: npm start reads PORT from the environment, so a plain shell variable left the
 # server on the default port while this script health-checked a different one and reported FAIL
 export PORT="${PORT:-50025}"
+# The client is built on the target, which needs the devDependencies. `npm ci` omits them under
+# NODE_ENV=production or npm_config_omit=dev, and prepare.js would then spend a second full install
+# producing the same omission before failing - so the deploy would die at the health check with nothing but
+# "server not responding" to go on.
+export NODE_ENV=development
+export NPM_CONFIG_PRODUCTION=false
+unset npm_config_omit NPM_CONFIG_OMIT
 # the server sits behind the tunnel, so req.ip is the proxy's address for every caller otherwise
 export TRUST_PROXY="${TRUST_PROXY:-1}"
 export SITE_PORT="${SITE_PORT:-3000}"
