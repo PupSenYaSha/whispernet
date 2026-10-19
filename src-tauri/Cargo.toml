@@ -21,4 +21,4 @@ sha2 = "0.10"
 hex = "0.4"
 # Already in the tree through Tauri; Ed25519 verification of update releases.
 ring = "0.17"
-zip = { version = "3", default-features = false, features = ["deflate"] }
+zip = { version = "9", default-features = false, features = ["deflate"] }
