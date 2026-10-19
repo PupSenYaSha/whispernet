@@ -159,13 +159,9 @@ Pre-built binaries on [Releases](https://github.com/PupSenYaSha/whispernet/relea
 | Linux | `WhisperNet_1.0.0_amd64.deb` |
 | Android | `WhisperNet.apk` |
 
-> **The `v1.0.0` assets are not all from the same build.** The tag was moved forward to ship the security
-> fixes below, and the Linux and Android jobs rebuilt and re-uploaded, but the Windows job **did not run**:
-> it refuses to publish without `UPDATE_SIGNING_KEY_BASE64`, which is not set on this repository. The two
-> Windows assets still date from 4 October. That means the release currently contains fixes for the
-> encryption and four from-a-single-build assumptions only on some platforms, and anyone checking digests
-> against a single build will find they do not agree. Re-running the Windows job after that secret is set
-> makes the release internally consistent again.
+Every asset here is built from the same commit by the same run, and the Windows portable archive is signed
+with the key compiled into the binary, so `WhisperNet_1.0.0_x64-portable.zip.sig` is published beside it and
+the in-app updater will install it.
 
 Every asset is published with a `.sha256` beside it, and you are worth checking it:
 
@@ -287,7 +283,7 @@ Everything has a working default; nothing is required.
 | `MAX_AUTH_ATTEMPTS` | `300` | Coarse per-address auth backstop, counted before anybody has proved who they are |
 | `MAX_AUTH_ATTEMPTS_PER_ADDRESS` | `120` | Per-address sign-in budget, charged on **every** `auth_login` including successful ones, because it bounds bcrypt work rather than mistakes |
 | `ALLOW_UNVERIFIED_UPDATES` | *(unset)* | Desktop only; installs a build with no valid signature — see above |
-| `UPDATE_SIGNING_KEY_BASE64` | *(unset)* | Repository secret; CI refuses to publish a Windows build without it |
+| `UPDATE_SIGNING_KEY_BASE64` | *(unset)* | Repository secret; CI refuses to publish a Windows build without it. Despite the name it holds the private half as **64 hex characters** — what `generate-update-key.mjs` writes, and what `sign-update.mjs` accepts first. Base64 of the raw 32 bytes is the documented alternative and works too; base64 of the *hex text* is 88 characters and is rejected rather than misread |
 
 Creating an account costs a **proof-of-work search**: the client hashes until it finds a value with enough
 leading zero bits, and the server refuses anything short. Measured in a browser at roughly 330,000 hashes a

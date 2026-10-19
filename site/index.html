@@ -273,12 +273,11 @@
       <h2 class="section-title" data-ru="Скачать" data-en="Download">Скачать</h2>
       <p class="section-sub" data-ru="Бесплатно, без рекламы, без подписки." data-en="Free, no ads, no subscription.">Бесплатно, без рекламы, без подписки.</p>
       <!--
-        One release carries assets from more than one build, and saying so is better than a version string
-        that implies otherwise: the Linux and Android jobs rebuilt and re-uploaded, and the Windows job
-        refuses to publish without UPDATE_SIGNING_KEY_BASE64, which is not set on this repository - so the
-        two Windows files still date from the build before the encryption fixes.
+        Every asset below comes from one build of one commit. That was not true for a while, and this page
+        said so while it was: the update signing key had not been put in the repository secrets, so the
+        Windows job refused to publish, and the APK and the .deb were rebuilt around stale Windows files
+        from a month earlier. The note is gone now because it is untrue.
       -->
-      <p class="download-note" data-ru="В текущем релизе APK и .deb собраны заново. Windows-файлы — от предыдущей сборки: их пересборка требует ключа подписи обновлений, которого в репозитории нет." data-en="In this release the APK and the .deb were rebuilt. The Windows files are from the previous build: rebuilding them needs the update signing key, which this repository does not have.">В текущем релизе APK и .deb собраны заново. Windows-файлы — от предыдущей сборки: их пересборка требует ключа подписи обновлений, которого в репозитории нет.</p>
       <div class="download-grid">
         <div class="download-card glass">
           <div class="download-icon">
@@ -286,7 +285,7 @@
           </div>
           <h3>Windows</h3>
           <p class="download-desc" data-ru="Установщик .exe — скачай и запусти" data-en="Installer .exe — download and run">Установщик .exe — скачай и запусти</p>
-          <span class="download-size">~2.6 MB</span>
+          <span class="download-size">~2.9 MB</span>
           <div class="download-links">
             <a href="downloads/WhisperNet_1.0.0_x64-setup.exe" class="btn btn-sm btn-primary" download>
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
