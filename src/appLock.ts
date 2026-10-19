@@ -28,8 +28,6 @@ export interface AppLockSettings {
   autoLockMs: number;
 }
 
-export const DEFAULT_APP_LOCK: AppLockSettings = { enabled: false, autoLockMs: 5 * 60_000 };
-
 const HASH_KEY = 'wn_app_lock_hash';
 const STATE_KEY = 'wn_app_lock_state';
 

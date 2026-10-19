@@ -488,26 +488,6 @@ export function myIdentityKeyBase64(): string | null {
 }
 
 /**
- * The identity key this device has pinned for a peer, or null when it has none.
- *
- * From the session rather than from a profile the server can rewrite, so a checkmark drawn next to a
- * contact refers to the key actually in use for the conversation. Null when there is no session, which
- * is the honest answer: with no key exchanged there is nothing to have verified.
- */
-export function peerDeviceIdentityKeyBase64(peerId: string): string | null {
-  if (!ready || !myId) return null;
-  const pinned = getPinnedIdentityKey(getSessionId(myId, remoteNameFor(peerId, getDeviceId())));
-  if (!pinned || pinned.length === 0) return null;
-  let binary = '';
-  for (const byte of pinned) binary += String.fromCharCode(byte);
-  try {
-    return btoa(binary);
-  } catch {
-    return null;
-  }
-}
-
-/**
  * The number two people read aloud to confirm they are talking to each other.
  *
  * Derived from the long-lived identity keys, so a server that quietly handed each of them a different

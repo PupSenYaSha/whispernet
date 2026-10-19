@@ -947,12 +947,6 @@ function rowToMessage(row: any, includeText: boolean = true): any {
  * and the label is not what opens a body. A sender whose recipient has one device sends one body, which
  * is the ordinary case and exactly what it sent before.
  */
-export interface DeviceBody {
-  /** The device this body is for, as the recipient's own bundle was labelled. */
-  deviceId: string;
-  body: any;
-}
-
 export async function saveMessage(
   id: string,
   senderId: string,
@@ -1453,11 +1447,6 @@ export async function recordRegistrationEvent(scope: string, subject: string, cr
   // Only the scopes still being limited need keeping; anything else is dead weight from a window that has
   // since closed or a ceiling that has since been lifted.
   d.prepare('DELETE FROM registration_events WHERE created_at <= ?').run(createdAt - REGISTRATION_EVENT_RETENTION_MS);
-}
-
-/** Drops every recorded creation. For "forget everything" and for tests that want a clean slate. */
-export async function clearRegistrationEvents(): Promise<void> {
-  getDb().prepare('DELETE FROM registration_events').run();
 }
 
 export async function getReports(): Promise<any[]> {  return getDb().prepare('SELECT id, reporter_id as reporterId, reporter_nick as "reporterNick", target_id as targetId, target_nick as "targetNick", channel, message_id as messageId, message_text as messageText, reason, source, timestamp FROM reports ORDER BY timestamp DESC').all() as any[];

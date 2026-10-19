@@ -110,10 +110,6 @@ export function authAttemptRemainingMs(ip: string, now: number = Date.now()): nu
  * comparisons. Only the window gives it back, which is what the ceiling on failures already does to a sprayed
  * address - see MAX_AUTH_ATTEMPTS_PER_ADDRESS.
  */
-export function clearAuthAttempts(ip: string): void {
-  authAttempts.delete(ip);
-}
-
 /** How many entries each table holds. Reported by the sweep, and asserted on by the tests. */
 export function authCounterSizes(): { pairs: number; names: number } {
   return { pairs: failedLogins.size, names: nicknameFailures.size };

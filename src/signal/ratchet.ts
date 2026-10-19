@@ -159,53 +159,6 @@ export function recordSentMessageKey(state: SessionState, messageNumber: number,
   }
 }
 
-export function initializeRatchetAsSender(
-  sharedSecret: Uint8Array,
-  remoteRatchetPublicKey: Uint8Array
-): { state: SessionState; chainKey: Uint8Array } {
-  const ratchetKeyPair = generateRatchetKeyPair();
-
-  const { rootKey, chainKey } = dhRatchet(
-    sharedSecret,
-    ratchetKeyPair.privateKey,
-    remoteRatchetPublicKey
-  );
-
-  const state = createRatchetState();
-  state.rootKey = rootKey;
-  state.currentRatchetPublicKey = ratchetKeyPair.publicKey;
-  state.sendingRatchetKey = ratchetKeyPair;
-  state.receivingRatchetPublicKey = remoteRatchetPublicKey;
-  state.sendingChainKey = chainKey;
-  state.sendingMessageNumber = 0;
-
-  return { state, chainKey };
-}
-
-export function initializeRatchetAsReceiver(
-  sharedSecret: Uint8Array,
-  remoteRatchetPublicKey: Uint8Array,
-  ratchetKeyPair?: KeyPair
-): { state: SessionState; chainKey: Uint8Array } {
-  const kp = ratchetKeyPair || generateRatchetKeyPair();
-
-  const { rootKey, chainKey } = dhRatchet(
-    sharedSecret,
-    kp.privateKey,
-    remoteRatchetPublicKey
-  );
-
-  const state = createRatchetState();
-  state.rootKey = rootKey;
-  state.currentRatchetPublicKey = kp.publicKey;
-  state.sendingRatchetKey = kp;
-  state.receivingRatchetPublicKey = remoteRatchetPublicKey;
-  state.receivingChainKey = chainKey;
-  state.receivingMessageNumber = 0;
-
-  return { state, chainKey };
-}
-
 export function advanceSendingChain(state: SessionState): Uint8Array {
   if (!state.sendingChainKey) throw new Error('No sending chain key');
 

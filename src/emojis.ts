@@ -57,12 +57,5 @@ export const EMOJI_GROUPS: EmojiGroup[] = [
   },
 ];
 
-/** Everything, flattened, for the quick strip above the groups. */
-export const ALL_EMOJI: string[] = Array.from(new Set(EMOJI_GROUPS.flatMap((g) => g.emojis)));
-
 /** The eight offered without opening anything, which is what a single tap reacts with. */
 export const QUICK_EMOJI: string[] = EMOJI_GROUPS[0].emojis.slice(0, 8);
-
-export function groupEmoji(emoji: string): EmojiGroup | null {
-  return EMOJI_GROUPS.find((g) => g.emojis.includes(emoji)) || null;
-}

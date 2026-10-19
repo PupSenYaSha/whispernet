@@ -7,11 +7,6 @@ import { generateKeyPair } from './keys';
 const INFO_X3DH = new TextEncoder().encode('WhisperNetX3DH');
 const INFO_TRANSCRIPT = new TextEncoder().encode('WhisperNetX3DHTranscript');
 
-export interface X3DHResult {
-  sharedSecret: Uint8Array;
-  message: SignalPreKeyMessage;
-}
-
 export interface X3DHInitResult {
   sharedSecret: Uint8Array;
   message: SignalPreKeyMessage;

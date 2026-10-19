@@ -14,6 +14,10 @@ android/.idea/
 ios/
 src-tauri/target/
 
+# Tauri's generated schema files, used only for IDE validation. `tauri build` writes them, and two of them
+# were byte-identical copies of the same 116 KB document that had been committed by accident.
+src-tauri/gen/schemas/
+
 # jars dropped in for the Cordova bridge, which this project does not use. The Gradle repository blocks that
 # would have picked them up are gone (see android/app/build.gradle), so nothing reads this directory - it is
 # ignored so that the directory itself cannot be committed with something in it.

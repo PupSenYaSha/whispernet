@@ -22,10 +22,6 @@ export function setUploadToken(token: string): void {
   uploadToken = typeof token === 'string' ? token : '';
 }
 
-export function getUploadToken(): string {
-  return uploadToken;
-}
-
 /**
  * The proxied address of an attachment.
  *

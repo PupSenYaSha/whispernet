@@ -101,19 +101,9 @@ export function initializeSignal(): void {
   preKeyManager.initialize();
 }
 
-export function getMyIdentityKeyPair(): KeyPair | null {
-  const ik = preKeyManager.getIdentityKeyPair();
-  if (!ik) return null;
-  return { privateKey: ik.privateKey, publicKey: ik.publicKey };
-}
-
 export function getMyIdentityKeyBase64(): string | null {
   const ik = preKeyManager.getIdentityKeyPair();
   return ik ? arrayToBase64(ik.publicKey) : null;
-}
-
-export function bytesToBase64(bytes: Uint8Array): string {
-  return arrayToBase64(bytes);
 }
 
 export function base64ToBytes(b64: string): Uint8Array {
@@ -149,13 +139,6 @@ export function decodeServerBundle(raw: any): PreKeyBundle | null {
     }
   }
   return bundle;
-}
-
-export function getPeerIdentityKeyBase64(bundle: any): string | null {
-  if (!bundle) return null;
-  if (typeof bundle.identityKey === 'string') return bundle.identityKey;
-  const bytes = toBytes(bundle.identityKey);
-  return bytes ? arrayToBase64(bytes) : null;
 }
 
 export function serializeX3dhMessage(msg: any): any {
@@ -341,10 +324,6 @@ export function releaseResponderPreKey(sessionId: string): void {
   pendingOneTimePreKeys.delete(sessionId);
 }
 
-export function getRemoteIdentityStatus(sessionId: string, identityKey: Uint8Array | null | undefined): 'ok' | 'unknown' | 'changed' {
-  return sessionManager.checkRemoteIdentity(sessionId, identityKey);
-}
-
 /** The identity key the far end was pinned to when this session was created, if there is one. */
 export function getPinnedIdentityKey(sessionId: string): Uint8Array | null {
   const pinned = sessionManager.getSession(sessionId)?.state.remoteIdentityKey;
@@ -393,27 +372,6 @@ export async function decryptWithSignal(
 export function hasSession(userId1: string, userId2: string): boolean {
   const id = sessionManager.getSessionId(userId1, userId2);
   return !!sessionManager.getSession(id);
-}
-
-/**
- * The live chain keys of a session, for the forward-secrecy tests.
- *
- * Exposed deliberately rather than worked around: the claim that a stolen state cannot read what came
- * before it is only worth something if it can be tested against the state the running manager really
- * holds, and reaching into it from a test is cheaper than inventing a second code path that could
- * drift from this one.
- */
-export function getSessionKeysForTest(sessionId: string): {
-  rootKey: number[] | null;
-  receivingChainKey: number[] | null;
-  sendingChainKey: number[] | null;
-} {
-  const state = sessionManager.getSession(sessionId)?.state;
-  return {
-    rootKey: state ? Array.from(state.rootKey) : null,
-    receivingChainKey: state?.receivingChainKey ? Array.from(state.receivingChainKey) : null,
-    sendingChainKey: state?.sendingChainKey ? Array.from(state.sendingChainKey) : null,
-  };
 }
 
 function arrayToBase64(arr: Uint8Array): string {

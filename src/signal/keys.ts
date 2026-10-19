@@ -63,33 +63,6 @@ export function generateOneTimePreKeys(startId: number, count: number): PreKeyRe
   return keys;
 }
 
-export function signKey(identityKey: Uint8Array, publicKey: Uint8Array): Uint8Array {
-  return ed25519.sign(publicKey, identityKey);
-}
-
-export function verifyKey(
-  publicKey: Uint8Array,
-  signature: Uint8Array,
-  message: Uint8Array
-): boolean {
-  return ed25519.verify(signature, message, publicKey);
-}
-
 function randomUint16(): number {
   return crypto.getRandomValues(new Uint16Array(1))[0];
-}
-
-export function encodeKeyPair(kp: KeyPair): string {
-  return JSON.stringify({
-    privateKey: Array.from(kp.privateKey),
-    publicKey: Array.from(kp.publicKey),
-  });
-}
-
-export function decodeKeyPair(data: string): KeyPair {
-  const obj = JSON.parse(data);
-  return {
-    privateKey: new Uint8Array(obj.privateKey),
-    publicKey: new Uint8Array(obj.publicKey),
-  };
 }

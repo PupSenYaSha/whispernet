@@ -58,18 +58,6 @@ export function noteRead(readUpTo: Record<string, number>, channel: string, upTo
   return next;
 }
 
-/**
- * Whether a conversation is showing as typed-in right now.
- *
- * Compared against a clock rather than held as a flag, so a signal that arrived before a reload still
- * expires on schedule instead of sticking for the life of the tab.
- */
-export function isTypingRecently(typingUntil: Record<string, number> | undefined, channel: string): boolean {
-  if (!typingUntil) return false;
-  const until = typingUntil[channel];
-  return typeof until === 'number' && until > Date.now();
-}
-
 /** Records a relayed typing signal, keeping the later of the two times and dropping expired ones. */
 export function noteTyping(typingUntil: Record<string, number>, channel: string, now: number = Date.now()): Record<string, number> {
   const next = { ...typingUntil, [channel]: now + TYPING_VISIBLE_MS };

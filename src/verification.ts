@@ -88,12 +88,3 @@ export function clearVerification(peerId: string): void {
     write(map);
   }
 }
-
-export function verifiedCount(): number {
-  return Object.keys(read()).length;
-}
-
-/** Ids of every contact currently marked verified, for the settings list. */
-export function verifiedPeers(): string[] {
-  return Object.keys(read());
-}

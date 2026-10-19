@@ -334,18 +334,6 @@
     @apply btn bg-accent-primary text-accent-text hover:brightness-110 active:brightness-90;
   }
 
-  .btn-secondary {
-    @apply btn bg-bg-tertiary text-fg-primary hover:bg-bg-hover border border-border-default;
-  }
-
-  .btn-ghost {
-    @apply btn bg-transparent text-fg-secondary hover:bg-bg-hover hover:text-fg-primary;
-  }
-
-  .btn-danger {
-    @apply btn bg-status-error/10 text-status-error hover:bg-status-error/20 border border-status-error/20;
-  }
-
   .input {
     @apply w-full px-4 py-3.5 rounded-2xl bg-bg-tertiary border border-border-default text-fg-primary text-[15px];
     @apply placeholder:text-fg-muted;
@@ -357,52 +345,9 @@
   .input:focus {
     box-shadow: 0 0 0 4px var(--color-accent-bg), inset 0 1px 2px rgba(0, 0, 0, 0.04);
   }
-
-  .card {
-    @apply bg-bg-secondary border border-border-default rounded-2xl;
-  }
-
-  .message-bubble {
-    @apply max-w-[82%] px-4 py-2.5 rounded-2xl text-[15px] leading-relaxed;
-    word-break: break-word;
-  }
-
-  .message-bubble-mine {
-    @apply message-bubble bg-bubble-mine text-bubble-mine-text rounded-br-sm;
-    @apply ml-auto;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.15), 0 4px 16px -4px rgb(var(--color-accent-dim));
-  }
-
-  .message-bubble-other {
-    @apply message-bubble bg-bg-tertiary text-fg-primary rounded-bl-sm;
-    @apply mr-auto;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
-    border: 1px solid rgb(var(--color-border-default));
-  }
-
-  .status-dot {
-    @apply w-2.5 h-2.5 rounded-full;
-  }
-
-  .status-dot-connected {
-    @apply status-dot bg-status-success;
-    box-shadow: 0 0 6px rgb(var(--color-status-success));
-  }
-
-  .status-dot-disconnected {
-    @apply status-dot bg-status-error;
-  }
-
-  .status-dot-connecting {
-    @apply status-dot bg-status-warning animate-pulse;
-  }
 }
 
 @layer utilities {
-  .text-balance {
-    text-wrap: balance;
-  }
-
   .animate-in {
     animation: fadeIn 0.2s ease-out, slideUp 0.25s ease-out;
   }
@@ -415,26 +360,10 @@
     animation: slideInFromRight 0.3s cubic-bezier(0.22, 1, 0.36, 1);
   }
 
-  .animate-slide-left {
-    animation: slideOutToLeft 0.3s cubic-bezier(0.22, 1, 0.36, 1);
-  }
-
-  .animate-scale-in {
-    animation: scaleIn 0.2s cubic-bezier(0.22, 1, 0.36, 1);
-  }
-
-  .animate-fade-slide {
-    animation: fadeSlideIn 0.35s cubic-bezier(0.22, 1, 0.36, 1);
-  }
-
   /* the scroll container is no longer remounted when the first message arrives, so it fades
      without the slide that used to cover the jump */
   .animate-fade-scroll {
     animation: fadeIn 0.25s ease-out;
-  }
-
-  .animate-bounce-in {
-    animation: bounceIn 0.4s cubic-bezier(0.22, 1, 0.36, 1);
   }
 
   .pb-safe {
@@ -443,10 +372,6 @@
 
   .pt-safe {
     padding-top: var(--safe-top);
-  }
-
-  .transition-page {
-    transition: opacity 0.25s ease, transform 0.25s ease;
   }
 
   .animate-step-in {
@@ -474,11 +399,6 @@
   to { transform: translateX(100%); }
 }
 
-@keyframes slideOutToLeft {
-  from { transform: translateX(0); }
-  to { transform: translateX(-100%); }
-}
-
 @keyframes fadeOut {
   from { opacity: 1; }
   to { opacity: 0; }
@@ -497,13 +417,6 @@
 @keyframes messageAppear {
   from { opacity: 0; transform: translateY(8px) scale(0.98); }
   to { opacity: 1; transform: translateY(0) scale(1); }
-}
-
-@keyframes bounceIn {
-  0% { opacity: 0; transform: scale(0.3); }
-  50% { opacity: 1; transform: scale(1.05); }
-  70% { transform: scale(0.9); }
-  100% { transform: scale(1); }
 }
 
 @keyframes stepIn {

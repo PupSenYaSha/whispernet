@@ -77,8 +77,8 @@ export default defineConfig({
         // across ordinary UI edits.
         //
         // Written as a function rather than the object form because that one resolves each key as a module
-        // id and errors on one that is not in the graph. `@noble/ciphers` is a declared dependency that
-        // nothing imports, so the object form names a module that is not there.
+        // id and errors on one that is not in the graph - a declared dependency that nothing imports would
+        // name a module that is not there.
         manualChunks(id) {
           // @noble/* is the biggest thing in the bundle and its contents are keyed by the dependency
           // versions, not by anything in this repository, so it is the most stable chunk there is.

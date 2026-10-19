@@ -133,30 +133,12 @@ function idbPut(key: string, value: unknown): Promise<boolean> {
   });
 }
 
-function idbDelete(key: string): Promise<void> {
-  return openDb().then((db) => {
-    if (!db) return;
-    // The transaction is awaited, not merely started. It used to fire the delete and resolve on the same
-    // tick, so `destroyDeviceKey` returned while the key was still on disk and a `deviceKey()` called
-    // straight afterwards could read back the key it had just been told to forget.
-    return new Promise<void>((resolve) => {
-      try {
-        const tx = db.transaction(STORE, 'readwrite');
-        tx.objectStore(STORE).delete(key);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => resolve();
-        tx.onabort = () => resolve();
-      } catch { resolve(); }
-    });
-  });
-}
-
 let cached: CryptoKey | null = null;
 /**
  * The generation in flight, so two callers cannot both make one.
  *
- * `deviceKeyAvailable`, `storePassword` and `readStoredAuth` all reach this during the same startup tick,
- * and each awaits between asking whether there is a key and writing one. Two overlapping callers therefore
+ * `storePassword` and `readStoredAuth` both reach this during the same startup tick, and each awaits
+ * between asking whether there is a key and writing one. Two overlapping callers therefore
  * both read *absent* and both generated: the second write to IndexedDB replaced the first, and `cached` ended
  * up as whichever resolved last. If `storePassword` had sealed the stored password under the key that lost,
  * the database now holds a key that cannot open it, and on the next launch `readStoredAuth` returned null -
@@ -197,11 +179,6 @@ async function deviceKey(): Promise<CryptoKey | null> {
     // for a promise already settled with `null`
     keyPending = null;
   }
-}
-
-/** Whether this browser can hold a real device-bound key, as opposed to falling back. */
-export async function deviceKeyAvailable(): Promise<boolean> {
-  return (await deviceKey()) !== null;
 }
 
 /**
@@ -487,10 +464,4 @@ export async function retireLegacyFingerprint(): Promise<void> {
       }
     }
   } catch { /* nothing to retire */ }
-}
-
-/** Forgets the device key itself. Used by "clear local data". */
-export async function destroyDeviceKey(): Promise<void> {
-  cached = null;
-  await idbDelete(WRAP_KEY_ID);
 }
