@@ -111,7 +111,7 @@ jobs:
         # repository exists to keep off servers other than the two ends of a conversation, and a repo with a
         # public download button on its own front page is not somewhere to leave it lying around for a week.
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-traces
           path: test-results/
