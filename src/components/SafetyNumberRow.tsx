@@ -1,10 +1,3 @@
-import { useEffect, useState, useCallback } from 'react';
-import { safetyNumber } from '../dmCrypto';
-import { cn } from '../utils';
-import { useConnection } from '../context';
-import { isPeerVerified, markVerified, clearVerification } from '../verification';
-import QRCode from 'qrcode';
-
 /**
  * The number two people read aloud to be sure they are talking to each other.
  *
@@ -17,7 +10,21 @@ import QRCode from 'qrcode';
  * nobody performs protects nobody. But it can be recorded: once the reader says they compared it, the
  * contact is marked as verified, and the mark disappears again the moment the number on screen changes -
  * which is the case somebody needs to notice.
+ *
+ * QR scan: you can scan the other person's safety number QR code instead of reading it aloud. The scanned
+ * number is compared against your screen's number — if they match, the contact is verified.
  */
+import { useEffect, useState, useCallback } from 'react';
+import QRCode from 'qrcode';
+import { safetyNumber } from '../dmCrypto';
+import { cn } from '../utils';
+import { useConnection } from '../context';
+import { isPeerVerified, markVerified, clearVerification } from '../verification';
+import { QRScannerModal } from './QRScannerModal';
+
+/** Safety number format: 6 groups of 8 hex digits separated by spaces. */
+const SAFETY_NUMBER_RE = /^[0-9A-F]{8}( [0-9A-F]{8}){5}$/;
+
 export function SafetyNumberRow({ peerId, peerIdentityKey }: { peerId: string; peerIdentityKey?: string | null }) {
   const { t } = useConnection();
   const [number, setNumber] = useState<string | null>(null);
@@ -25,6 +32,7 @@ export function SafetyNumberRow({ peerId, peerIdentityKey }: { peerId: string; p
   const [unavailable, setUnavailable] = useState(false);
   const [open, setOpen] = useState(false);
   const [verified, setVerified] = useState(false);
+  const [scannerOpen, setScannerOpen] = useState(false);
 
   const generateQr = useCallback(async (num: string | null) => {
     if (!num) { setQrDataUrl(null); return; }
@@ -64,6 +72,16 @@ export function SafetyNumberRow({ peerId, peerIdentityKey }: { peerId: string; p
   useEffect(() => {
     setVerified(isPeerVerified(peerId, peerIdentityKey));
   }, [peerId, peerIdentityKey]);
+
+  const handleScanned = useCallback((scanned: string) => {
+    if (!number) return;
+    const match = SAFETY_NUMBER_RE.test(scanned) && scanned === number;
+    if (match) {
+      markVerified(peerId, peerIdentityKey);
+      setVerified(true);
+    }
+    setScannerOpen(false);
+  }, [number, peerId, peerIdentityKey]);
 
   if (unavailable) {
     return (
@@ -131,20 +149,28 @@ export function SafetyNumberRow({ peerId, peerIdentityKey }: { peerId: string; p
                 >
                   {verified ? t('safety_number_unverify') : t('safety_number_mark_verified')}
                 </button>
-                <button
-                  onClick={() => {
-                    if (!qrDataUrl) return;
-                    try {
-                      const link = document.createElement('a');
-                      link.download = `safety-number-${peerId}.png`;
-                      link.href = qrDataUrl;
-                      link.click();
-                    } catch { /* ignore */ }
-                  }}
-                  className="w-full py-2 rounded-xl text-[13px] font-medium text-fg-muted border border-border-default hover:bg-bg-tertiary transition-colors"
-                >
-                  {t('safety_number_download_qr')}
-                </button>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setScannerOpen(true)}
+                    className="flex-1 py-2 rounded-xl border border-border-default text-fg-muted text-[13px] font-medium hover:bg-bg-tertiary transition-colors"
+                  >
+                    {t('qr_scan_title')}
+                  </button>
+                  <button
+                    onClick={() => {
+                      if (!qrDataUrl) return;
+                      try {
+                        const link = document.createElement('a');
+                        link.download = `safety-number-${peerId}.png`;
+                        link.href = qrDataUrl;
+                        link.click();
+                      } catch { /* ignore */ }
+                    }}
+                    className="flex-1 py-2 rounded-xl text-[13px] font-medium text-fg-muted border border-border-default hover:bg-bg-tertiary transition-colors"
+                  >
+                    {t('safety_number_download_qr')}
+                  </button>
+                </div>
               </div>
             </>
           ) : (
@@ -152,6 +178,16 @@ export function SafetyNumberRow({ peerId, peerIdentityKey }: { peerId: string; p
           )}
         </div>
       )}
+
+      <QRScannerModal
+        open={scannerOpen}
+        onClose={() => setScannerOpen(false)}
+        onScanned={handleScanned}
+        onInvalid={(reason) => {
+          alert(t('qr_scan_failed') + ': ' + reason);
+          setScannerOpen(false);
+        }}
+      />
     </div>
   );
 }
