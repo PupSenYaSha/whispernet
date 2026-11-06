@@ -35,7 +35,7 @@ function loadFilters(): Record<string, Filter> {
 }
 
 export function ChatList({ onSelect }: { onSelect?: () => void }) {
-  const { state, openDm, openGeneral, openProfile, refreshContacts, searchUsers, t } = useConnection();
+  const { state, dispatch, openDm, openGeneral, openProfile, refreshContacts, searchUsers, getGroupHistory, openGroupCreate, t } = useConnection();
   const [query, setQuery] = useState('');
   const [filters, setFilters] = useState<Record<string, Filter>>(loadFilters);
   const [showFilters, setShowFilters] = useState(false);
@@ -203,9 +203,71 @@ export function ChatList({ onSelect }: { onSelect?: () => void }) {
                 {unreadFilterEmpty ? t('filter_unread_empty') : t('no_chats')}
               </p>
             )}
+            {state.groups.length > 0 && (
+              <div className="px-4 py-2">
+                <span className="text-[11px] font-semibold text-fg-muted uppercase tracking-wider">{t('groups')}</span>
+              </div>
+            )}
+            <div className="p-2 space-y-0.5">
+              {state.groups.map((group) => {
+                const isActive = state.activeChannel === `group:${group.id}`;
+                const openGroup = () => {
+                  dispatch({ type: 'SET_ACTIVE_CHANNEL', channel: `group:${group.id}` as any });
+                  getGroupHistory(group.id);
+                  onSelect?.();
+                };
+                return (
+                  <button
+                    key={group.id}
+                    data-testid="group-row"
+                    onClick={openGroup}
+                    className={cn(
+                      'w-full flex items-center gap-3.5 px-3 py-3 rounded-2xl transition-all text-left',
+                      isActive
+                        ? 'bg-accent-primary/10 text-accent-primary'
+                        : 'hover:bg-bg-tertiary text-fg-primary',
+                    )}
+                  >
+                    <div className="relative flex-shrink-0">
+                      <Avatar
+                        userId={group.id}
+                        nickname={group.name}
+                        avatar={{ ext: null, updatedAt: null }}
+                        className="w-12 h-12 rounded-xl flex-shrink-0"
+                        textClassName="text-[14px]"
+                      />
+                    </div>
+                    <div className="min-w-0 flex-1 flex items-center gap-2">
+                      <span className={cn('text-[15px] block truncate', group.createdBy === state.userId ? 'font-bold' : 'font-semibold')}>
+                        @{group.name}
+                      </span>
+                      <span className="text-[12px] shrink-0 ml-auto text-fg-muted">
+                        {group.memberCount} {t('members')}
+                      </span>
+                    </div>
+                    <div className="flex-shrink-0">
+                      <span className={cn('text-[11px] font-medium', group.myRole === 'admin' ? 'text-accent-primary' : 'text-fg-muted')}>
+                        {group.isChannel ? t('channel') : (group.myRole === 'admin' ? t('admin') : t('member'))}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
           </>
         )}
       </div>
+
+      <button
+        data-testid="group-create"
+        onClick={openGroupCreate}
+        className="w-full py-3 rounded-2xl bg-accent-primary text-accent-text text-[15px] font-semibold hover:brightness-110 transition-all flex items-center justify-center gap-2 mx-4 mb-4"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" />
+        </svg>
+        {t('create_group')}
+      </button>
 
       <button onClick={() => { if (state.userId) openProfile(state.userId); }}
         className="flex items-center gap-3 px-4 h-14 border-t border-border-default bg-bg-secondary hover:bg-bg-tertiary transition-colors text-left flex-shrink-0">

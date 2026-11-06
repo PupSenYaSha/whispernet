@@ -1,6 +1,7 @@
 import { WebSocket } from 'ws';
 import { issueUploadToken } from './uploadTokens.js';
-import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundlesByIds, takePreKeyBundlesForSender, resetIssuedPreKeys, getIdentityKeyB64, setIdentityKeyB64, getIdentityKeysByIds, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, updateEncryptedMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, setUserAvatar, removeUserAvatar, getAvatarDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, StoredSession, getChannelMediaKey, countRegistrations, oldestRegistration, recordRegistrationEvent } from './database.js';
+import { sendPush } from './push.js';
+import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundlesByIds, takePreKeyBundlesForSender, resetIssuedPreKeys, getIdentityKeyB64, setIdentityKeyB64, getIdentityKeysByIds, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, updateEncryptedMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, setUserAvatar, removeUserAvatar, getAvatarDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, StoredSession, getChannelMediaKey, countRegistrations, oldestRegistration, recordRegistrationEvent, createGroup, getGroup, getGroupByInviteCode, getUserGroups, addGroupMember, removeGroupMember, getGroupMembers, getGroupMember, updateGroupRole, updateGroup, deleteGroup, isGroupMember, getGroupHistory } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -1350,10 +1351,255 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       case 'avatar_remove':
         if (userId) await handleAvatarRemove(userId, ws);
         break;
+      case 'group_create':
+        if (userId) await handleGroupCreate(userId, ws, message.payload);
+        break;
+      case 'group_list':
+        if (userId) await handleGroupList(userId, ws);
+        break;
+      case 'group_join':
+        if (userId) await handleGroupJoin(userId, ws, message.payload);
+        break;
+      case 'group_leave':
+        if (userId) await handleGroupLeave(userId, ws, message.payload);
+        break;
+      case 'group_info':
+        if (userId) await handleGroupInfo(userId, ws, message.payload);
+        break;
+      case 'group_members':
+        if (userId) await handleGroupMembers(userId, ws, message.payload);
+        break;
+      case 'group_message':
+        if (userId) await handleGroupMessage(userId, ws, message.payload);
+        break;
+      case 'group_history':
+        if (userId) await handleGroupHistory(userId, ws, message.payload);
+        break;
       default:
         logSecurity('UNKNOWN_COMMAND', { type: message.type, auth: !!userId, ip });
         send(ws, { type: 'error', payload: { code: 'UNKNOWN_MESSAGE', message: 'Unknown message type' }, timestamp: Date.now() });
     }
+  }
+
+  async function handleGroupCreate(userId: string, ws: WebSocket, payload: { name: string; description?: string; isPrivate?: boolean }): Promise<void> {
+    if (!payload?.name || typeof payload.name !== 'string' || payload.name.trim().length === 0) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Group name required' }, timestamp: Date.now() });
+      return;
+    }
+    const name = payload.name.trim().slice(0, 64);
+    const id = `group:${crypto.randomUUID()}`;
+    const created = await createGroup(id, name, userId, payload.description, payload.isPrivate);
+    if (!created) {
+      send(ws, { type: 'error', payload: { code: 'GROUP_CREATE_FAILED', message: 'Could not create group' }, timestamp: Date.now() });
+      return;
+    }
+    const grp = await getGroup(id);
+    send(ws, { type: 'group_created', payload: { groupId: id, name, role: 'admin', inviteCode: grp?.inviteCode || null, isChannel: grp?.isChannel || false }, timestamp: Date.now() });
+  }
+
+  async function handleGroupList(userId: string, ws: WebSocket): Promise<void> {
+    const groups = await getUserGroups(userId);
+    send(ws, { type: 'group_list', payload: { groups }, timestamp: Date.now() });
+  }
+
+  async function handleGroupJoin(userId: string, ws: WebSocket, payload: { groupId?: string; inviteCode?: string }): Promise<void> {
+    let groupId = typeof payload?.groupId === 'string' ? payload.groupId : '';
+    if (!groupId && typeof payload?.inviteCode === 'string') {
+      const resolved = await getGroupByInviteCode(payload.inviteCode);
+      if (!resolved) {
+        send(ws, { type: 'error', payload: { code: 'GROUP_NOT_FOUND', message: 'Invalid invite code' }, timestamp: Date.now() });
+        return;
+      }
+      groupId = resolved.id;
+    }
+    if (!groupId) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Group id or invite code required' }, timestamp: Date.now() });
+      return;
+    }
+    const group = await getGroup(groupId);
+    if (!group) {
+      send(ws, { type: 'error', payload: { code: 'GROUP_NOT_FOUND', message: 'Group not found' }, timestamp: Date.now() });
+      return;
+    }
+    const already = await isGroupMember(groupId, userId);
+    if (already) {
+      send(ws, { type: 'error', payload: { code: 'ALREADY_MEMBER', message: 'Already a member of this group' }, timestamp: Date.now() });
+      return;
+    }
+    const added = await addGroupMember(groupId, userId, userId, 'member');
+    if (!added) {
+      send(ws, { type: 'error', payload: { code: 'GROUP_JOIN_FAILED', message: 'Could not join group' }, timestamp: Date.now() });
+      return;
+    }
+    send(ws, { type: 'group_joined', payload: { groupId: group.id, name: group.name, role: 'member' }, timestamp: Date.now() });
+  }
+
+  async function handleGroupLeave(userId: string, ws: WebSocket, payload: { groupId: string }): Promise<void> {
+    if (!payload?.groupId) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Group id required' }, timestamp: Date.now() });
+      return;
+    }
+    const group = await getGroup(payload.groupId);
+    if (!group) {
+      send(ws, { type: 'error', payload: { code: 'GROUP_NOT_FOUND', message: 'Group not found' }, timestamp: Date.now() });
+      return;
+    }
+    if (group.createdBy === userId) {
+      send(ws, { type: 'error', payload: { code: 'CANNOT_LEAVE', message: 'Group creator cannot leave. Delete the group or transfer ownership first.' }, timestamp: Date.now() });
+      return;
+    }
+    const removed = await removeGroupMember(payload.groupId, userId);
+    if (!removed) {
+      send(ws, { type: 'error', payload: { code: 'NOT_MEMBER', message: 'You are not a member of this group' }, timestamp: Date.now() });
+      return;
+    }
+    send(ws, { type: 'group_left', payload: { groupId: payload.groupId }, timestamp: Date.now() });
+  }
+
+  async function handleGroupInfo(userId: string, ws: WebSocket, payload: { groupId: string }): Promise<void> {
+    if (!payload?.groupId) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Group id required' }, timestamp: Date.now() });
+      return;
+    }
+    if (!(await isGroupMember(payload.groupId, userId))) {
+      send(ws, { type: 'error', payload: { code: 'NOT_MEMBER', message: 'You are not a member of this group' }, timestamp: Date.now() });
+      return;
+    }
+    const group = await getGroup(payload.groupId);
+    if (!group) {
+      send(ws, { type: 'error', payload: { code: 'GROUP_NOT_FOUND', message: 'Group not found' }, timestamp: Date.now() });
+      return;
+    }
+    const myMember = await getGroupMember(payload.groupId, userId);
+    send(ws, {
+      type: 'group_info',
+      payload: {
+        groupId: group.id,
+        name: group.name,
+        description: group.description,
+        createdBy: group.createdBy,
+        createdAt: group.createdAt,
+        isPrivate: group.isPrivate,
+        inviteCode: group.inviteCode,
+        myRole: myMember?.role ?? 'member',
+      },
+      timestamp: Date.now(),
+    });
+  }
+
+  async function handleGroupMembers(userId: string, ws: WebSocket, payload: { groupId: string }): Promise<void> {
+    if (!payload?.groupId) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Group id required' }, timestamp: Date.now() });
+      return;
+    }
+    if (!(await isGroupMember(payload.groupId, userId))) {
+      send(ws, { type: 'error', payload: { code: 'NOT_MEMBER', message: 'You are not a member of this group' }, timestamp: Date.now() });
+      return;
+    }
+    const members = await getGroupMembers(payload.groupId);
+    const userMeta = await buildAvatarInfoMap();
+    const enriched = members.map(m => ({ ...m, avatar: avatarInfo(userMeta.get(m.userId)) }));
+    send(ws, { type: 'group_members', payload: { groupId: payload.groupId, members: enriched }, timestamp: Date.now() });
+  }
+
+  async function handleGroupMessage(userId: string, ws: WebSocket, payload: { groupId: string; text?: string; encrypted?: any; fileKey?: Record<string, string>; ttl?: number; quoted?: { id?: string; text?: string; sender?: string } }): Promise<void> {
+    if (!payload?.groupId) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Group id required' }, timestamp: Date.now() });
+      return;
+    }
+    if (!(await isGroupMember(payload.groupId, userId))) {
+      send(ws, { type: 'error', payload: { code: 'NOT_MEMBER', message: 'You are not a member of this group' }, timestamp: Date.now() });
+      return;
+    }
+    const senderDevices = devicesForUser(userId);
+    const sender = senderDevices[0] || null;
+    if (!sender) return;
+    if (!checkMessageRateLimit(userId)) {
+      send(ws, { type: 'error', payload: { code: 'RATE_LIMITED', message: 'Slow down.' }, timestamp: Date.now() });
+      return;
+    }
+    const channelId = `group:${payload.groupId}`;
+    const messageId = crypto.randomUUID();
+    const timestamp = Date.now();
+    const fileKey = isValidFileKeyMap(payload?.fileKey) ? payload.fileKey : undefined;
+    const expiresAt = resolveExpiry(payload?.ttl, timestamp);
+    const quoted = await resolveQuote(userId, payload?.quoted, channelId);
+    const text = payload.encrypted ? '' : sanitizeText(payload.text || '');
+    await saveMessage(messageId, userId, sender.nickname, text, timestamp, payload.encrypted, channelId, fileKey, quoted ? quoted.id : undefined, undefined, expiresAt, (quoted ? quoted.text : undefined) ?? undefined, (quoted ? quoted.sender : undefined) ?? undefined);
+
+    const groupMembers = await getGroupMembers(payload.groupId);
+    const memberIds = groupMembers.map(m => m.userId);
+    const groupPayload = {
+      id: messageId,
+      senderId: userId,
+      senderNickname: sender.nickname,
+      senderAvatar: avatarInfo(await getProfileMeta(userId)),
+      text,
+      encrypted: payload.encrypted ? payload.encrypted : null,
+      timestamp,
+      channel: channelId,
+      fileKey,
+      expiresAt,
+      quotedMessageId: quoted?.id,
+      quotedMessageText: quoted?.text ?? undefined,
+      quotedMessageSender: quoted?.sender ?? undefined,
+      reactions: await getReactionsForMessage(messageId),
+    };
+    for (const memberId of memberIds) {
+      const memberDevices = devicesForUser(memberId);
+      for (const dev of memberDevices) {
+        send(dev.ws, { type: 'group_message', payload: { ...groupPayload, isOwn: memberId === userId }, timestamp });
+      }
+    }
+    send(ws, { type: 'group_message', payload: { ...groupPayload, isOwn: true }, timestamp });
+    // Push уведомления участникам группы (кроме отправителя)
+    for (const memberId of memberIds) {
+      if (memberId !== userId) {
+        void sendPush(memberId, {
+          title: `Новое сообщение в группе ${payload.groupId}`,
+          body: payload.encrypted ? 'Новое зашифрованное сообщение' : (payload.text || ''),
+          url: '/',
+        });
+      }
+    }
+  }
+
+  async function handleGroupHistory(userId: string, ws: WebSocket, payload: { groupId: string; before?: number; limit?: number }): Promise<void> {
+    if (!payload?.groupId) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Group id required' }, timestamp: Date.now() });
+      return;
+    }
+    if (!(await isGroupMember(payload.groupId, userId))) {
+      send(ws, { type: 'error', payload: { code: 'NOT_MEMBER', message: 'You are not a member of this group' }, timestamp: Date.now() });
+      return;
+    }
+    const before = Number.isFinite(payload?.before) ? Number(payload?.before) : undefined;
+    const limit = Math.min(Math.max(Number(payload?.limit) || 50, 1), 100);
+    const messages = await getGroupHistory(payload.groupId, limit, before);
+    const userMeta = await buildAvatarInfoMap();
+    const reactionsById = await getReactionsForMessages(messages.map((m) => m.id));
+    const page = {
+      channel: `group:${payload.groupId}`,
+      groupId: payload.groupId,
+      messages: messages.map(m => ({
+        id: m.id,
+        senderId: m.senderId,
+        senderNickname: m.senderNickname,
+        senderAvatar: avatarInfo(userMeta.get(m.senderId)),
+        text: m.text,
+        encrypted: m.encrypted || null,
+        timestamp: m.timestamp,
+        isOwn: m.senderId === userId,
+        fileKey: m.fileKey || null,
+        expiresAt: m.expiresAt || null,
+        quotedMessageId: m.quotedMessageId ?? null,
+        quotedMessageText: m.quotedMessageText ?? null,
+        quotedMessageSender: m.quotedMessageSender ?? null,
+        reactions: reactionsById.get(m.id) || [],
+      })),
+      hasMore: messages.length === limit,
+    };
+    send(ws, { type: 'group_history', payload: page, timestamp: Date.now() });
   }
 
   async function handleAuthLogin(ws: WebSocket, payload: { nickname: string; password: string; preKeyBundle?: any; deviceId?: string; deviceInfo?: string }): Promise<void> {
@@ -1853,6 +2099,11 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       return;
     }
     await saveMessage(messageId, senderId, sender.nickname, '', timestamp, payload.encrypted, channelId, fileKey, quoted ? quoted.id : undefined, undefined, expiresAt, (quoted ? quoted.text : undefined) ?? undefined, (quoted ? quoted.sender : undefined) ?? undefined, clientId);
+    void sendPush(recipientUser.id, {
+      title: `Новое сообщение от ${sender.nickname}`,
+      body: payload.encrypted ? 'Новое зашифрованное сообщение' : (payload.text || ''),
+      url: '/',
+    });
 
     const dmPayload = {
       id: messageId,

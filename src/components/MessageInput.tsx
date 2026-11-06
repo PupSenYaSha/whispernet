@@ -3,6 +3,7 @@ import { useConnection } from '../context';
 import { mediaErrorKey, isAbortError, MAX_UPLOAD_BYTES } from '../upload';
 import { MAX_MESSAGE_CHARS } from '../limits';
 import { getDraft, setDraft, subscribeDrafts } from '../drafts';
+import { StickerPicker } from './StickerPicker';
 
 /**
  * Where the half-typed message for a conversation is kept.
@@ -19,6 +20,7 @@ export function MessageInput() {
   const [uploading, setUploading] = useState(false);
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [stickerPickerOpen, setStickerPickerOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const fileRef = useRef<HTMLInputElement>(null);
@@ -187,6 +189,17 @@ export function MessageInput() {
     setUploading(false);
   };
 
+  const sendSticker = (packId: string, file: string) => {
+    if (!isConnected) return;
+    const stickerText = `[sticker:${packId}:${file}]`;
+    if (isDm && dmTarget) {
+      void sendDm(dmTarget, stickerText);
+    } else {
+      void sendMessage(stickerText);
+    }
+    setStickerPickerOpen(false);
+  };
+
   return isBlockedChat ? (
     <div className="px-3 pt-3 pb-safe border-t border-border-default bg-bg-secondary/60">
       <div className="flex items-center justify-between gap-3 rounded-2xl px-4 py-3 border border-border-default bg-bg-tertiary/50">
@@ -265,6 +278,12 @@ export function MessageInput() {
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" /></svg>
           )}
         </button>
+        <button type="button" disabled={!isConnected || uploading}
+          onClick={() => setStickerPickerOpen(true)}
+          className="flex-shrink-0 w-11 h-11 rounded-2xl bg-bg-tertiary border border-border-default text-fg-muted flex items-center justify-center hover:bg-bg-hover hover:text-fg-primary disabled:opacity-30 transition-all"
+          aria-label={t('stickers')}>
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M9 2L15.09 8.26L22 9.27L17 14.14L18.18 21.02L12 17.77L5.82 21.02L7 14.14L2 9.27L8.91 8.26L12 2Z" /></svg>
+        </button>
         <textarea
           data-testid="composer"
           ref={textareaRef}
@@ -295,6 +314,13 @@ export function MessageInput() {
         </button>
 
       </div>
+      {stickerPickerOpen && (
+        <StickerPicker
+          open={stickerPickerOpen}
+          onClose={() => setStickerPickerOpen(false)}
+          onSticker={sendSticker}
+        />
+      )}
     </form>
   );
 }

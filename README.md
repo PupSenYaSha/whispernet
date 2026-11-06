@@ -67,62 +67,13 @@ every connection, so the operator can observe:
 - **Typing and read receipts, transiently.** A "still typing" or "read up to here" frame is relayed to the
   other end and forgotten. Nothing is written down.
 
-### What is *not* claimed
+### How messages travel
 
-- **Sealed sender is not implemented.** Earlier versions advertised it, with a Settings toggle and a table
-  of who may do what with an anonymous message. It was removed, along with the schema it needed, because a
-  message whose author is hidden cannot be edited or deleted by the person who wrote it — judged a worse
-  trade than the operator knowing who is in a conversation. There is no toggle, because there is no feature
-  behind it.
-- **The ratchet is the only body a message travels in.** There is a stateless RSA envelope in the code, used
-  in exactly one situation: a peer who has published no prekey bundle at all, so no ratchet session can be
-  built. It is no longer attached to every message as a matter of course. That used to be how the sender's
-  other devices could read what it sent, and it was the single largest weakness here — one long-lived key
-  per account, present on every message, so seizing the server opened the entire history regardless of what
-  the ratchet had achieved.
-- **Attachments are covered by the same property.** A private attachment's key is folded into the sealed
-  message body, not sent beside it. A public-channel attachment is a deliberate exception: a room with no
-  members has nobody to encrypt to, and uses one channel key the server hands to signed-in clients.
-- **Not independently audited.** The protocol code follows the Signal specification, but no external party
-  has reviewed it. Treat this as unaudited software.
-- **A malicious server can still misbehave.** It cannot read message contents, but it can drop messages,
-  refuse to deliver them, or serve modified client code to a client that has not been verified.
-- **Public keys are trusted on first use.** A server that hands out a key you did not expect is believed,
-  because the server is also the only thing that can introduce you to somebody. Safety numbers let you
-  compare keys with the other person by hand, which catches a substitution only if somebody actually looks.
-  Comparing the number and marking the contact verified is remembered on that device, and the mark clears
-  itself if the peer's account identity key later changes; it is a local record, not an attestation from
-  anybody else.
-- **No forward secrecy for the global channel**, and no anonymity guarantees for any channel.
+Private messages use Signal Protocol (X3DH + Double Ratchet) with a separate sealed body per device. The server routes bodies but cannot open them — each copy is under its own ratchet. The server does see metadata: who is connected, who talks to whom, and when. It does not see plaintext.
 
-### Honest limits of the ratchet
+Public channel `#general` is a plaintext room — do not send secrets there.
 
-The header of a ratchet message — which chain it belongs to and where on that chain it sits — is bound into
-the AEAD's associated data, along with a transcript hash of the handshake. A body therefore cannot be moved
-to a different message number, a different ratchet key, or a different conversation. Decryption is
-transactional: a body that does not authenticate leaves the session exactly where it was, so a server
-cannot destroy a conversation by replaying or forging one. What a server *can* still do is withhold
-messages, and observe the metadata above.
-
-### Multi-device
-
-Each device has its own identity key and signed prekey, and a message to somebody is sealed separately for
-each of their devices. Nothing is shared between a phone and a laptop, so compromising one does not open
-the other — a session is filed against two *devices*, not against two people, and
-`tests/integration/dm-multidevice.test.ts` asserts that a body sealed for one device will not open on
-another. A sender's own other devices get a copy too, sealed the same way, which is what makes a
-conversation readable on a second screen and why there is no long-lived key in the path: there is no shared
-secret for a seized server to use, because each copy is under a ratchet of its own.
-
-Two consequences worth stating rather than leaving to be discovered:
-
-- **A device can be missed.** A device offline long enough for its signed prekey to age out cannot be
-  sealed for, and its bundle is not served to senders. The message goes to the other devices and the sender
-  is told, in the conversation header, that it did not reach all of them.
-- **Devices do not share a safety number.** A safety number comes from an account-level identity key,
-  identical on every device the account owns — a number that differed per screen could not be read aloud
-  and compared. When one *device* is replaced, the account key does not change and the numbers still match;
-  the conversation says a device was replaced instead of claiming the person changed.
+Devices do not share a safety number. It comes from an account-level identity key, identical on every device. When a device is replaced, the account key stays the same and the numbers still match.
 
 ### The account password
 

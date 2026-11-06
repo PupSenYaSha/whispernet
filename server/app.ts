@@ -11,7 +11,8 @@ import os from 'os';
 import { resolveUploadTokenUser } from './uploadTokens.js';
 import { existsSync } from 'fs';
 import { handleConnection, startHeartbeatCheck, getTotalConnections, flushSessionWrites, terminateAllConnections } from './handlers.js';
-import { initializeDatabase, getMediaDir, getAvatarDir, getUserProfile, closeDatabase } from './database.js';
+import { getVapidPublicKey } from './push.js';
+import { initializeDatabase, getMediaDir, getAvatarDir, getUserProfile, closeDatabase, getDataDir, savePushSubscription, getPushSubscriptions, removePushSubscription } from './database.js';
 import {
   UPLOAD_RATE_LIMIT,
   UPLOAD_RATE_WINDOW,
@@ -303,6 +304,32 @@ export function createApp(clientDir?: string) {
 
   app.get('/health', async () => ({ status: 'ok' }));
 
+  app.get('/api/vapid-public-key', async () => {
+    const key = getVapidPublicKey();
+    if (!key) {
+      return { error: 'VAPID key not available' };
+    }
+    return { publicKey: key };
+  });
+
+  app.post('/api/push-subscribe', async (req, reply) => {
+    const { endpoint, p256dhKey, authKey, deviceId } = req.body as any;
+    if (!endpoint || !p256dhKey || !authKey) {
+      return reply.code(400).send({ error: 'Missing subscription fields' });
+    }
+    // Use a temporary userId from query or header; in production this comes from auth
+    const userId = (req.query as any).userId || (req.headers['x-user-id'] as string) || 'anonymous';
+    await savePushSubscription(userId, deviceId || 'unknown', endpoint, p256dhKey, authKey);
+    return { ok: true };
+  });
+
+  app.post('/api/push-unsubscribe', async (req, reply) => {
+    const { deviceId } = req.body as any;
+    const userId = (req.query as any).userId || (req.headers['x-user-id'] as string) || 'anonymous';
+    await removePushSubscription(userId, deviceId || 'unknown');
+    return { ok: true };
+  });
+
   app.get('/api/avatar/:id', async (req, reply) => {
     const id = (req.params as any).id || '';
     if (!UUID_RE.test(id)) return reply.code(400).send({ error: 'Invalid user id' });
@@ -317,6 +344,54 @@ export function createApp(clientDir?: string) {
       .header('Content-Type', mime)
       .header('Cache-Control', 'public, max-age=86400')
       .send(buf);
+  });
+
+  app.get('/api/sticker/packs', async (req, reply) => {
+    const stickersDir = path.join(getDataDir(), 'stickers');
+    const packs: any[] = [];
+    try {
+      for (const entry of fs.readdirSync(stickersDir, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const manifestPath = path.join(stickersDir, entry.name, 'manifest.json');
+        try {
+          const raw = fs.readFileSync(manifestPath, 'utf-8');
+          const parsed = JSON.parse(raw) as { name?: string; emoji?: string; stickers?: string[] };
+          packs.push({
+            id: entry.name,
+            name: parsed.name || entry.name,
+            emoji: parsed.emoji || '📦',
+            stickers: parsed.stickers || [],
+          });
+        } catch {
+          packs.push({ id: entry.name, name: entry.name, emoji: '📦', stickers: [] });
+        }
+      }
+    } catch {
+      // директории нет — пустой список
+    }
+    return reply.send({ packs });
+  });
+
+  app.get('/api/sticker/:pack/*', async (req, reply) => {
+    const pack = (req.params as any).pack || '';
+    const file = (req.params as any)[0] || '';
+    if (!/^[a-z0-9_-]+$/.test(pack)) return reply.code(400).send({ error: 'Invalid pack' });
+    if (!/^[\w.-]+\.(png|jpg|jpeg|gif|webp)$/i.test(file)) return reply.code(400).send({ error: 'Invalid file' });
+    const stickersDir = path.join(getDataDir(), 'stickers');
+    const fp = path.join(stickersDir, pack, file);
+    if (!existsSync(fp)) return reply.code(404).send({ error: 'Not found' });
+    const ext = file.split('.').pop() ?? '';
+    const mime: Record<string, string> = {
+      png: 'image/png',
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      gif: 'image/gif',
+      webp: 'image/webp',
+    };
+    return reply
+      .header('Content-Type', mime[ext] || 'application/octet-stream')
+      .header('Cache-Control', 'public, max-age=86400, immutable')
+      .send(await fs.promises.readFile(fp));
   });
 
   /**

@@ -159,6 +159,34 @@ function ensureSchema(): void {
       source TEXT NOT NULL DEFAULT 'message',
       timestamp INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS groups (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      description TEXT DEFAULT '',
+      is_private INTEGER NOT NULL DEFAULT 1,
+      is_channel INTEGER NOT NULL DEFAULT 0,
+      invite_code TEXT UNIQUE
+    );
+    CREATE TABLE IF NOT EXISTS group_members (
+      group_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      role TEXT NOT NULL DEFAULT 'member',
+      joined_at INTEGER NOT NULL,
+      PRIMARY KEY (group_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id);
+    CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id);
+    CREATE TABLE IF NOT EXISTS push_subscriptions (
+      user_id TEXT NOT NULL,
+      device_id TEXT NOT NULL,
+      endpoint TEXT NOT NULL,
+      p256dh_key TEXT NOT NULL,
+      auth_key TEXT NOT NULL,
+      updated_at INTEGER NOT NULL,
+      PRIMARY KEY (user_id, device_id)
+    );
     CREATE TABLE IF NOT EXISTS sessions (
       user_id TEXT NOT NULL,
       device_id TEXT NOT NULL,
@@ -1455,6 +1483,123 @@ export async function getReports(): Promise<any[]> {  return getDb().prepare('SE
 export async function removeReportsForTarget(targetId: string): Promise<number> {
   const res = getDb().prepare('DELETE FROM reports WHERE target_id = ?').run(targetId);
   return (res as any).changes;
+}
+
+export async function createGroup(id: string, name: string, createdBy: string, description?: string, isPrivate?: boolean): Promise<boolean> {
+  const d = getDb();
+  const inviteCode = crypto.randomBytes(6).toString('hex');
+  try {
+    d.prepare(`INSERT INTO groups (id, name, created_by, created_at, description, is_private, invite_code) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, name, createdBy, Date.now(), description ?? '', isPrivate !== false ? 1 : 0, inviteCode);
+    d.prepare(`INSERT INTO group_members (group_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)`)
+      .run(id, createdBy, 'admin', Date.now());
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function getGroup(groupId: string): Promise<{ id: string; name: string; createdBy: string; createdAt: number; description: string; isPrivate: boolean; inviteCode: string | null; isChannel: boolean } | null> {
+  const row = getDb().prepare(`SELECT id, name, created_by as createdBy, created_at as createdAt, description, is_private as isPrivate, invite_code as inviteCode, is_channel as isChannel FROM groups WHERE id = ?`).get(groupId) as any;
+  if (!row) return null;
+  return { id: row.id, name: row.name, createdBy: row.createdBy, createdAt: row.createdAt, description: row.description || '', isPrivate: !!row.isPrivate, inviteCode: row.inviteCode || null, isChannel: !!row.isChannel };
+}
+
+export async function getGroupByInviteCode(inviteCode: string): Promise<{ id: string; name: string } | null> {
+  const row = getDb().prepare(`SELECT id, name FROM groups WHERE invite_code = ?`).get(inviteCode) as { id: string; name: string } | undefined;
+  if (!row) return null;
+  return { id: row.id, name: row.name };
+}
+
+export async function getUserGroups(userId: string): Promise<{ id: string; name: string; role: string; joinedAt: number; memberCount: number }[]> {
+  const rows = getDb().prepare(
+    `SELECT g.id as id, g.name as name, gm.role as role, gm.joined_at as joinedAt,
+            (SELECT COUNT(*) FROM group_members WHERE group_id = g.id) as memberCount,
+            g.is_channel as isChannel`
+    + ` FROM groups g JOIN group_members gm ON gm.group_id = g.id AND gm.user_id = ?`)
+  .all(userId) as any[];
+  return rows.map(r => ({ id: r.id, name: r.name, role: r.role, joinedAt: r.joinedAt, memberCount: r.memberCount, isChannel: !!r.isChannel }));
+}
+
+export async function addGroupMember(groupId: string, userId: string, addedBy: string, role?: string): Promise<boolean> {
+  const d = getDb();
+  const member = await getGroupMember(groupId, userId);
+  if (member) return false;
+  try {
+    d.prepare(`INSERT INTO group_members (group_id, user_id, role, joined_at) VALUES (?, ?, ?, ?)`)
+      .run(groupId, userId, role ?? 'member', Date.now());
+    return true;
+  } catch { return false; }
+}
+
+export async function removeGroupMember(groupId: string, userId: string): Promise<boolean> {
+  const res = getDb().prepare(`DELETE FROM group_members WHERE group_id = ? AND user_id = ?`).run(groupId, userId);
+  return (res as any).changes > 0;
+}
+
+export async function getGroupMembers(groupId: string): Promise<{ userId: string; role: string; joinedAt: number }[]> {
+  const rows = getDb().prepare(`SELECT user_id as userId, role, joined_at as joinedAt FROM group_members WHERE group_id = ?`).all(groupId) as any[];
+  return rows.map(r => ({ userId: r.userId, role: r.role, joinedAt: r.joinedAt }));
+}
+
+export async function getGroupMember(groupId: string, userId: string): Promise<{ userId: string; role: string; joinedAt: number } | null> {
+  const row = getDb().prepare(`SELECT user_id as userId, role, joined_at as joinedAt FROM group_members WHERE group_id = ? AND user_id = ?`).get(groupId, userId) as any;
+  if (!row) return null;
+  return { userId: row.userId, role: row.role, joinedAt: row.joinedAt };
+}
+
+export async function updateGroupRole(groupId: string, userId: string, role: string): Promise<boolean> {
+  const res = getDb().prepare(`UPDATE group_members SET role = ? WHERE group_id = ? AND user_id = ?`).run(role, groupId, userId);
+  return (res as any).changes > 0;
+}
+
+export async function updateGroup(groupId: string, updates: { name?: string; description?: string; isPrivate?: boolean }): Promise<boolean> {
+  const fields: string[] = [];
+  const values: any[] = [];
+  if (updates.name !== undefined) { fields.push('name = ?'); values.push(updates.name); }
+  if (updates.description !== undefined) { fields.push('description = ?'); values.push(updates.description); }
+  if (updates.isPrivate !== undefined) { fields.push('is_private = ?'); values.push(updates.isPrivate ? 1 : 0); }
+  if (fields.length === 0) return false;
+  values.push(groupId);
+  const res = getDb().prepare(`UPDATE groups SET ${fields.join(', ')} WHERE id = ?`).run(...values);
+  return (res as any).changes > 0;
+}
+
+export async function deleteGroup(groupId: string, userId: string): Promise<boolean> {
+  const group = await getGroup(groupId);
+  if (!group || group.createdBy !== userId) return false;
+  const d = getDb();
+  d.prepare(`DELETE FROM group_members WHERE group_id = ?`).run(groupId);
+  const res = d.prepare(`DELETE FROM groups WHERE id = ?`).run(groupId);
+  return (res as any).changes > 0;
+}
+
+export async function isGroupMember(groupId: string, userId: string): Promise<boolean> {
+  const row = getDb().prepare(`SELECT 1 FROM group_members WHERE group_id = ? AND user_id = ?`).get(groupId, userId) as any;
+  return !!row;
+}
+
+export async function getGroupHistory(groupId: string, limit: number = 100, before?: number): Promise<any[]> {
+  const channelId = `group:${groupId}`;
+  const rows = (before
+    ? getDb().prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT ?`).all(channelId, before, limit)
+    : getDb().prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? ORDER BY timestamp DESC LIMIT ?`).all(channelId, limit)) as any[];
+  return rows.map((row) => rowToMessage(row)).reverse();
+}
+
+export async function savePushSubscription(userId: string, deviceId: string, endpoint: string, p256dhKey: string, authKey: string): Promise<void> {
+  const d = getDb();
+  d.prepare(`INSERT OR REPLACE INTO push_subscriptions (user_id, device_id, endpoint, p256dh_key, auth_key, updated_at) VALUES (?, ?, ?, ?, ?, ?)`)
+    .run(userId, deviceId, endpoint, p256dhKey, authKey, Date.now());
+}
+
+export async function getPushSubscriptions(userId: string): Promise<{ userId: string; deviceId: string; endpoint: string; p256dhKey: string; authKey: string }[]> {
+  const rows = getDb().prepare('SELECT user_id as userId, device_id as deviceId, endpoint, p256dh_key as p256dhKey, auth_key as authKey FROM push_subscriptions WHERE user_id = ?').all(userId) as any[];
+  return rows.map(r => ({ userId: r.userId, deviceId: r.deviceId, endpoint: r.endpoint, p256dhKey: r.p256dhKey, authKey: r.authKey }));
+}
+
+export async function removePushSubscription(userId: string, deviceId: string): Promise<void> {
+  getDb().prepare('DELETE FROM push_subscriptions WHERE user_id = ? AND device_id = ?').run(userId, deviceId);
 }
 
 export interface StoredSession {

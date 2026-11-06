@@ -25,6 +25,7 @@ import { forgetSecureKeys } from './secureStore'
 import { ConnectionContext, useConnection, type ConnectionState, type ConnectionAction, type ReplyTarget, type AdminReport, type HistoryWindow } from './context';
 import { loadSettings, defaultSettings, translations, cn, formatTime, getDeviceLabel, safeMediaUrl, writeLocal } from './utils';
 import { noteTyping, noteRead, TYPING_THROTTLE_MS } from './presence';
+import { subscribeToPush, unsubscribeFromPush } from './push-client';
 
 declare const __APP_VERSION__: string;
 
@@ -38,6 +39,7 @@ import { AppLockGate, useAutoLock } from './components/AppLock';
 import { isAppLockSet, setAppLocked, isAppLocked } from './appLock';
 import { SettingsPanel } from './components/SettingsPanel';
 import { ProfileModal } from './components/ProfileModal';
+import { GroupCreateModal } from './components/GroupCreateModal';
 import { ReportModal } from './components/ReportModal';
 import { Avatar } from './components/Avatar';
 import { useEscapeKey } from './useEscapeKey';
@@ -98,6 +100,9 @@ const initialState: ConnectionState = {
   jumpToMessageId: null,
   unreadByChannel: {},
   pinned: {},
+  groups: [],
+  currentGroup: null,
+  groupMembers: [],
 };
 
 function applyAddReaction(msg: Message, emoji: string, userId: string): Message {
@@ -532,6 +537,7 @@ const bundleKeepAliveRef = useRef<NodeJS.Timeout | null>(null);
   const [reports, setReports] = useState<AdminReport[]>([]);
   const [bannedUsers, setBannedUsers] = useState<BannedUser[]>([]);
   const [adminError, setAdminError] = useState<string | null>(null);
+  const [groupCreateOpen, setGroupCreateOpen] = useState(false);
 
   /**
    * Asks the server for this account's key backup and waits briefly for it.
@@ -1503,6 +1509,14 @@ const connect = useCallback((nickname: string, password: string, isRegister: boo
                     console.warn('[ratchet] could not start:', (e as Error).message);
                   }
                 })();
+                // Subscribe to push notifications after successful sign-in
+                void (async () => {
+                  try {
+                    await subscribeToPush();
+                  } catch (e) {
+                    console.error('[push] Failed to subscribe:', e);
+                  }
+                })();
               }
               publicKeysRef.current = message.payload.publicKeys || {};
               channelMediaKeyRef.current = typeof message.payload.channelMediaKey === 'string' ? message.payload.channelMediaKey : null;
@@ -2042,10 +2056,11 @@ case 'typing':
     if (creds) { dispatch({ type: 'SET_RECONNECT_ATTEMPTS', attempts: 0 }); reconnectAttemptsRef.current = 0; connect(creds.nickname, creds.password, creds.isRegister); }
   }, [connect]);
 
-  const logout = useCallback(() => {
+  const logout = useCallback(async () => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: 'revoke_session', payload: {} }));
     }
+    await unsubscribeFromPush();
     disconnect();
 
     decryptedMediaCacheRef.current.clear();
@@ -2522,6 +2537,140 @@ const prepareEncryptedMedia = useCallback(async (
     return () => { cancelled = true; };
   }, []);
 
+  // ============ GROUP FUNCTIONS ============
+  const loadGroups = useCallback(async () => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    wsRef.current.send(JSON.stringify({ type: 'group_list', payload: {} }));
+  }, []);
+
+  const createGroup = useCallback(async (name: string, description?: string, isPrivate?: boolean, isChannel?: boolean) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    wsRef.current.send(JSON.stringify({ type: 'group_create', payload: { name, description, isPrivate, isChannel } }));
+  }, []);
+
+  const joinGroup = useCallback(async (groupId?: string, inviteCode?: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    wsRef.current.send(JSON.stringify({ type: 'group_join', payload: { groupId, inviteCode } }));
+  }, []);
+
+  const leaveGroup = useCallback(async (groupId: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    wsRef.current.send(JSON.stringify({ type: 'group_leave', payload: { groupId } }));
+  }, []);
+
+  const sendGroupMessage = useCallback(async (groupId: string, text: string, quoted?: ReplyTarget, fileKey?: Record<string, string>) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    wsRef.current.send(JSON.stringify({
+      type: 'group_message',
+      payload: { groupId, text, encrypted: undefined, fileKey, quoted: quoted ? { id: quoted.id, text: quoted.text, sender: quoted.senderNickname } : undefined },
+    }));
+  }, []);
+
+  const sendGroupImage = useCallback(async (groupId: string, file: File) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new MediaError('offline');
+    const tag = file.type.startsWith('video/') ? 'video' : 'image';
+    const controller = new AbortController();
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = controller;
+    try {
+      const url = await uploadFile(file, file.name || 'media.png', undefined, controller.signal);
+      wsRef.current.send(JSON.stringify({
+        type: 'group_message',
+        payload: { groupId, text: `[${tag}]${url}[/${tag}]`, encrypted: undefined, fileKey: undefined },
+      }));
+    } catch (e) {
+      if (!isAbortError(e)) throw new MediaError('upload');
+      throw e;
+    } finally {
+      if (uploadAbortRef.current === controller) uploadAbortRef.current = null;
+    }
+  }, []);
+
+  const getGroupHistory = useCallback(async (groupId: string, before?: number, limit?: number) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    wsRef.current.send(JSON.stringify({ type: 'group_history', payload: { groupId, before, limit } }));
+  }, []);
+
+  const getGroupInfo = useCallback(async (groupId: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    wsRef.current.send(JSON.stringify({ type: 'group_info', payload: { groupId } }));
+  }, []);
+
+  const getGroupMembers = useCallback(async (groupId: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    wsRef.current.send(JSON.stringify({ type: 'group_members', payload: { groupId } }));
+  }, []);
+
+  const addGroupMember = useCallback(async (groupId: string, userId: string, role?: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    wsRef.current.send(JSON.stringify({ type: 'group_add_member', payload: { groupId, userId, role } }));
+  }, []);
+
+  const removeGroupMember = useCallback(async (groupId: string, userId: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    wsRef.current.send(JSON.stringify({ type: 'group_remove_member', payload: { groupId, userId } }));
+  }, []);
+
+  const updateGroup = useCallback(async (groupId: string, updates: { name?: string; description?: string; isPrivate?: boolean }) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    wsRef.current.send(JSON.stringify({ type: 'group_update', payload: { groupId, ...updates } }));
+  }, []);
+
+  const deleteGroup = useCallback(async (groupId: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    wsRef.current.send(JSON.stringify({ type: 'group_delete', payload: { groupId } }));
+  }, []);
+
+  const subscribePush = useCallback(async (subscription: PushSubscription): Promise<void> => {
+    try {
+      const endpoint = subscription.endpoint;
+      const keys = (subscription as any).keys as { p256dh: ArrayBuffer; auth: ArrayBuffer };
+      await fetch(`${window.location.origin}/api/push-subscribe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          endpoint,
+          p256dhKey: btoa(String.fromCharCode(...new Uint8Array(keys.p256dh))),
+          authKey: btoa(String.fromCharCode(...new Uint8Array(keys.auth))),
+        }),
+      });
+    } catch (e) {
+      console.error('[push] Failed to subscribe:', e);
+    }
+  }, []);
+
+  const unsubscribePush = useCallback(async (): Promise<void> => {
+    try {
+      await fetch(`${window.location.origin}/api/push-unsubscribe`, {
+        method: 'POST',
+      });
+    } catch (e) {
+      console.error('[push] Failed to unsubscribe:', e);
+    }
+  }, []);
+
+  const getVapidPublicKey = useCallback(async (): Promise<string | null> => {
+    try {
+      const res = await fetch(`${window.location.origin}/api/vapid-public-key`);
+      if (!res.ok) return null;
+      const data = await res.json();
+      return data.publicKey || null;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const backupHistory = useCallback(async (): Promise<void> => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    wsRef.current.send(JSON.stringify({ type: 'backup_history', payload: {} }));
+  }, []);
+
+  const restoreHistory = useCallback(async (): Promise<any> => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    wsRef.current.send(JSON.stringify({ type: 'restore_history', payload: {} }));
+    return null;
+  }, []);
+
   return (
     <>
       {state.needsKeySetup && (
@@ -2606,11 +2755,27 @@ const prepareEncryptedMedia = useCallback(async (
         notifyTyping, markRead,
         setSearchOpen, jumpTo, togglePin, copyMessageText, forwardMessage, exportKeys, changePassword,
         searchInChannel,
+        // Groups
+        loadGroups, createGroup, joinGroup, leaveGroup, sendGroupMessage, sendGroupImage,
+        getGroupHistory, getGroupInfo, getGroupMembers, addGroupMember, removeGroupMember, updateGroup, deleteGroup,
+        openGroupCreate: () => setGroupCreateOpen(true),
+        // Push notifications
+        subscribePush,
+        unsubscribePush,
+        getVapidPublicKey,
+        // History backup
+        backupHistory, restoreHistory,
         showImportModal: (data: any, mode: 'setup' | 'settings') => setImportModal({ data, mode }),
         openProfile, closeProfile, openReport, closeReport, backToProfile, setMyAvatar, removeMyAvatar,
       }}>
         {children}
         <ProfileOverlay />
+        {groupCreateOpen && (
+          <GroupCreateModal
+            open={groupCreateOpen}
+            onClose={() => setGroupCreateOpen(false)}
+          />
+        )}
       </ConnectionContext.Provider>      {importModal && (
         <div className="fixed inset-0 z-[70]">
           <PasswordModalInline title={t('enter_backup_password')} cancelLabel={t('cancel')} onCancel={() => setImportModal(null)} onConfirm={async (pass) => {

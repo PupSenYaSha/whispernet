@@ -7,6 +7,7 @@ import { Avatar } from './Avatar';
 import { ReportModal } from './ReportModal';
 import { useEscapeKey } from '../useEscapeKey';
 import { parseMediaTag } from '../media-crypto';
+import { stickerUrl } from '../stickers';
 import { hasReadUpTo } from '../presence';
 import { EMOJI_GROUPS, QUICK_EMOJI } from '../emojis';
 import { mediaProxyUrl } from '../upload';
@@ -101,8 +102,11 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
     return () => { document.body.style.overflow = ''; };
   }, [lightbox]);
 
+  const STICKER_RE = /^\[sticker:([a-z0-9_-]+):([\w.-]+\.(?:png|jpg|jpeg|gif|webp))\]$/;
+  const stickerMatch = message.text.match(STICKER_RE);
+  const isSticker = !!stickerMatch;
   const mediaTag = parseMediaTag(message.text);
-  const isMedia = mediaTag !== null;
+  const isMedia = mediaTag !== null && !isSticker;
   // authorship decides the controls; sealed sender only decides where a correction is kept
   const controls = messageControls(message, isMedia);
   // How far the other end has said it has read. The server keeps no record of this, so it is exactly
@@ -205,6 +209,16 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
               </div>
             )}
             {(() => {
+              if (isSticker && stickerMatch) {
+                return (
+                  <img
+                    src={stickerUrl(stickerMatch[1], stickerMatch[2])}
+                    alt="sticker"
+                    className="rounded-xl w-full max-w-[240px] max-h-[240px] object-cover cursor-pointer"
+                    onClick={() => { setLightbox({ url: stickerUrl(stickerMatch[1], stickerMatch[2]), isVideo: false }); }}
+                  />
+                );
+              }
               if (mediaTag) {
                 const tag = mediaTag.kind;
                 if (message.fileKey || message.fileKeyEntry) {
@@ -373,9 +387,11 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
             )}
             <button
               onClick={() => {
-                const quoteText = mediaTag
-                  ? (mediaTag.kind === 'video' ? `🎥 ${t('video_att')}` : `📷 ${t('photo_att')}`)
-                  : message.text.trim().slice(0, 140);
+                const quoteText = isSticker
+                  ? `🏷️ ${t('stickers')}`
+                  : mediaTag
+                    ? (mediaTag.kind === 'video' ? `🎥 ${t('video_att')}` : `📷 ${t('photo_att')}`)
+                    : message.text.trim().slice(0, 140);
                 setReply({ id: message.id, senderNickname: message.senderNickname, text: quoteText });
               }}
               className="p-1.5 -ml-1.5 rounded-full text-fg-muted hover:text-fg-primary hover:bg-bg-tertiary transition-colors"

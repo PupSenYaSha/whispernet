@@ -1,5 +1,5 @@
 import React from 'react';
-import type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor, Session, BannedUser, AvatarUpdate, ProfileInfo } from './types';
+import type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor, Session, BannedUser, AvatarUpdate, ProfileInfo, Group, GroupMember } from './types';
 
 export type { User, Message, Contact, ConnectionStatus, AppSettings, ActiveChannel, AccentColor, Session, BannedUser, AvatarUpdate, ProfileInfo };
 
@@ -110,6 +110,9 @@ settings: AppSettings;
    * Pinned messages per conversation, newest pin first.
    */
   pinned: Record<string, Message[]>;
+  groups: Group[];
+  currentGroup: Group | null;
+  groupMembers: GroupMember[];
 }
 
 /**
@@ -193,6 +196,9 @@ export type ConnectionAction =
    * one undid the first, along with every other conversation's pins.
    */
   | { type: 'TOGGLE_PIN'; channel: string; messageId: string }
+  | { type: 'SET_GROUPS'; groups: Group[] }
+  | { type: 'SET_CURRENT_GROUP'; group: Group | null }
+  | { type: 'SET_GROUP_MEMBERS'; members: GroupMember[] }
   | { type: 'RESET' };
 
 
@@ -275,6 +281,27 @@ getMyPublicKey: () => JsonWebKey | null;
   /** Exports this account's keys as a file the user can keep. */
   exportKeys: () => Promise<void>;
   changePassword: (oldPassword: string, newPassword: string) => Promise<void>;
+
+  /* Groups */
+  loadGroups: () => Promise<void>;
+  createGroup: (name: string, description?: string, isPrivate?: boolean, isChannel?: boolean) => void;
+  joinGroup: (groupId?: string, inviteCode?: string) => void;
+  leaveGroup: (groupId: string) => void;
+  sendGroupMessage: (groupId: string, text: string, quoted?: ReplyTarget, fileKey?: Record<string, string>) => Promise<void>;
+  sendGroupImage: (groupId: string, file: File) => Promise<void>;
+  getGroupHistory: (groupId: string, before?: number, limit?: number) => Promise<void>;
+  getGroupInfo: (groupId: string) => void;
+  getGroupMembers: (groupId: string) => void;
+  addGroupMember: (groupId: string, userId: string, role?: string) => void;
+  removeGroupMember: (groupId: string, userId: string) => void;
+  updateGroup: (groupId: string, updates: { name?: string; description?: string; isPrivate?: boolean }) => void;
+  deleteGroup: (groupId: string) => void;
+  backupHistory: () => Promise<void>;
+  restoreHistory: () => Promise<any>;
+  openGroupCreate: () => void;
+  subscribePush: (subscription: PushSubscription) => Promise<void>;
+  unsubscribePush: () => Promise<void>;
+  getVapidPublicKey: () => Promise<string | null>;
 
   showImportModal: (data: any, mode: 'setup' | 'settings') => void;
   openProfile: (userId: string) => void;
