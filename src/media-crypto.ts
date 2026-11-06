@@ -720,9 +720,9 @@ export async function unwrapAndDecryptChannel(
  * `/api/media?url=undefined` and reported "Could not decrypt attachment". One parser, one shape,
  * no capture indices to get wrong.
  */
-const MEDIA_TAG_RE = /^\[(image|video)\]([\s\S]*?)\[\/\1\]/;
+const MEDIA_TAG_RE = /^\[(image|video|audio)\]([\s\S]*?)\[\/\1\]/;
 
-export type MediaKind = 'image' | 'video';
+export type MediaKind = 'image' | 'video' | 'audio';
 
 export interface MediaTag {
   kind: MediaKind;

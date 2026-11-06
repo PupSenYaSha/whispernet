@@ -11,6 +11,7 @@ import { stickerUrl } from '../stickers';
 import { hasReadUpTo } from '../presence';
 import { EMOJI_GROUPS, QUICK_EMOJI } from '../emojis';
 import { mediaProxyUrl } from '../upload';
+import { AudioPlayer } from './AudioPlayer';
 
 /**
  * Compact mode, which is a setting rather than a theme.
@@ -79,7 +80,11 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
     const text = found?.text;
     if (!text) return '[encrypted]';
     const mm = parseMediaTag(text);
-    if (mm) return mm.kind === 'video' ? `🎥 ${t('video_att')}` : `📷 ${t('photo_att')}`;
+    if (mm) {
+      if (mm.kind === 'video') return `🎥 ${t('video_att')}`;
+      if (mm.kind === 'audio') return `🎵 ${t('voice_message')}`;
+      return `📷 ${t('photo_att')}`;
+    }
     return text;
   }, [message.quotedMessageText, message.quotedMessageId, state.messages, state.dmMessages, t]);
 
@@ -241,6 +246,11 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
                         className="rounded-xl w-full max-w-[340px] max-h-[340px]" />
                     );
                   }
+                  if (tag === 'audio') {
+                    return (
+                      <AudioPlayer url={mediaUrl} />
+                    );
+                  }
                   return (
                     <img src={mediaUrl} alt=""
                       className="rounded-xl w-full max-w-[300px] max-h-[300px] object-cover cursor-pointer"
@@ -258,6 +268,9 @@ function MessageItemImpl({ message, showAvatar = true, fontSizeClass = 'text-[15
                     <video src={proxyUrl} controls
                       className="rounded-xl w-full max-w-[340px] max-h-[340px] cursor-pointer" />
                   );
+                }
+                if (tag === 'audio') {
+                  return <AudioPlayer url={proxyUrl} />;
                 }
                 return (
                   <img src={proxyUrl} alt=""

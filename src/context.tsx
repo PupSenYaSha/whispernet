@@ -216,6 +216,8 @@ export interface ConnectionContextType {
 
   sendDmImage: (to: string, file: File) => Promise<void>;
   sendImage: (file: File) => Promise<void>;
+  sendDmAudio: (to: string, file: File) => Promise<void>;
+  sendAudio: (file: File) => Promise<void>;
   openDm: (userId: string, nickname?: string) => void;
   openGeneral: () => void;
   refreshContacts: () => void;

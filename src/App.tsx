@@ -2504,6 +2504,39 @@ const prepareEncryptedMedia = useCallback(async (
     await sendDmPackage(to, { text, fileKey });
   }, [prepareEncryptedMedia, sendDmPackage]);
 
+  const sendAudio = useCallback(async (file: File) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new MediaError('offline');
+    const controller = new AbortController();
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = controller;
+    try {
+      const url = await uploadFile(file, file.name || 'audio.ogg', undefined, controller.signal);
+      wsRef.current.send(JSON.stringify({ type: 'chat_message', payload: { text: `[audio]${url}[/audio]`, ttl: ttlSeconds() } }));
+    } catch (e) {
+      if (!isAbortError(e, controller.signal)) {
+        if (e instanceof MediaError) throw e;
+        throw new MediaError('upload');
+      }
+      throw e;
+    } finally {
+      if (uploadAbortRef.current === controller) uploadAbortRef.current = null;
+    }
+  }, [ttlSeconds]);
+
+  const sendDmAudio = useCallback(async (to: string, file: File) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new MediaError('offline');
+    if (!publicKeysRef.current[to] || !privateKeyRef.current) throw new MediaError('keys');
+    let text: string;
+    let fileKey: Record<string, string> | undefined;
+    try {
+      ({ text, fileKey } = await prepareEncryptedMedia(file, [to], null));
+    } catch (e) {
+      if (e instanceof MediaError || isAbortError(e)) throw e;
+      throw new MediaError('upload');
+    }
+    await sendDmPackage(to, { text, fileKey });
+  }, [prepareEncryptedMedia, sendDmPackage]);
+
   /**
    * Signs in again on a fresh page load, once.
    *
@@ -2739,7 +2772,7 @@ const prepareEncryptedMedia = useCallback(async (
       )}
       <ConnectionContext.Provider value={{
         state, dispatch, connect, reconnect, disconnect, logout, cancelPow,
-        sendMessage, sendDm, sendDmImage, sendImage,
+        sendMessage, sendDm, sendDmImage, sendImage, sendAudio, sendDmAudio,
         openDm, openGeneral, refreshContacts,
         searchUsers, searchMessages, deleteMessage,
         addReaction, removeReaction, editMessage,

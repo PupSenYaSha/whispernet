@@ -4,6 +4,7 @@ import { mediaErrorKey, isAbortError, MAX_UPLOAD_BYTES } from '../upload';
 import { MAX_MESSAGE_CHARS } from '../limits';
 import { getDraft, setDraft, subscribeDrafts } from '../drafts';
 import { StickerPicker } from './StickerPicker';
+import { AudioPlayer } from './AudioPlayer';
 
 /**
  * Where the half-typed message for a conversation is kept.
@@ -15,7 +16,7 @@ import { StickerPicker } from './StickerPicker';
 const draftKey = (channel: string) => channel || 'general';
 
 export function MessageInput() {
-  const { state, sendMessage, sendDm, sendImage, sendDmImage, blockedUsers, unblockUser, setReply, editingTarget, setEditing, editMessage, notifyTyping, t } = useConnection();
+  const { state, sendMessage, sendDm, sendImage, sendDmImage, sendAudio, sendDmAudio, blockedUsers, unblockUser, setReply, editingTarget, setEditing, editMessage, notifyTyping, t } = useConnection();
   const [hasText, setHasText] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [sending, setSending] = useState(false);
@@ -31,6 +32,11 @@ export function MessageInput() {
   const blockedNick = isBlockedChat ? (state.dmNames[dmTarget] || '') : '';
   const replyTo = state.replyTo;
   const isEditing = !!editingTarget;
+
+  // voice recording state
+  const [isRecording, setIsRecording] = useState(false);
+  const [audioBlobUrl, setAudioBlobUrl] = useState<string | null>(null);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
 
   const autoResize = () => {
     const ta = textareaRef.current;
@@ -62,6 +68,64 @@ export function MessageInput() {
     setError(null);
     setDraft(draftKey(dmTarget || 'general'), '');
   }, [setReply, setEditing, dmTarget]);
+
+  const toggleVoiceRecording = async () => {
+    if (isRecording) {
+      const rec = mediaRecorderRef.current;
+      if (rec && rec.state !== 'inactive') rec.stop();
+      setIsRecording(false);
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const rec = new MediaRecorder(stream, { mimeType: 'audio/webm;codecs=opus' });
+      const chunks: Blob[] = [];
+      rec.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+      rec.onstop = () => {
+        stream.getTracks().forEach(t => t.stop());
+        const blob = new Blob(chunks, { type: 'audio/webm' });
+        const url = URL.createObjectURL(blob);
+        setAudioBlobUrl(url);
+        setIsRecording(false);
+      };
+      rec.onerror = () => {
+        stream.getTracks().forEach(t => t.stop());
+        setIsRecording(false);
+        setError(t('voice_record_failed'));
+      };
+      mediaRecorderRef.current = rec;
+      rec.start();
+      setIsRecording(true);
+    } catch {
+      setError(t('voice_record_failed'));
+    }
+  };
+
+  const sendRecordedAudio = async () => {
+    if (!audioBlobUrl) return;
+    try {
+      const res = await fetch(audioBlobUrl);
+      const blob = await res.blob();
+      const file = new File([blob], 'voice.webm', { type: 'audio/webm' });
+      URL.revokeObjectURL(audioBlobUrl);
+      setAudioBlobUrl(null);
+      if (isDm && dmTarget) {
+        await sendDmAudio(dmTarget, file);
+      } else {
+        await sendAudio(file);
+      }
+    } catch (e) {
+      setError(t(mediaErrorKey(e)));
+    }
+  };
+
+  const cancelRecording = () => {
+    const rec = mediaRecorderRef.current;
+    if (rec && rec.state !== 'inactive') rec.stop();
+    rec?.stream?.getTracks?.().forEach(t => t.stop());
+    if (audioBlobUrl) { URL.revokeObjectURL(audioBlobUrl); setAudioBlobUrl(null); }
+    setIsRecording(false);
+  };
 
   // the composer is an uncontrolled textarea, so React reuses the same node when the channel
   // changes: without this a half typed message would follow the user into the next chat
@@ -268,7 +332,7 @@ export function MessageInput() {
         </div>
       )}
       <div className="flex items-end gap-2">
-        <button type="button" disabled={!isConnected || uploading}
+        <button type="button" disabled={!isConnected || uploading || isRecording}
           onClick={() => fileRef.current?.click()}
           className="flex-shrink-0 w-11 h-11 rounded-2xl bg-bg-tertiary border border-border-default text-fg-muted flex items-center justify-center hover:bg-bg-hover hover:text-fg-primary disabled:opacity-30 transition-all"
           aria-label={t('attach_file')}>
@@ -278,7 +342,35 @@ export function MessageInput() {
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><circle cx="8.5" cy="8.5" r="1.5" /><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21" /></svg>
           )}
         </button>
-        <button type="button" disabled={!isConnected || uploading}
+        <button type="button" disabled={!isConnected || uploading || isRecording}
+          onClick={toggleVoiceRecording}
+          className={`flex-shrink-0 w-11 h-11 rounded-2xl ${isRecording ? 'bg-status-error text-status-error' : 'bg-bg-tertiary border border-border-default text-fg-muted flex items-center justify-center hover:bg-bg-hover hover:text-fg-primary'} disabled:opacity-30 transition-all`}
+          aria-label={isRecording ? t('stop_recording') : t('voice_message')}>
+          {isRecording ? (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="8" /></svg>
+          ) : (
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><path d="M8.5 12.5a1 1 0 0 1 1-1h3a1 1 0 1 1 0 2h-3a1 1 0 0 1-1-1" /></svg>
+          )}
+        </button>
+        {audioBlobUrl && (
+          <div className="flex items-center gap-2 min-w-[140px]">
+            <AudioPlayer url={audioBlobUrl} onError={() => setError(t('voice_playback_failed'))} />
+            <button type="button" onClick={sendRecordedAudio}
+              className="w-8 h-8 rounded-full bg-accent-primary text-accent-text flex items-center justify-center hover:brightness-110 transition-colors"
+              aria-label={t('send_voice')}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                <line x1="22" y1="2" x2="11" y2="13" />
+                <polygon points="22 2 15 22 11 13 2 9 22 2" />
+              </svg>
+            </button>
+            <button type="button" onClick={cancelRecording}
+              className="w-8 h-8 rounded-full text-status-error flex items-center justify-center hover:bg-status-error/10 transition-colors"
+              aria-label={t('cancel')}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" /></svg>
+            </button>
+          </div>
+        )}
+        <button type="button" disabled={!isConnected || uploading || isRecording}
           onClick={() => setStickerPickerOpen(true)}
           className="flex-shrink-0 w-11 h-11 rounded-2xl bg-bg-tertiary border border-border-default text-fg-muted flex items-center justify-center hover:bg-bg-hover hover:text-fg-primary disabled:opacity-30 transition-all"
           aria-label={t('stickers')}>
