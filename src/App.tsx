@@ -12,6 +12,11 @@ import {
 } from './media-crypto';
 import type { EncryptedFileStream } from './media-crypto';
 import { newClientMessageId, rememberOwnMessageText, recallOwnMessageText, forgetOwnMessages, setOwnMessageCachePassword, flushOwnMessageCache } from './ownMessageCache'
+import {
+  importGroupKey,
+  encryptGroupMessage, decryptGroupMessage,
+  wrapGroupSenderPlaintext, unwrapGroupSenderPlaintext, unwrapGroupKey,
+} from './group-crypto';
 import { changeAccountPassword } from './changePassword'
 import { setDraftsPassword, forgetDrafts, flushDrafts } from './drafts'
 import { getDeviceId, adoptServerDeviceId } from './deviceId'
@@ -27,6 +32,7 @@ import { ConnectionContext, useConnection, type ConnectionState, type Connection
 import { loadSettings, defaultSettings, translations, cn, formatTime, getDeviceLabel, safeMediaUrl, writeLocal } from './utils';
 import { noteTyping, noteRead, TYPING_THROTTLE_MS } from './presence';
 import { subscribeToPush, unsubscribeFromPush } from './push-client';
+import { padToBucket } from './padding';
 
 declare const __APP_VERSION__: string;
 
@@ -104,7 +110,7 @@ const initialState: ConnectionState = {
   pinned: {},
   groups: [],
   currentGroup: null,
-  groupMembers: [],
+  groupMembersMap: {},
   activeCall: null,
   incomingCall: null,
 };
@@ -463,6 +469,11 @@ export function connectionReducer(state: ConnectionState, action: ConnectionActi
       return { ...state, incomingCall: { peerId: action.peerId, callId: action.callId } };
     case 'CLEAR_INCOMING_CALL':
       return { ...state, incomingCall: null };
+    case 'SET_GROUP_MEMBERS':
+      return {
+        ...state,
+        groupMembersMap: { ...state.groupMembersMap, [action.groupId]: action.members },
+      };
     default:
       return state;
   }
@@ -532,6 +543,10 @@ const bundleKeepAliveRef = useRef<NodeJS.Timeout | null>(null);
   const privateKeyRef = useRef<JsonWebKey | null>(null);
   const publicKeyRef = useRef<JsonWebKey | null>(null);
   const publicKeysRef = useRef<Record<string, JsonWebKey>>({});
+  /** One symmetric AES-256 key per group, held in memory only. One body per message, no matter how many members. */
+  const groupKeysRef = useRef<Map<string, CryptoKey>>(new Map());
+  /** The server-wrapped copy of each group key, so it can be re-imported after a reload without asking the server again. */
+  const groupKeyWrapRef = useRef<Map<string, string>>(new Map());
   const nicknameRef = useRef<string | null>(null);
   const settingsRef = useRef<AppSettings>(defaultSettings);
   const reportTargetRef = useRef<ProfileInfo | null>(null);
@@ -860,6 +875,58 @@ useEffect(() => { reportTargetRef.current = state.reportTarget; }, [state.report
     return { text: shown, fileKeyEntry: entry, senderKey, senderNickname };
   }, []);
 
+  /**
+   * Opens a group message, and reports the attachment key it was carrying.
+   *
+   * The sender is the peer the ratchet session was built with, so `openFor(senderId, ...)` finds the
+   * body sealed for this device. Sealed sender tells us who wrote it - the server never sees the name.
+   */
+  const readGroupText = useCallback(async (m: any): Promise<{ text: string; fileKeyEntry: string | null; senderKey?: string; senderNickname?: string }> => {
+    let text = m.text || '';
+    let senderKey: string | undefined;
+    let senderNickname: string | undefined;
+    const enc = m.encrypted;
+    // One symmetric key per group: one encrypted body, decrypted by every member's device.
+    if (enc && typeof enc === 'object' && enc.kind === 'group') {
+      const key = groupKeysRef.current && groupKeysRef.current.get(m.channel?.replace(/^group:/, '') || '');
+      if (key) {
+        try {
+          const opened = await decryptGroupMessage(key, enc.ciphertext, enc.iv);
+          const unwrapped = unwrapGroupSenderPlaintext(opened);
+          text = unwrapped.text;
+          senderKey = unwrapped.senderKey;
+          senderNickname = unwrapped.senderNickname;
+        } catch {
+          if (!text) text = '[encrypted]';
+        }
+      } else if (!text) {
+        text = '[encrypted]';
+      }
+    } else if (isDmBody(enc)) {
+      try {
+        const opened = await openFor(m.senderId, enc, privateKeyRef.current);
+        if (opened !== null) {
+          const unwrapped = unwrapSenderPlaintext(opened);
+          text = unwrapped.text;
+          senderKey = unwrapped.senderKey;
+          senderNickname = unwrapped.senderNickname;
+        }
+        else if (!text) text = '[encrypted]';
+      } catch {
+        if (!text) text = '[encrypted]';
+      }
+    } else if (enc && privateKeyRef.current && userIdRef.current) {
+      try {
+        text = await decryptMessage(enc, userIdRef.current, privateKeyRef.current);
+      } catch {
+        if (!text) text = '[encrypted]';
+      }
+    }
+    if (m.isOwn && (!text || text === '[encrypted]')) text = recallOwnMessageText(m.clientId) || text || '[encrypted]';
+    const { text: shown, entry } = openFileKeyFromText(text);
+    return { text: shown, fileKeyEntry: entry, senderKey, senderNickname };
+  }, []);
+
   const requestSessions = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'get_sessions', payload: {} }));
   }, []);
@@ -1172,6 +1239,9 @@ function inboundDmKey(payload: any, fallback: string): string {
 
   const lastTypingSentRef = useRef<Record<string, number>>({});
   const notifyTyping = useCallback((channel: string) => {
+    // Typing indicators are metadata: they tell the server a conversation is active right now. Disabled by
+    // setting for people who want the server to learn as little as possible.
+    if (!stateRef.current.settings.sendTypingIndicators) return;
     const ws = wsRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     const wire = dmWireChannel(channel);
@@ -1251,6 +1321,9 @@ const markRead = useCallback((channel: string, upTo: number) => {
     // Our own position advances every time, throttle or not - this device really has read that far, and it
     // is what keeps the unread badge honest. Only the send is throttled.
     ownReadRef.current[channel] = upTo;
+    // Read receipts are metadata: they tell the server which messages a device has seen. Disabled by
+    // setting for people who want the server to learn as little as possible.
+    if (!stateRef.current.settings.sendReadReceipts) return;
     pendingReadRef.current[channel] = Math.max(pendingReadRef.current[channel] || 0, upTo);
 
     if (now - last < gap) {
@@ -1341,12 +1414,26 @@ const markRead = useCallback((channel: string, upTo: number) => {
       .flat()
       .find((m) => m.id === messageId);
     if (!target) return false;
-    const peerId = target.channel || target.senderId;
+    const channel = target.channel || target.senderId;
     if (!privateKeyRef.current) return false;
     try {
-      // The peer's bundles, if they are not already held. Without this a correction would go out as a
-      // stateless envelope for want of a bundle it never asked for — the same downgrade the ratchet
-      // path exists to avoid, reached by a side door.
+      // A group message is encrypted under the group's symmetric key: one body, every member's device
+      // opens it with the same key. No per-device ratchet, no long-lived fallback.
+      if (typeof channel === 'string' && channel.startsWith('group:')) {
+        const groupId = channel.slice(6);
+        const key = await ensureGroupKey(groupId);
+        const senderKeyB64 = accountIdentityKeyBase64();
+        if (!senderKeyB64) return false;
+        const myNick = stateRef.current.nickname || '';
+        const paddedText = padToBucket(text.trim());
+        const sealedContent = wrapGroupSenderPlaintext(paddedText, senderKeyB64, myNick);
+        const { ciphertext, iv } = await encryptGroupMessage(key, sealedContent);
+        const ttl = ttlSeconds();
+        ws.send(JSON.stringify({ type: 'edit_message', payload: { messageId, encrypted: { kind: 'group', ciphertext, iv }, ttl } }));
+        return true;
+      }
+      // A direct message: one peer, one key, one body per device.
+      const peerId = channel;
       if (!hasBundlesFor(peerId)) await requestPeerBundleRef.current(peerId);
       const peerKey: JsonWebKey | undefined = publicKeysRef.current[peerId]
         ?? (await requestRecipientKeyRef.current(peerId))
@@ -1356,8 +1443,10 @@ const markRead = useCallback((channel: string, upTo: number) => {
       // Sealed under the ratchet like any other message, one body per device. This used to go out as
       // a stateless envelope, which meant the *corrected* text was the one copy of it in the whole
       // system that a seized server could open — so editing a message was a way to downgrade it.
-      const { payload: encrypted } = await sealForDevices(peerId, text.trim(), () =>
-        encryptMessage(text.trim(), buildEncryptKeys(peerId, peerKey as JsonWebKey)));
+      const paddedText = padToBucket(text.trim());
+      const { payload: encrypted } = await sealForDevices(peerId, paddedText, () =>
+        encryptMessage(paddedText, buildEncryptKeys(peerId, peerKey as JsonWebKey)), false);
+      if (!encrypted) return false;
       const ttl = ttlSeconds();
       // Only the ciphertext goes out. Sending the words alongside it would undo the whole point of
       // the message being private, and the server has no use for them: it swaps one body for another.
@@ -1379,6 +1468,9 @@ const markRead = useCallback((channel: string, upTo: number) => {
  */
 const requestPeerBundleRef = useRef<(to: string) => Promise<boolean>>(async () => false);
 const requestRecipientKeyRef = useRef<(to: string) => Promise<JsonWebKey | null>>(async () => null);
+const ensureGroupMembersRef = useRef<(groupId: string) => Promise<string[]>>(async () => {
+  throw new Error('ensureGroupMembers not initialized');
+});
 
 const connect = useCallback((nickname: string, password: string, isRegister: boolean) => {
     if (wsRef.current && (wsRef.current.readyState === WebSocket.OPEN || wsRef.current.readyState === WebSocket.CONNECTING)) return;
@@ -1673,6 +1765,30 @@ dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
                 break;
               }
 
+            case 'group_history': {
+              const ch = `group:${message.payload.groupId}`;
+              const msgs = await Promise.all(message.payload.messages.map(async (m: any) => {
+                const { text, fileKeyEntry, senderNickname: sealedSenderNick } = await readGroupText(m);
+                return { id: m.id, senderId: m.senderId, senderNickname: sealedSenderNick || m.senderNickname, text, timestamp: m.timestamp, isOwn: m.senderId === userIdRef.current, channel: ch, fileKey: m.fileKey, fileKeyEntry: fileKeyEntry ?? undefined, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined, reactions: normalizeReactions(m.reactions), encrypted: m.encrypted, clientId: m.clientId ?? undefined };
+              }));
+              dispatch({ type: 'SET_DM_MESSAGES', channel: ch, messages: msgs });
+              dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromMessages(message.payload.messages) });
+              dispatch({ type: 'SET_DM_HISTORY_STATE', channel: ch, hasMore: message.payload.hasMore !== false });
+              break;
+            }
+
+            case 'group_history_page': {
+              const ch = `group:${message.payload.groupId}`;
+              const older = await Promise.all(message.payload.messages.map(async (m: any) => {
+                const { text, fileKeyEntry, senderNickname: sealedSenderNick } = await readGroupText(m);
+                return { id: m.id, senderId: m.senderId, senderNickname: sealedSenderNick || m.senderNickname, text, timestamp: m.timestamp, isOwn: m.senderId === userIdRef.current, channel: ch, fileKey: m.fileKey, fileKeyEntry: fileKeyEntry ?? undefined, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined, reactions: normalizeReactions(m.reactions), encrypted: m.encrypted, clientId: m.clientId ?? undefined };
+              }));
+              dispatch({ type: 'PREPEND_DM_MESSAGES', channel: ch, messages: older });
+              dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromMessages(message.payload.messages) });
+              dispatch({ type: 'SET_DM_HISTORY_STATE', channel: ch, hasMore: message.payload.hasMore !== false });
+              break;
+            }
+
             case 'dm_message': {
               let msgText = message.payload.text || '';
               const ch = message.payload.channel || '';
@@ -1722,6 +1838,39 @@ let sealedSenderNick: string | undefined;
                } else {
                  scheduleContactsRefresh();
                }
+              break;
+            }
+            case 'group_message': {
+              const ch = `group:${message.payload.groupId}`;
+              let msgText = message.payload.text || '';
+              let msgFileKeyEntry: string | undefined;
+              let sealedSenderNick: string | undefined;
+              if (message.payload.encrypted) {
+                const opened = await readGroupText(message.payload);
+                msgText = opened.text;
+                msgFileKeyEntry = opened.fileKeyEntry ?? undefined;
+                sealedSenderNick = opened.senderNickname;
+              }
+              if (!msgText && !message.payload.isOwn) msgText = t('not_for_this_device');
+              const displayNick = sealedSenderNick || message.payload.senderNickname || '';
+              const displaySenderId = message.payload.isOwn ? userIdRef.current || '' : message.payload.senderId || '';
+              dispatch({ type: 'ADD_DM_MESSAGE', channel: ch, message: { id: message.payload.id, senderId: displaySenderId, senderNickname: displayNick, text: msgText, timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, channel: ch, fileKey: message.payload.fileKey, fileKeyEntry: msgFileKeyEntry, expiresAt: message.payload.expiresAt || undefined, quotedMessageId: message.payload.quotedMessageId ?? undefined, quotedMessageText: message.payload.quotedMessageText ?? undefined, quotedMessageSender: message.payload.quotedMessageSender ?? undefined, reactions: normalizeReactions(message.payload.reactions), encrypted: message.payload.encrypted, clientId: message.payload.clientId ?? undefined } });
+              dispatch({ type: 'SET_AVATARS', avatars: avatarFromSender(message.payload.senderId, message.payload.senderAvatar) });
+              if (!message.payload.isOwn) {
+                dispatch({ type: 'SET_DM_NAME', userId: message.payload.groupId, nickname: displayNick || message.payload.senderNickname || '' });
+                const visible = stateRef.current.activeChannel === ch && !document.hidden;
+                if (visible && message.payload.timestamp > (ownReadRef.current[ch] || 0)) {
+                  markReadRef.current(ch, message.payload.timestamp);
+                } else {
+                  dispatch({ type: 'BUMP_UNREAD', channel: ch, delta: 1 });
+                  unreadCountRef.current++;
+                  updateTitle();
+                  fireNotification(`@${displayNick || message.payload.senderNickname || 'Someone'}`, msgText);
+                  playNotifSound();
+                }
+              } else {
+                scheduleContactsRefresh();
+              }
               break;
             }
             case 'chat_message':
@@ -1813,12 +1962,18 @@ if (!message.payload.isOwn) {
               break;
             }
             case 'message_edited': {
-              // A corrected private message arrives as ciphertext. It is opened here and the words are
+              // A corrected message arrives as ciphertext. It is opened here and the words are
               // filled in, rather than leaving the bubble holding a body nothing had read yet.
               const editedId = message.payload.messageId;
               if (message.payload.encrypted) {
                 const channel = findDmChannelOf(stateRef.current, editedId);
-                const opened = channel ? await readDmText({ ...findMessage(stateRef.current, editedId), encrypted: message.payload.encrypted }) : null;
+                const msg = findMessage(stateRef.current, editedId);
+                let opened: { text: string; fileKeyEntry: string | null } | null = null;
+                if (typeof channel === 'string' && channel.startsWith('group:')) {
+                  opened = msg ? await readGroupText({ ...msg, encrypted: message.payload.encrypted }) : null;
+                } else if (channel) {
+                  opened = msg ? await readDmText({ ...msg, encrypted: message.payload.encrypted }) : null;
+                }
                 dispatch({ type: 'SET_MESSAGE_TEXT', messageId: editedId, text: opened?.text ?? '', fileKeyEntry: opened?.fileKeyEntry ?? undefined });
               }
               dispatch({
@@ -1890,6 +2045,30 @@ case 'typing':
             case 'user_left':
               dispatch({ type: 'REMOVE_USER', userId: message.payload.userId });
               break;
+            case 'group_key_distribute': {
+              const { groupId, encryptedKey } = message.payload || {};
+              const priv = privateKeyRef.current;
+              if (typeof groupId === 'string' && typeof encryptedKey === 'string' && priv) {
+                void (async () => {
+                  try {
+                    const raw = await unwrapGroupKey(encryptedKey, priv);
+                    const key = await importGroupKey(raw);
+                    groupKeysRef.current.set(groupId, key);
+                    groupKeyWrapRef.current.set(groupId, encryptedKey);
+                  } catch (e) {
+                    console.warn('[group] could not unwrap group key:', (e as Error)?.message);
+                  }
+                })();
+              }
+              break;
+            }
+            case 'group_members': {
+              const { groupId, members } = message.payload || {};
+              if (typeof groupId === 'string' && Array.isArray(members)) {
+                dispatch({ type: 'SET_GROUP_MEMBERS', groupId, members });
+              }
+              break;
+            }
             case 'system_message':
               dispatch({ type: 'ADD_MESSAGE', message: { id: crypto.randomUUID(), senderId: 'system', senderNickname: '', text: message.payload.text, timestamp: Date.now(), isOwn: false } });
               break;
@@ -2270,6 +2449,10 @@ const retainMedia = useCallback((id: string): void => {
       const existing = stateRef.current.dmMessages[channel] || [];
       const oldest = before ?? (existing.length ? existing[0].timestamp : null);
       if (!oldest) return;
+      if (channel.startsWith('group:')) {
+        ws.send(JSON.stringify({ type: 'group_history', payload: { groupId: channel.slice(6), before: oldest, limit: 50 } }));
+        return;
+      }
       ws.send(JSON.stringify({ type: 'dm_history', payload: { with: channel, before: oldest, limit: 50 } }));
       return;
     }
@@ -2375,7 +2558,10 @@ const cancelPow = useCallback(() => {
     const senderKeyB64 = accountIdentityKeyBase64();
     if (!senderKeyB64) throw new MediaError('keys');
     const myNick = stateRef.current.nickname || '';
-    const sealedContent = wrapSenderPlaintext(content, senderKeyB64, myNick);
+    // Pad the plaintext before sealing so the server cannot tell the exact message length from the
+    // ciphertext size. Padding is stripped on decryption.
+    const paddedContent = padToBucket(content);
+    const sealedContent = wrapSenderPlaintext(paddedContent, senderKeyB64, myNick);
     // One sealed body per device that should read this: each of the recipient's, plus each of this
     // account's other devices so a second screen is not left out of its own conversation. Nothing here
     // shares key material between devices, so taking one phone does not open the laptop.
@@ -2384,7 +2570,8 @@ const cancelPow = useCallback(() => {
     // it is no longer attached to every message, because a copy under a long-lived key meant seizing
     // the server opened the whole history regardless of what the ratchet had achieved.
     const { payload: body, failedDevices } = await sealForDevices(to, sealedContent, () =>
-      encryptMessage(sealedContent, buildEncryptKeys(to, recipientKey)));
+      encryptMessage(sealedContent, buildEncryptKeys(to, recipientKey)), false);
+    if (!body) throw new MediaError('encrypt');
     payload.encrypted = body;
     // Dispatched unconditionally, including with an empty list. The reducer knows how to clear a peer's
     // warning and this guard meant it never got to: the entry was only ever written, never removed, so one
@@ -2634,33 +2821,189 @@ const prepareEncryptedMedia = useCallback(async (
     wsRef.current.send(JSON.stringify({ type: 'group_leave', payload: { groupId } }));
   }, []);
 
-  const sendGroupMessage = useCallback(async (groupId: string, text: string, quoted?: ReplyTarget, fileKey?: Record<string, string>) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
-    wsRef.current.send(JSON.stringify({
-      type: 'group_message',
-      payload: { groupId, text, encrypted: undefined, fileKey, quoted: quoted ? { id: quoted.id, text: quoted.text, sender: quoted.senderNickname } : undefined },
-    }));
+  const openGroup = useCallback(async (groupId: string) => {
+    dispatch({ type: 'SET_ACTIVE_CHANNEL', channel: `group:${groupId}` });
+    dispatch({ type: 'CLEAR_UNREAD', channel: `group:${groupId}` });
+    dispatch({ type: 'SET_SEARCH_OPEN', open: false });
+    unreadCountRef.current = 0;
+    updateTitle();
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'group_history', payload: { groupId, limit: 50 } }));
+      wsRef.current.send(JSON.stringify({ type: 'group_members', payload: { groupId } }));
+      // Lazily fetch the group's symmetric key if we do not hold it yet.
+      if (!groupKeysRef.current.has(groupId)) {
+        wsRef.current.send(JSON.stringify({ type: 'group_key_fetch', payload: { groupId } }));
+      }
+    }
+  }, [updateTitle]);
+
+  /**
+   * Makes sure the member list for a group is known before a message is sealed for every device.
+   *
+   * `groupMembersMap` is populated by the `group_members` frame, which `openGroup` and
+   * `GroupInfoModal` request. If it is still empty for this group, the helper asks the server and
+   * waits for the answer before returning the user ids.
+   */
+  const ensureGroupMembers = useCallback(async (groupId: string): Promise<string[]> => {
+    const held = stateRef.current.groupMembersMap[groupId];
+    if (held && held.length) return held.map((m) => m.userId);
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error('offline');
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        ws.removeEventListener('message', onMessage);
+        reject(new Error('group members did not arrive'));
+      }, 10_000);
+      const onMessage = (event: MessageEvent) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'group_members' && msg.payload?.groupId === groupId) {
+            clearTimeout(timeout);
+            ws.removeEventListener('message', onMessage);
+            const members = Array.isArray(msg.payload.members) ? msg.payload.members : [];
+            resolve(members.map((m: any) => m.userId));
+          }
+        } catch { /* ignore malformed frames */ }
+      };
+      ws.addEventListener('message', onMessage);
+      ws.send(JSON.stringify({ type: 'group_members', payload: { groupId } }));
+    });
   }, []);
 
+  ensureGroupMembersRef.current = ensureGroupMembers;
+
+  /**
+   * Waits for this device to hold the group's symmetric key, fetching it from the server if needed.
+   *
+   * One key per group, one encrypted body per message - no matter how many members or devices.
+   */
+  const ensureGroupKey = useCallback(async (groupId: string): Promise<CryptoKey> => {
+    const held = groupKeysRef.current.get(groupId);
+    if (held) return held;
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error('offline');
+    return new Promise((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        ws.removeEventListener('message', onKeyMessage);
+        reject(new Error('group key did not arrive'));
+      }, 10_000);
+      const onKeyMessage = (event: MessageEvent) => {
+        try {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'group_key_distribute' && msg.payload?.groupId === groupId) {
+            clearTimeout(timeout);
+            ws.removeEventListener('message', onKeyMessage);
+            const key = groupKeysRef.current.get(groupId);
+            if (key) resolve(key);
+            else reject(new Error('group key not stored'));
+          }
+        } catch { /* ignore malformed frames */ }
+      };
+      ws.addEventListener('message', onKeyMessage);
+      ws.send(JSON.stringify({ type: 'group_key_fetch', payload: { groupId } }));
+    });
+  }, []);
+
+  const sendGroupMessage = useCallback(async (groupId: string, text: string, quoted?: ReplyTarget, fileKey?: Record<string, string>) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) throw new Error('offline');
+    if (!text.trim() && !fileKey) return;
+    const group = stateRef.current.groups.find((g) => g.id === groupId);
+    if (!group) throw new Error('unknown group');
+    // #general stays open: everyone can read it, nobody seals it.
+    if (group.isChannel) {
+      ws.send(JSON.stringify({
+        type: 'group_message',
+        payload: { groupId, text: text.trim(), encrypted: undefined, fileKey, quoted: quoted ? { id: quoted.id, text: quoted.text, sender: quoted.senderNickname } : undefined },
+      }));
+      return;
+    }
+    const key = await ensureGroupKey(groupId);
+    const senderKeyB64 = accountIdentityKeyBase64();
+    if (!senderKeyB64 || !privateKeyRef.current) throw new MediaError('keys');
+    const myNick = stateRef.current.nickname || '';
+    const paddedText = padToBucket(text.trim());
+    const sealedContent = wrapGroupSenderPlaintext(paddedText, senderKeyB64, myNick);
+    const { ciphertext, iv } = await encryptGroupMessage(key, sealedContent);
+    const clientId = newClientMessageId();
+    const payload: any = { groupId, text: '', encrypted: { kind: 'group', ciphertext, iv }, ttl: ttlSeconds(), clientId };
+    if (fileKey) payload.fileKey = fileKey;
+    if (quoted) payload.quoted = { id: quoted.id, text: quoted.text, sender: quoted.senderNickname };
+    ws.send(JSON.stringify({ type: 'group_message', payload }));
+    // the sender cannot decrypt its own ciphertext, so keep the plaintext to render our own message later
+    rememberOwnMessageText(clientId, text.trim());
+  }, [ensureGroupKey]);
+
   const sendGroupImage = useCallback(async (groupId: string, file: File) => {
-    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new MediaError('offline');
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) throw new MediaError('offline');
+    const group = stateRef.current.groups.find((g) => g.id === groupId);
+    if (!group) throw new Error('unknown group');
     const tag = file.type.startsWith('video/') ? 'video' : 'image';
     const controller = new AbortController();
     uploadAbortRef.current?.abort();
     uploadAbortRef.current = controller;
+    let url: string;
     try {
-      const url = await uploadFile(file, file.name || 'media.png', undefined, controller.signal);
-      wsRef.current.send(JSON.stringify({
-        type: 'group_message',
-        payload: { groupId, text: `[${tag}]${url}[/${tag}]`, encrypted: undefined, fileKey: undefined },
-      }));
+      url = await uploadFile(file, file.name || 'media.png', undefined, controller.signal);
     } catch (e) {
       if (!isAbortError(e)) throw new MediaError('upload');
       throw e;
     } finally {
       if (uploadAbortRef.current === controller) uploadAbortRef.current = null;
     }
-  }, []);
+    const plain = `[${tag}]${url}[/${tag}]`;
+    // #general stays open.
+    if (group.isChannel) {
+      ws.send(JSON.stringify({ type: 'group_message', payload: { groupId, text: plain, encrypted: undefined, fileKey: undefined } }));
+      return;
+    }
+    const key = await ensureGroupKey(groupId);
+    const senderKeyB64 = accountIdentityKeyBase64();
+    if (!senderKeyB64 || !privateKeyRef.current) throw new MediaError('keys');
+    const myNick = stateRef.current.nickname || '';
+    const paddedPlain = padToBucket(plain);
+    const sealedContent = wrapGroupSenderPlaintext(paddedPlain, senderKeyB64, myNick);
+    const { ciphertext, iv } = await encryptGroupMessage(key, sealedContent);
+    const clientId = newClientMessageId();
+    ws.send(JSON.stringify({ type: 'group_message', payload: { groupId, text: '', encrypted: { kind: 'group', ciphertext, iv }, ttl: ttlSeconds(), clientId } }));
+    rememberOwnMessageText(clientId, plain);
+  }, [ensureGroupKey]);
+
+  const sendGroupAudio = useCallback(async (groupId: string, file: File) => {
+    const ws = wsRef.current;
+    if (!ws || ws.readyState !== WebSocket.OPEN) throw new MediaError('offline');
+    const group = stateRef.current.groups.find((g) => g.id === groupId);
+    if (!group) throw new Error('unknown group');
+    const controller = new AbortController();
+    uploadAbortRef.current?.abort();
+    uploadAbortRef.current = controller;
+    let url: string;
+    try {
+      url = await uploadFile(file, file.name || 'audio.ogg', undefined, controller.signal);
+    } catch (e) {
+      if (!isAbortError(e)) throw new MediaError('upload');
+      throw e;
+    } finally {
+      if (uploadAbortRef.current === controller) uploadAbortRef.current = null;
+    }
+    const plain = `[audio]${url}[/audio]`;
+    // #general stays open.
+    if (group.isChannel) {
+      ws.send(JSON.stringify({ type: 'group_message', payload: { groupId, text: plain, encrypted: undefined, fileKey: undefined } }));
+      return;
+    }
+    const key = await ensureGroupKey(groupId);
+    const senderKeyB64 = accountIdentityKeyBase64();
+    if (!senderKeyB64 || !privateKeyRef.current) throw new MediaError('keys');
+    const myNick = stateRef.current.nickname || '';
+    const paddedPlain = padToBucket(plain);
+    const sealedContent = wrapGroupSenderPlaintext(paddedPlain, senderKeyB64, myNick);
+    const { ciphertext, iv } = await encryptGroupMessage(key, sealedContent);
+    const clientId = newClientMessageId();
+    ws.send(JSON.stringify({ type: 'group_message', payload: { groupId, text: '', encrypted: { kind: 'group', ciphertext, iv }, ttl: ttlSeconds(), clientId } }));
+    rememberOwnMessageText(clientId, plain);
+  }, [ensureGroupKey]);
 
   const getGroupHistory = useCallback(async (groupId: string, before?: number, limit?: number) => {
     if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
@@ -2883,7 +3226,7 @@ const prepareEncryptedMedia = useCallback(async (
         setSearchOpen, jumpTo, togglePin, copyMessageText, forwardMessage, exportKeys, changePassword,
         searchInChannel,
         // Groups
-        loadGroups, createGroup, joinGroup, leaveGroup, sendGroupMessage, sendGroupImage,
+        loadGroups, createGroup, joinGroup, leaveGroup, openGroup, ensureGroupMembers, ensureGroupKey, sendGroupMessage, sendGroupImage, sendGroupAudio,
         getGroupHistory, getGroupInfo, getGroupMembers, addGroupMember, removeGroupMember, updateGroup, deleteGroup,
         openGroupCreate: () => setGroupCreateOpen(true),
         // Push notifications

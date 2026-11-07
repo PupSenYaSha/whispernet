@@ -178,6 +178,25 @@ function ensureSchema(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_group_members_user ON group_members(user_id);
     CREATE INDEX IF NOT EXISTS idx_group_members_group ON group_members(group_id);
+    /**
+     * One row per (group, user): the group's symmetric AES-256 key, wrapped under that user's
+     * long-lived RSA public key.
+     *
+     * The server never sees the raw key - it only stores and relays ciphertext. A user unwraps their
+     * copy with their private key, which never leaves their device. When a member joins or leaves,
+     * the key is rotated: a new random key is generated, wrapped for every remaining member, and old
+     * rows are deleted. A departed member therefore cannot open new messages even though their device
+     * still holds old ratchet sessions with the other members.
+     */
+    CREATE TABLE IF NOT EXISTS group_keys (
+      group_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      encrypted_key TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (group_id, user_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_group_keys_group ON group_keys(group_id);
+    CREATE INDEX IF NOT EXISTS idx_group_keys_user ON group_keys(user_id);
     CREATE TABLE IF NOT EXISTS push_subscriptions (
       user_id TEXT NOT NULL,
       device_id TEXT NOT NULL,
@@ -1584,6 +1603,61 @@ export async function getGroupHistory(groupId: string, limit: number = 100, befo
     ? getDb().prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? AND timestamp < ? ORDER BY timestamp DESC LIMIT ?`).all(channelId, before, limit)
     : getDb().prepare(`SELECT ${MESSAGE_COLUMNS} FROM messages WHERE channel = ? ORDER BY timestamp DESC LIMIT ?`).all(channelId, limit)) as any[];
   return rows.map((row) => rowToMessage(row)).reverse();
+}
+
+/**
+ * The wrapped group key for one member of one group.
+ *
+ * The server never decrypts this - it only stores and relays the wrapped copy.
+ */
+export async function getGroupKey(groupId: string, userId: string): Promise<string | null> {
+  const row = getDb().prepare('SELECT encrypted_key FROM group_keys WHERE group_id = ? AND user_id = ?').get(groupId, userId) as { encrypted_key: string } | undefined;
+  return row?.encrypted_key ?? null;
+}
+
+/** Every wrapped copy of one group's key, one per member. */
+export async function getGroupKeys(groupId: string): Promise<{ userId: string; encryptedKey: string }[]> {
+  const rows = getDb().prepare('SELECT user_id as userId, encrypted_key as encryptedKey FROM group_keys WHERE group_id = ?').all(groupId) as any[];
+  return rows.map(r => ({ userId: r.userId, encryptedKey: r.encryptedKey }));
+}
+
+/**
+ * Stores (or replaces) one member's wrapped copy of the group key.
+ *
+ * Called when the key is rotated: every remaining member gets the new key, departed members' rows are
+ * deleted by `deleteGroupKey`.
+ */
+export async function setGroupKey(groupId: string, userId: string, encryptedKey: string): Promise<void> {
+  getDb().prepare('INSERT INTO group_keys (group_id, user_id, encrypted_key, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(group_id, user_id) DO UPDATE SET encrypted_key = excluded.encrypted_key, created_at = excluded.created_at')
+    .run(groupId, userId, encryptedKey, Date.now());
+}
+
+/** Removes one member's wrapped copy of the group key. Called when they leave or are removed. */
+export async function deleteGroupKey(groupId: string, userId: string): Promise<void> {
+  getDb().prepare('DELETE FROM group_keys WHERE group_id = ? AND user_id = ?').run(groupId, userId);
+}
+
+/** Removes every wrapped copy of one group's key. Called when the group itself is deleted. */
+export async function deleteGroupKeys(groupId: string): Promise<void> {
+  getDb().prepare('DELETE FROM group_keys WHERE group_id = ?').run(groupId);
+}
+
+/**
+ * Strips sender attribution from old direct messages.
+ *
+ * After `DM_METADATA_TTL_MS` the sender_id and sender_nickname of DM rows are nulled. The ciphertext
+ * and the channel stay so history can still be rendered, but the server can no longer say which member
+ * of the pair wrote a given message. Group rows and the public channel are untouched.
+ *
+ * Returns the number of rows stripped.
+ */
+export async function stripDmSenderMetadata(maxAgeMs: number): Promise<number> {
+  if (maxAgeMs <= 0) return 0;
+  const d = getDb();
+  const res = d.prepare(
+    `UPDATE messages SET sender_id = NULL, sender_nickname = NULL WHERE channel LIKE '%:%' AND channel NOT LIKE 'group:%' AND sender_id IS NOT NULL AND timestamp < ?`
+  ).run(Date.now() - maxAgeMs);
+  return (res as any).changes;
 }
 
 export async function savePushSubscription(userId: string, deviceId: string, endpoint: string, p256dhKey: string, authKey: string): Promise<void> {

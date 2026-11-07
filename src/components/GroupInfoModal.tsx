@@ -37,7 +37,7 @@ export function GroupInfoModal({ open, groupId, onClose, onGroupDeleted, onGroup
     }
   }, [groupId, state.groups]);
 
-  const members = state.groupMembers;
+  const members = state.groupMembersMap[groupId || ''] || [];
   const myMember = members.find((m: any) => m.userId === state.userId);
   const isAdmin = myMember ? (myMember.role === 'admin' || myMember.role === 'owner') : false;
   const isCreator = group?.createdBy === state.userId;

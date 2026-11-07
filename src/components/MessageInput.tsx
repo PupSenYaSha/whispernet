@@ -16,7 +16,7 @@ import { AudioPlayer } from './AudioPlayer';
 const draftKey = (channel: string) => channel || 'general';
 
 export function MessageInput() {
-  const { state, sendMessage, sendDm, sendImage, sendDmImage, sendAudio, sendDmAudio, blockedUsers, unblockUser, setReply, editingTarget, setEditing, editMessage, notifyTyping, t } = useConnection();
+  const { state, sendMessage, sendDm, sendImage, sendDmImage, sendAudio, sendDmAudio, sendGroupMessage, sendGroupImage, sendGroupAudio, blockedUsers, unblockUser, setReply, editingTarget, setEditing, editMessage, notifyTyping, t } = useConnection();
   const [hasText, setHasText] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [sending, setSending] = useState(false);
@@ -28,6 +28,8 @@ export function MessageInput() {
   const isConnected = state.status === 'connected';
   const isDm = state.activeChannel !== 'general';
   const dmTarget = isDm ? state.activeChannel : null;
+  const isGroup = isDm && !!dmTarget && dmTarget.startsWith('group:');
+  const groupId = isGroup ? dmTarget.slice(6) : null;
   const isBlockedChat = isDm && !!dmTarget && blockedUsers.some(b => b.id === dmTarget);
   const blockedNick = isBlockedChat ? (state.dmNames[dmTarget] || '') : '';
   const replyTo = state.replyTo;
@@ -109,7 +111,9 @@ export function MessageInput() {
       const file = new File([blob], 'voice.webm', { type: 'audio/webm' });
       URL.revokeObjectURL(audioBlobUrl);
       setAudioBlobUrl(null);
-      if (isDm && dmTarget) {
+      if (isGroup && groupId) {
+        await sendGroupAudio(groupId, file);
+      } else if (isDm && dmTarget) {
         await sendDmAudio(dmTarget, file);
       } else {
         await sendAudio(file);
@@ -209,7 +213,9 @@ export function MessageInput() {
     setSending(true);
     setError(null);
     try {
-      if (isDm && dmTarget) {
+      if (isGroup && groupId) {
+        await sendGroupMessage(groupId, val, replyTo || undefined);
+      } else if (isDm && dmTarget) {
         await sendDm(dmTarget, val, replyTo || undefined);
       } else {
         await sendMessage(val, replyTo || undefined);
@@ -239,7 +245,9 @@ export function MessageInput() {
     setError(null);
     setUploading(true);
     try {
-      if (isDm && dmTarget) {
+      if (isGroup && groupId) {
+        await sendGroupImage(groupId, file);
+      } else if (isDm && dmTarget) {
         await sendDmImage(dmTarget, file);
       } else {
         await sendImage(file);
@@ -256,7 +264,9 @@ export function MessageInput() {
   const sendSticker = (packId: string, file: string) => {
     if (!isConnected) return;
     const stickerText = `[sticker:${packId}:${file}]`;
-    if (isDm && dmTarget) {
+    if (isGroup && groupId) {
+      void sendGroupMessage(groupId, stickerText);
+    } else if (isDm && dmTarget) {
       void sendDm(dmTarget, stickerText);
     } else {
       void sendMessage(stickerText);

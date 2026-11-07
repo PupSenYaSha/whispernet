@@ -12,7 +12,7 @@ import { resolveUploadTokenUser } from './uploadTokens.js';
 import { existsSync } from 'fs';
 import { handleConnection, startHeartbeatCheck, getTotalConnections, flushSessionWrites, terminateAllConnections } from './handlers.js';
 import { getVapidPublicKey } from './push.js';
-import { initializeDatabase, getMediaDir, getAvatarDir, getUserProfile, closeDatabase, getDataDir, savePushSubscription, getPushSubscriptions, removePushSubscription } from './database.js';
+import { initializeDatabase, getMediaDir, getAvatarDir, getUserProfile, closeDatabase, getDataDir, savePushSubscription, getPushSubscriptions, removePushSubscription, stripDmSenderMetadata } from './database.js';
 import {
   UPLOAD_RATE_LIMIT,
   UPLOAD_RATE_WINDOW,
@@ -891,6 +891,24 @@ export async function startServer(clientDir?: string, dataDir?: string) {
   }
   initializeDatabase();
   startHeartbeatCheck();
+
+  // Strip sender attribution from old DM messages so the server cannot say who wrote which message
+  // after the retention window. Runs hourly; disabled when DM_METADATA_TTL_MS <= 0.
+  const metadataTtlMs = Number(process.env.DM_METADATA_TTL_MS || 24 * 60 * 60 * 1000);
+  if (metadataTtlMs > 0) {
+    setInterval(async () => {
+      try {
+        const stripped = await stripDmSenderMetadata(metadataTtlMs);
+        if (stripped) console.log(`[metadata] stripped sender attribution from ${stripped} old DM messages`);
+      } catch (e) {
+        console.error('[metadata] cleanup failed:', (e as Error)?.message);
+      }
+    }, 60 * 60 * 1000);
+    // Run once soon after start to clean up any pre-existing backlog.
+    void stripDmSenderMetadata(metadataTtlMs).then((stripped) => {
+      if (stripped) console.log(`[metadata] stripped sender attribution from ${stripped} old DM messages`);
+    }).catch((e) => console.error('[metadata] initial cleanup failed:', (e as Error)?.message));
+  }
 
   const app = createApp(clientDir);
 

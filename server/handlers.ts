@@ -1,7 +1,7 @@
 import { WebSocket } from 'ws';
 import { issueUploadToken } from './uploadTokens.js';
 import { sendPush } from './push.js';
-import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundlesByIds, takePreKeyBundlesForSender, resetIssuedPreKeys, getIdentityKeyB64, setIdentityKeyB64, getIdentityKeysByIds, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, updateEncryptedMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, setUserAvatar, removeUserAvatar, getAvatarDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, StoredSession, getChannelMediaKey, countRegistrations, oldestRegistration, recordRegistrationEvent, createGroup, getGroup, getGroupByInviteCode, getUserGroups, addGroupMember, removeGroupMember, getGroupMembers, getGroupMember, updateGroupRole, updateGroup, deleteGroup, isGroupMember, getGroupHistory } from './database.js';
+import { getUserByNickname, saveMessage, getRecentMessages, getMessageById, createUser, getAllPublicKeys, getPublicKeysByIds, getDmChannelId, getDmHistory, getDmContacts, deleteGeneralMessages, getAllUsers, updatePublicKey, setPreKeyBundle, getPreKeyBundlesByIds, takePreKeyBundlesForSender, resetIssuedPreKeys, getIdentityKeyB64, setIdentityKeyB64, getIdentityKeysByIds, getKeyBackup, saveKeyBackup, searchMessages, deleteMessage, updateEncryptedMessage, addReaction, removeReaction, getReactionsForMessage, getReactionsForMessages, updateMessageText, getUserBanned, getBlockedUserIds, setUserBlocked, setUserBannedByIdent, getUserById, getUserProfile, setUserAvatar, removeUserAvatar, getAvatarDir, addReport, getReports, removeReportsForTarget, getBannedUsers, isAdminNickname, getAllSessions, upsertSession, markSessionRevoked, touchSession, StoredSession, getChannelMediaKey, countRegistrations, oldestRegistration, recordRegistrationEvent, createGroup, getGroup, getGroupByInviteCode, getUserGroups, addGroupMember, removeGroupMember, getGroupMembers, getGroupMember, updateGroupRole, updateGroup, deleteGroup, isGroupMember, getGroupHistory, getGroupKey, getGroupKeys, setGroupKey, deleteGroupKey, deleteGroupKeys, stripDmSenderMetadata } from './database.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import fs from 'fs';
@@ -1380,6 +1380,15 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       case 'group_history':
         if (userId) await handleGroupHistory(userId, ws, message.payload);
         break;
+      case 'group_key_fetch':
+        if (userId) await handleGroupKeyFetch(userId, ws, message.payload);
+        break;
+      case 'group_add_member':
+        if (userId) await handleGroupAddMember(userId, ws, message.payload);
+        break;
+      case 'group_remove_member':
+        if (userId) await handleGroupRemoveMember(userId, ws, message.payload);
+        break;
       default:
         logSecurity('UNKNOWN_COMMAND', { type: message.type, auth: !!userId, ip });
         send(ws, { type: 'error', payload: { code: 'UNKNOWN_MESSAGE', message: 'Unknown message type' }, timestamp: Date.now() });
@@ -1400,6 +1409,65 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     }
     const grp = await getGroup(id);
     send(ws, { type: 'group_created', payload: { groupId: id, name, role: 'admin', inviteCode: grp?.inviteCode || null, isChannel: grp?.isChannel || false }, timestamp: Date.now() });
+    // Generate the group's symmetric key and wrap it for the creator's long-lived RSA key.
+    // The server never sees the raw key - only the wrapped copy it stores and relays.
+    void (async () => {
+      try {
+        const rawKey = crypto.randomBytes(32);
+        const creator = await getUserById(userId);
+        if (creator?.publicKey) {
+          const pubKey = typeof creator.publicKey === 'string' ? JSON.parse(creator.publicKey) : creator.publicKey;
+          const wrapped = await wrapGroupKeyForServer(rawKey.buffer as ArrayBuffer, pubKey);
+          await setGroupKey(id, userId, wrapped);
+          send(ws, { type: 'group_key_distribute', payload: { groupId: id, encryptedKey: wrapped }, timestamp: Date.now() });
+        }
+      } catch (e) {
+        console.error(`[group] failed to distribute initial key for ${id}:`, (e as Error)?.message);
+      }
+    })();
+  }
+
+  /**
+   * Rotates a group's symmetric key and wraps the new copy for every remaining member.
+   *
+   * Called when a member joins or leaves. Departed members' rows are deleted so they cannot unwrap
+   * the new key even if their device still holds old ratchet sessions with the other members.
+   */
+  async function rotateGroupKey(groupId: string, actorUserId?: string | null): Promise<void> {
+    const members = await getGroupMembers(groupId);
+    const rawKey = crypto.randomBytes(32);
+    const wrappedByUser: Record<string, string> = {};
+
+    // Wrap the same raw key under each member's long-lived RSA key.
+    for (const member of members) {
+      try {
+        const user = await getUserById(member.userId);
+        if (user?.publicKey) {
+          const pubKey = typeof user.publicKey === 'string' ? JSON.parse(user.publicKey) : user.publicKey;
+          wrappedByUser[member.userId] = await wrapGroupKeyForServer(rawKey.buffer as ArrayBuffer, pubKey);
+        }
+      } catch {
+        // Skip members whose key we cannot wrap - they will not receive the new key.
+      }
+    }
+
+    // Delete every old wrapped copy, then write the new ones. Departed members simply have no row.
+    await deleteGroupKeys(groupId);
+    for (const [userId, wrapped] of Object.entries(wrappedByUser)) {
+      await setGroupKey(groupId, userId, wrapped);
+    }
+
+    // Deliver the new key to every online member's devices.
+    for (const member of members) {
+      const wrapped = wrappedByUser[member.userId];
+      if (!wrapped) continue;
+      const devices = devicesForUser(member.userId);
+      const frame = { type: 'group_key_distribute', payload: { groupId, encryptedKey: wrapped }, timestamp: Date.now() };
+      for (const dev of devices) {
+        if (dev.ws.readyState !== WebSocket.OPEN) continue;
+        dev.ws.send(JSON.stringify(frame));
+      }
+    }
   }
 
   async function handleGroupList(userId: string, ws: WebSocket): Promise<void> {
@@ -1458,7 +1526,87 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       send(ws, { type: 'error', payload: { code: 'NOT_MEMBER', message: 'You are not a member of this group' }, timestamp: Date.now() });
       return;
     }
+    // Rotate the group key so the departed member cannot open new messages.
+    void rotateGroupKey(payload.groupId, userId);
     send(ws, { type: 'group_left', payload: { groupId: payload.groupId }, timestamp: Date.now() });
+  }
+
+  /**
+   * Hands a member their wrapped copy of the group key.
+   *
+   * The server only relays the ciphertext it already stores - it never sees the raw key.
+   */
+  async function handleGroupKeyFetch(userId: string, ws: WebSocket, payload: { groupId?: string }): Promise<void> {
+    if (!payload?.groupId) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Group id required' }, timestamp: Date.now() });
+      return;
+    }
+    if (!(await isGroupMember(payload.groupId, userId))) {
+      send(ws, { type: 'error', payload: { code: 'NOT_MEMBER', message: 'You are not a member of this group' }, timestamp: Date.now() });
+      return;
+    }
+    const wrapped = await getGroupKey(payload.groupId, userId);
+    if (!wrapped) {
+      send(ws, { type: 'error', payload: { code: 'GROUP_KEY_MISSING', message: 'No group key for this group yet' }, timestamp: Date.now() });
+      return;
+    }
+    send(ws, { type: 'group_key_distribute', payload: { groupId: payload.groupId, encryptedKey: wrapped }, timestamp: Date.now() });
+  }
+
+  async function handleGroupAddMember(userId: string, ws: WebSocket, payload: { groupId: string; userId?: string; role?: string }): Promise<void> {
+    if (!payload?.groupId) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Group id required' }, timestamp: Date.now() });
+      return;
+    }
+    if (!(await isGroupMember(payload.groupId, userId))) {
+      send(ws, { type: 'error', payload: { code: 'NOT_MEMBER', message: 'You are not a member of this group' }, timestamp: Date.now() });
+      return;
+    }
+    const targetId = payload.userId;
+    if (!targetId || typeof targetId !== 'string') {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Target user id required' }, timestamp: Date.now() });
+      return;
+    }
+    const added = await addGroupMember(payload.groupId, targetId, userId, payload.role || 'member');
+    if (!added) {
+      send(ws, { type: 'error', payload: { code: 'GROUP_ADD_FAILED', message: 'Could not add member' }, timestamp: Date.now() });
+      return;
+    }
+    // Rotate the group key so the new member gets the current key and old members keep it.
+    void rotateGroupKey(payload.groupId, userId);
+    send(ws, { type: 'group_member_added', payload: { groupId: payload.groupId, userId: targetId, role: payload.role || 'member' }, timestamp: Date.now() });
+  }
+
+  async function handleGroupRemoveMember(userId: string, ws: WebSocket, payload: { groupId: string; userId?: string }): Promise<void> {
+    if (!payload?.groupId) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Group id required' }, timestamp: Date.now() });
+      return;
+    }
+    if (!(await isGroupMember(payload.groupId, userId))) {
+      send(ws, { type: 'error', payload: { code: 'NOT_MEMBER', message: 'You are not a member of this group' }, timestamp: Date.now() });
+      return;
+    }
+    const targetId = payload.userId;
+    if (!targetId || typeof targetId !== 'string') {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Target user id required' }, timestamp: Date.now() });
+      return;
+    }
+    const group = await getGroup(payload.groupId);
+    if (group && group.createdBy !== userId) {
+      const caller = await getGroupMember(payload.groupId, userId);
+      if (!caller || caller.role !== 'admin') {
+        send(ws, { type: 'error', payload: { code: 'FORBIDDEN', message: 'Only admins can remove members' }, timestamp: Date.now() });
+        return;
+      }
+    }
+    const removed = await removeGroupMember(payload.groupId, targetId);
+    if (!removed) {
+      send(ws, { type: 'error', payload: { code: 'NOT_MEMBER', message: 'User is not a member of this group' }, timestamp: Date.now() });
+      return;
+    }
+    // Rotate the group key so the removed member cannot open new messages.
+    void rotateGroupKey(payload.groupId, userId);
+    send(ws, { type: 'group_member_removed', payload: { groupId: payload.groupId, userId: targetId }, timestamp: Date.now() });
   }
 
   async function handleGroupInfo(userId: string, ws: WebSocket, payload: { groupId: string }): Promise<void> {
@@ -1529,8 +1677,26 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     const fileKey = isValidFileKeyMap(payload?.fileKey) ? payload.fileKey : undefined;
     const expiresAt = resolveExpiry(payload?.ttl, timestamp);
     const quoted = await resolveQuote(userId, payload?.quoted, channelId);
-    const text = payload.encrypted ? '' : sanitizeText(payload.text || '');
-    await saveMessage(messageId, userId, sender.nickname, text, timestamp, payload.encrypted, channelId, fileKey, quoted ? quoted.id : undefined, undefined, expiresAt, (quoted ? quoted.text : undefined) ?? undefined, (quoted ? quoted.sender : undefined) ?? undefined);
+
+    // A group that is a channel (`is_channel`) stays open: nobody seals it, everybody reads it.
+    // Any other group must be sealed per device under the ratchet; a server that cannot open it
+    // stores only ciphertext, which is the whole point.
+    const group = await getGroup(payload.groupId);
+    const isChannel = !!group?.isChannel;
+    const encrypted = payload.encrypted;
+    let text = '';
+    if (isChannel) {
+      text = sanitizeText(payload.text || '');
+    } else {
+      if (!isValidDmEncryptedPayload(encrypted)) {
+        send(ws, { type: 'error', payload: { code: 'ENCRYPTION_REQUIRED', message: 'Group messages must be encrypted' }, timestamp: Date.now() });
+        logSecurity('PLAINTEXT_GROUP_REJECTED', { from: userId, group: payload.groupId, bytes: safeJsonLength(encrypted) });
+        return;
+      }
+      text = '';
+    }
+
+    await saveMessage(messageId, userId, sender.nickname, text, timestamp, encrypted, channelId, fileKey, quoted ? quoted.id : undefined, undefined, expiresAt, (quoted ? quoted.text : undefined) ?? undefined, (quoted ? quoted.sender : undefined) ?? undefined);
 
     const groupMembers = await getGroupMembers(payload.groupId);
     const memberIds = groupMembers.map(m => m.userId);
@@ -1540,7 +1706,7 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       senderNickname: sender.nickname,
       senderAvatar: avatarInfo(await getProfileMeta(userId)),
       text,
-      encrypted: payload.encrypted ? payload.encrypted : null,
+      encrypted: encrypted ? encrypted : null,
       timestamp,
       channel: channelId,
       fileKey,
@@ -1550,19 +1716,26 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       quotedMessageSender: quoted?.sender ?? undefined,
       reactions: await getReactionsForMessage(messageId),
     };
+    // Route per device: a fan-out carries one body per device, and each device gets only the one it
+    // can open. A bare body (single device) goes to that device alone; the sender's copy goes to
+    // the sender's devices too.
+    const byDevice = isValidDeviceBodies(encrypted)
+      ? new Map(encrypted.bodies.map((e) => [e.deviceId, e.body]))
+      : null;
     for (const memberId of memberIds) {
       const memberDevices = devicesForUser(memberId);
       for (const dev of memberDevices) {
-        send(dev.ws, { type: 'group_message', payload: { ...groupPayload, isOwn: memberId === userId }, timestamp });
+        const routed = byDevice ? { ...groupPayload, encrypted: byDevice.get(dev.deviceId) ?? null, isOwn: memberId === userId }
+          : { ...groupPayload, isOwn: memberId === userId };
+        send(dev.ws, { type: 'group_message', payload: routed, timestamp });
       }
     }
-    send(ws, { type: 'group_message', payload: { ...groupPayload, isOwn: true }, timestamp });
     // Push уведомления участникам группы (кроме отправителя)
     for (const memberId of memberIds) {
       if (memberId !== userId) {
         void sendPush(memberId, {
           title: `Новое сообщение в группе ${payload.groupId}`,
-          body: payload.encrypted ? 'Новое зашифрованное сообщение' : (payload.text || ''),
+          body: encrypted ? 'Новое зашифрованное сообщение' : (payload.text || ''),
           url: '/',
         });
       }
@@ -1583,6 +1756,8 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
     const messages = await getGroupHistory(payload.groupId, limit, before);
     const userMeta = await buildAvatarInfoMap();
     const reactionsById = await getReactionsForMessages(messages.map((m) => m.id));
+    // Each device gets only the body it can open out of the stored fan-out, exactly as direct messages do.
+    // The stored row keeps every body so the next sign-in of any device can still find its own copy.
     const page = {
       channel: `group:${payload.groupId}`,
       groupId: payload.groupId,
@@ -1592,7 +1767,7 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
         senderNickname: m.senderNickname,
         senderAvatar: avatarInfo(userMeta.get(m.senderId)),
         text: m.text,
-        encrypted: m.encrypted || null,
+        encrypted: currentDeviceId ? bodyForDevice(m.encrypted, currentDeviceId) : m.encrypted || null,
         timestamp: m.timestamp,
         isOwn: m.senderId === userId,
         fileKey: m.fileKey || null,
@@ -2211,6 +2386,25 @@ function isValidEmoji(emoji: unknown): emoji is string {
     && /[\p{Emoji_Presentation}\p{Extended_Pictographic}\u200d\uFE0F]/u.test(emoji);
 }
 
+/**
+ * Wraps a raw 32-byte group key under one recipient's long-lived RSA public key.
+ *
+ * The server performs only the wrap - it never holds the raw key, only the ciphertext it stores
+ * and relays. The recipient unwraps it with their private key, which never leaves their device.
+ */
+async function wrapGroupKeyForServer(rawKey: ArrayBuffer, recipientPublicKey: any): Promise<string> {
+  const pub = await crypto.subtle.importKey('jwk', recipientPublicKey, { name: 'RSA-OAEP', hash: 'SHA-256' }, false, ['encrypt']);
+  const wrapped = await crypto.subtle.encrypt({ name: 'RSA-OAEP' }, pub, rawKey);
+  // chunked base64 to avoid stack overflow on the spread form
+  const bytes = new Uint8Array(wrapped);
+  let bin = '';
+  const CHUNK = 0x8000;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+  }
+  return btoa(bin);
+}
+
 function canonicalJwk(jwk: any): string {
   const sorted: Record<string, any> = {};
   for (const k of Object.keys(jwk || {}).sort()) sorted[k] = jwk[k];
@@ -2271,6 +2465,24 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
     if (!channel || channel === 'general') {
       broadcast(message, actorUserId);
       for (const dev of devicesForUser(actorUserId)) send(dev.ws, message);
+      return;
+    }
+    if (channel.startsWith('group:')) {
+      // Group edits and deletions fan out to every member's devices, one body per device.
+      void (async () => {
+        const groupId = channel.slice(6);
+        const members = await getGroupMembers(groupId);
+        const byDevice = isValidDeviceBodies(message.payload?.encrypted)
+          ? new Map(message.payload.encrypted.bodies.map((e: { deviceId: string; body: any }) => [e.deviceId, e.body]))
+          : null;
+        for (const member of members) {
+          for (const dev of devicesForUser(member.userId)) {
+            if (dev.ws.readyState !== WebSocket.OPEN) continue;
+            const routed = byDevice ? { ...message, payload: { ...message.payload, encrypted: byDevice.get(dev.deviceId) ?? null } } : message;
+            dev.ws.send(JSON.stringify(routed));
+          }
+        }
+      })().catch((err: unknown) => console.error(`group deliver failed:`, (err as Error)?.message));
       return;
     }
     const parts = channel.split(':');
@@ -2434,10 +2646,19 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
       send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
       return;
     }
-    // For encrypted (private) messages with sealed sender, the server cannot know the author, so any
-    // participant in the conversation may request deletion. The recipient decides whether to honour it
-    // by checking the sender key sealed inside the ciphertext.
-    if (!canAccessMessage(userId, target)) {
+    // Encrypted group messages: only the sender or a group member may delete.
+    if (target.encrypted && target.channel?.startsWith('group:')) {
+      const groupId = target.channel.slice(6);
+      const isSender = target.senderId === userId;
+      const isMember = await isGroupMember(groupId, userId);
+      if (!isSender && !isMember) {
+        send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
+        return;
+      }
+    } else if (!canAccessMessage(userId, target)) {
+      // For encrypted (private) messages with sealed sender, the server cannot know the author, so any
+      // participant in the conversation may request deletion. The recipient decides whether to honour it
+      // by checking the sender key sealed inside the ciphertext.
       send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
       return;
     }
@@ -2472,6 +2693,17 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
     if (!target.encrypted && target.channel === 'general' && target.senderId !== userId) {
       send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
       return;
+    }
+
+    // Encrypted group messages: only the sender or a group member may edit.
+    if (target.encrypted && target.channel?.startsWith('group:')) {
+      const groupId = target.channel.slice(6);
+      const isSender = target.senderId === userId;
+      const isMember = await isGroupMember(groupId, userId);
+      if (!isSender && !isMember) {
+        send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
+        return;
+      }
     }
 
     // A private message is stored as ciphertext, so a correction arrives as a new encrypted body rather

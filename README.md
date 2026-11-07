@@ -55,8 +55,11 @@ every connection, so the operator can observe:
 
 - **Who is connected when.** Sockets are authenticated, and the server necessarily knows which account
   each open connection belongs to.
-- **Who talks to whom, and when.** A direct message row records both participants. Its arrival, its time
-  and its size are visible.
+- **Who talks to whom, and when.** A direct message row records both participants. Its arrival and its
+  time are visible; the message *size* is padded to a coarse bucket so exact length is hidden. The
+  sender's name is stripped from stored DM rows after `DM_METADATA_TTL_MS` (default 24 hours), so the
+  server cannot say which member of a pair wrote which stored message — only that the pair exchanged
+  messages.
 - **The global channel in full.** `#general` is not end-to-end encrypted. It is a public room. Attachments
   posted there are not encrypted either — there is nobody to encrypt them to.
 - **Attachments, encrypted.** A private attachment is encrypted to the two participants before it leaves
@@ -66,12 +69,15 @@ every connection, so the operator can observe:
   "Chrome on Windows" before it is stored. Neither can be reversed or correlated across days.
 - **Prekey material and public keys.** Not secrets by design: a server that cannot see them cannot route a
   first message to an offline recipient.
-- **Typing and read receipts, transiently.** A "still typing" or "read up to here" frame is relayed to the
-  other end and forgotten. Nothing is written down.
+- **Typing and read receipts, optional.** A "still typing" or "read up to here" frame is relayed to the
+  other end and forgotten. Nothing is written down. Both can be switched off in Settings, so the server
+  never learns that a conversation is active or how far it has been read.
 
 ### How messages travel
 
-Private messages use Signal Protocol (X3DH + Double Ratchet) with a separate sealed body per device. The server routes bodies but cannot open them — each copy is under its own ratchet. The server does see metadata: who is connected, who talks to whom, and when. It does not see plaintext.
+Private messages use Signal Protocol (X3DH + Double Ratchet) with a separate sealed body per device. The server routes bodies but cannot open them — each copy is under its own ratchet. Message plaintexts are padded to fixed-size buckets before sealing, so the server cannot read exact message length from ciphertext size. The server does see metadata: who is connected, who talks to whom, and when. It does not see plaintext.
+
+Groups (except `#general`) use one symmetric AES-256 key per group. One sealed body per message reaches every member, so the server cannot count participants from body count. The group key is wrapped under each member's long-lived key and stored server-side; the server never holds the raw key. When a member joins or leaves, the group key rotates.
 
 Public channel `#general` is a plaintext room — do not send secrets there.
 

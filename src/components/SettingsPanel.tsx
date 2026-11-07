@@ -316,6 +316,14 @@ const [banListOpen, setBanListOpen] = useState(false);
 const setScreenshotProt = useCallback((v: boolean) => {
     updateSettings({ screenshotProtection: v });
   }, [updateSettings]);
+const sendTyping = state.settings.sendTypingIndicators;
+const setSendTyping = useCallback((v: boolean) => {
+    updateSettings({ sendTypingIndicators: v });
+  }, [updateSettings]);
+const sendRead = state.settings.sendReadReceipts;
+const setSendRead = useCallback((v: boolean) => {
+    updateSettings({ sendReadReceipts: v });
+  }, [updateSettings]);
 
   // the notice's own clock, or a settings panel closed inside 2.5 s left a timer behind calling
   // setState on a component that is no longer there
@@ -449,6 +457,12 @@ const setScreenshotProt = useCallback((v: boolean) => {
         </Option>
         <Option label={t('screenshot_prot')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="18" height="18" rx="2" /><line x1="3" y1="3" x2="21" y2="21" /></svg>}>
           <Toggle checked={screenshotProt} onChange={setScreenshotProt} />
+        </Option>
+        <Option label={t('send_typing')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>}>
+          <Toggle checked={sendTyping} onChange={setSendTyping} />
+        </Option>
+        <Option label={t('send_read_receipts')} icon={<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>}>
+          <Toggle checked={sendRead} onChange={setSendRead} />
         </Option>
         <PrivacyNotice />
       </Section>

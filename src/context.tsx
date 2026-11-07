@@ -112,7 +112,8 @@ settings: AppSettings;
   pinned: Record<string, Message[]>;
   groups: Group[];
   currentGroup: Group | null;
-  groupMembers: GroupMember[];
+  /** Group members keyed by group id, so a send can address every member's device without re-fetching. */
+  groupMembersMap: Record<string, GroupMember[]>;
   /** An active call this device is in, or null. */
   activeCall: { peerId: string; isCaller: boolean; callId: string } | null;
   /** An incoming call waiting to be answered, or null. */
@@ -202,7 +203,7 @@ export type ConnectionAction =
   | { type: 'TOGGLE_PIN'; channel: string; messageId: string }
   | { type: 'SET_GROUPS'; groups: Group[] }
   | { type: 'SET_CURRENT_GROUP'; group: Group | null }
-  | { type: 'SET_GROUP_MEMBERS'; members: GroupMember[] }
+  | { type: 'SET_GROUP_MEMBERS'; groupId: string; members: GroupMember[] }
   /* Calls */
   | { type: 'SET_ACTIVE_CALL'; peerId: string; isCaller: boolean; callId: string }
   | { type: 'CLEAR_ACTIVE_CALL' }
@@ -298,8 +299,12 @@ getMyPublicKey: () => JsonWebKey | null;
   createGroup: (name: string, description?: string, isPrivate?: boolean, isChannel?: boolean) => void;
   joinGroup: (groupId?: string, inviteCode?: string) => void;
   leaveGroup: (groupId: string) => void;
+  openGroup: (groupId: string) => void;
+  ensureGroupMembers: (groupId: string) => Promise<string[]>;
+  ensureGroupKey: (groupId: string) => Promise<CryptoKey>;
   sendGroupMessage: (groupId: string, text: string, quoted?: ReplyTarget, fileKey?: Record<string, string>) => Promise<void>;
   sendGroupImage: (groupId: string, file: File) => Promise<void>;
+  sendGroupAudio: (groupId: string, file: File) => Promise<void>;
   getGroupHistory: (groupId: string, before?: number, limit?: number) => Promise<void>;
   getGroupInfo: (groupId: string) => void;
   getGroupMembers: (groupId: string) => void;

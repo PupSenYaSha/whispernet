@@ -102,16 +102,19 @@ export function wrapSenderPlaintext(text: string, senderKeyB64: string, senderNi
   return JSON.stringify(envelope);
 }
 
+import { stripPadding } from './padding';
+
 /** Unwraps a SenderEnvelope from decrypted plaintext. Falls back to returning the raw string as `text`
  *  with no sender info for messages that predate sealed sender. */
 export function unwrapSenderPlaintext(decrypted: string): { senderKey?: string; senderNickname?: string; text: string } {
+  const trimmed = stripPadding(decrypted);
   try {
-    const parsed = JSON.parse(decrypted);
+    const parsed = JSON.parse(trimmed);
     if (parsed && typeof parsed === 'object' && typeof parsed.text === 'string' && typeof parsed.senderKey === 'string') {
-      return { senderKey: parsed.senderKey, senderNickname: parsed.senderNickname, text: parsed.text };
+      return { senderKey: parsed.senderKey, senderNickname: parsed.senderNickname, text: stripPadding(parsed.text) };
     }
   } catch { /* not a sealed-sender envelope - treat as legacy plaintext */ }
-  return { text: decrypted };
+  return { text: trimmed };
 }
 
 
@@ -272,12 +275,19 @@ export function sessionExists(peerId: string, peerDeviceId: string): boolean {
  *
  * A bare body comes back when there is exactly one recipient device, which is the common case and keeps
  * the ordinary single-device conversation byte-for-byte what it always sent.
+ *
+ * `allowFallback` decides whether, when no ratchet body can be built at all, the message is sealed under
+ * the long-lived account key instead (the old stateless envelope). That path has no forward secrecy: anyone
+ * who ever gets the account's private key can open every message that ever used it. It is kept for direct
+ * messages as a last resort, but groups never use it - a group message either seals under the ratchet for
+ * every member's device, or it is not sent.
  */
 export async function sealForDevices(
   peerId: string,
   plaintext: string,
   fallback: () => Promise<{ ciphertext: string; iv: string; encryptedKeys: Record<string, string> }>,
-): Promise<{ payload: DmPayload; ratchet: boolean; failedDevices: string[] }> {
+  allowFallback: boolean = true,
+): Promise<{ payload: DmPayload | null; ratchet: boolean; failedDevices: string[] }> {
   const mine = getDeviceId();
   // Every device this message has to reach: the recipient's, and this account's own others so a second
   // screen can read the conversation. The current device is not among them - it has the plaintext.
@@ -292,6 +302,7 @@ export async function sealForDevices(
   }
 
   if (!ready || !myId || targets.length === 0 || ratchetUnavailable.has(peerId)) {
+    if (!allowFallback) return { payload: null, ratchet: false, failedDevices: targets.map((t) => t.deviceId) };
     return { payload: { kind: 'envelope', ...(await fallback()) }, ratchet: false, failedDevices: [] };
   }
 
@@ -317,6 +328,10 @@ export async function sealForDevices(
     // Nothing could be sealed, and an empty fan-out would be a message delivered to nobody. Rather than
     // drop it, fall back to the one shape that needs no prekey - and say so, because a fallback that
     // arrives without being announced is exactly the failure mode this replaced.
+    if (!allowFallback) {
+      ratchetUnavailable.add(peerId);
+      return { payload: null, ratchet: false, failedDevices: targets.map((t) => t.deviceId) };
+    }
     ratchetUnavailable.add(peerId);
     return { payload: { kind: 'envelope', ...(await fallback()) }, ratchet: false, failedDevices };
   }
@@ -328,8 +343,87 @@ export async function sealForDevices(
   // `failedDevices` was empty, so the caller reported a clean delivery and the message simply never
   // arrived. The peer's absence has to be an absence, not a quiet success.
   if (forPeer === 0) {
+    if (!allowFallback) {
+      ratchetUnavailable.add(peerId);
+      return { payload: null, ratchet: false, failedDevices: targets.map((t) => t.deviceId) };
+    }
     ratchetUnavailable.add(peerId);
     return { payload: { kind: 'envelope', ...(await fallback()) }, ratchet: false, failedDevices };
+  }
+
+  if (bodies.length === 1) return { payload: bodies[0].body, ratchet: true, failedDevices };
+  return { payload: { kind: 'devices', bodies }, ratchet: true, failedDevices };
+}
+
+/**
+ * Seals one message for every device of every member of a group, plus each of the sender's own devices.
+ *
+ * One body per device, each under that device's own ratchet session with the sender's device. No
+ * long-lived key is ever involved: there is no fallback envelope, so a group message either has forward
+ * secrecy for every device that receives it, or it is not sent at all.
+ *
+ * Returns `null` payload when no body could be sealed for anyone - the caller must not send.
+ */
+export async function sealForGroupDevices(
+  memberIds: string[],
+  plaintext: string,
+): Promise<{ payload: DmPayload | null; ratchet: boolean; failedDevices: string[] }> {
+  const mine = getDeviceId();
+  // Every device this message has to reach: every device of every member, and this account's own others
+  // so a second screen of the sender can read it too. The current device is not among them - it has the
+  // plaintext.
+  const targets: { accountId: string; deviceId: string; bundle: PreKeyBundle }[] = [];
+  const failedDevices: string[] = [];
+
+  for (const memberId of memberIds) {
+    if (memberId === mine) continue;
+    const memberBundles = bundlesFor(memberId);
+    if (memberBundles.length === 0) {
+      // No bundle means this member cannot be reached under the ratchet at all. The whole message fails
+      // rather than degrading to a key that has no forward secrecy.
+      for (const entry of ownBundles) {
+        if (entry.deviceId === mine) continue;
+        failedDevices.push(`${memberId}:${entry.deviceId}`);
+      }
+      continue;
+    }
+    for (const entry of memberBundles) {
+      targets.push({ accountId: memberId, deviceId: entry.deviceId, bundle: entry.bundle });
+    }
+  }
+  for (const entry of ownBundles) {
+    if (entry.deviceId === mine) continue;
+    targets.push({ accountId: myId, deviceId: entry.deviceId, bundle: entry.bundle });
+  }
+
+  if (!ready || !myId || targets.length === 0) {
+    return { payload: null, ratchet: false, failedDevices };
+  }
+
+  const bodies: { deviceId: string; body: DmBody }[] = [];
+  let forMembers = 0;
+  for (const target of targets) {
+    try {
+      bodies.push({
+        deviceId: target.deviceId,
+        body: await sealForDevice(target.accountId, target.deviceId, target.bundle, plaintext),
+      });
+      if (target.accountId !== myId) forMembers++;
+    } catch (e) {
+      console.warn(`[ratchet] no body for device ${target.deviceId}:`, (e as Error).message);
+      failedDevices.push(target.deviceId);
+    }
+  }
+
+  if (bodies.length === 0) {
+    return { payload: null, ratchet: false, failedDevices };
+  }
+
+  // Every member of the group has to have at least one body they can open. If none of the member devices
+  // got a body, the message would reach nobody but the sender's own screens - and that is not a group
+  // message, it is a note to self.
+  if (forMembers === 0) {
+    return { payload: null, ratchet: false, failedDevices };
   }
 
   if (bodies.length === 1) return { payload: bodies[0].body, ratchet: true, failedDevices };

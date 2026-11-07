@@ -220,3 +220,13 @@ export const INACTIVE_SESSION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
  * be unreadable on the other side. Clients refresh well inside this.
  */
 export const PREKEY_BUNDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * How long the server keeps the sender attribution of a direct message.
+ *
+ * The server must know who sent a DM at delivery time (rate limits, blocks, edit/delete auth), but it
+ * does not need to keep "who talked to whom and when" forever. After this TTL the sender_id and
+ * sender_nickname are nulled on DM rows, leaving only the ciphertext and the channel. The channel still
+ * reveals the pair, but not which member wrote which message. Set to 0 to disable.
+ */
+export const DM_METADATA_TTL_MS = Number(process.env.DM_METADATA_TTL_MS || 24 * 60 * 60 * 1000);

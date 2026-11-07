@@ -17,6 +17,8 @@ export const defaultSettings: AppSettings = {
   // The figure the send path actually used, now that it reads this. It used to be declared as 5 s here and
   // hardcoded to 2 s in `markRead`, so a reader changing the setting changed nothing at all.
   readReceiptsDelayMs: 2_000,
+  sendTypingIndicators: true,
+  sendReadReceipts: true,
 };
 
 export function cn(...classes: (string | boolean | undefined | null)[]): string {
@@ -424,6 +426,8 @@ export const translations = {
     sec_notifications: 'Notifications',
     import_keys: 'Import Keys',
     screenshot_prot: 'Screenshot Protection',
+    send_typing: 'Send typing indicators',
+    send_read_receipts: 'Send read receipts',
     sessions: 'Active Sessions',
     privacy_e2ee_title: 'End-to-end encrypted',
     privacy_e2ee_note: 'Nobody but the two of you can read a private message, this server included. It does record who was in the conversation and when, which is what lets a report or a block be acted on.',
@@ -761,6 +765,8 @@ export const translations = {
     sec_notifications: 'Уведомления',
     import_keys: 'Импорт ключей',
     screenshot_prot: 'Защита от скриншотов',
+    send_typing: 'Отправлять индикатор набора',
+    send_read_receipts: 'Отправлять квитанции прочтения',
     sessions: 'Активные сессии',
     privacy_e2ee_title: 'Сквозное шифрование',
     privacy_e2ee_note: 'Личное сообщение прочитаете только вы двое, этот сервер включительно. Он записывает, кто был в разговоре и когда, — именно это позволяет разобраться с жалобой или блокировкой.',

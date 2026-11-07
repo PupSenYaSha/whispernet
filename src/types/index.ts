@@ -145,6 +145,18 @@ export interface AppSettings {
   appLockAutoLockMs: number;
   /** Milliseconds between echoes of a conversation being read, if the reader ever looks away. */
   readReceiptsDelayMs: number;
+  /**
+   * Whether to tell the other end when this device is typing.
+   *
+   * Off means the server never learns that a conversation is active from a typing signal.
+   */
+  sendTypingIndicators: boolean;
+  /**
+   * Whether to tell the other end how far this device has read.
+   *
+   * Off means the server never learns read progress for a conversation.
+   */
+  sendReadReceipts: boolean;
 }
 
 declare global {
