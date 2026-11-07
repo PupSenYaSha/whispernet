@@ -1,0 +1,13 @@
+Package: whispernet
+Version: 1.0.0
+Section: net
+Priority: optional
+Architecture: amd64
+Maintainer: PupSenYaSha <whispernet@cloudpub.ru>
+Description: Minimalist messenger with end-to-end encryption
+ WhisperNet is a minimalist secure messenger with end-to-end encryption
+ based on Signal Protocol (X3DH + Double Ratchet) for direct messages.
+ Supports groups, disappearing messages, voice/video calls via WebRTC,
+ screenshots protection, multi-device (up to 3 sessions), key backup,
+ and signed updates.
+Homepage: https://github.com/PupSenYaSha/whispernet

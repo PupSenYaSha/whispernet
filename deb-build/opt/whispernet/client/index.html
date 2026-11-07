@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <title>WhisperNet</title>
+    <!-- no preconnect to Google Fonts: the interface ships its own Inter files, so connecting would
+         tell Google about every visit to an end-to-end encrypted messenger -->
+
+    <link rel="manifest" href="./manifest.json" />
+    <meta name="theme-color" content="#8b5cf6" />
+    <meta name="description" content="Secure minimalist messenger with E2EE" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="WhisperNet" />
+    <link rel="apple-touch-icon" href="./icons/icon-192.png" />
+    <link rel="icon" type="image/png" href="./icons/icon-192.png" />
+    <link rel="icon" type="image/svg+xml" href="./logo.svg" />
+    <script type="module" crossorigin src="./assets/index-BZn_cVe1.js"></script>
+    <link rel="modulepreload" crossorigin href="./assets/vendor-CMvXclBD.js">
+    <link rel="modulepreload" crossorigin href="./assets/crypto-DF2ihB4J.js">
+    <link rel="stylesheet" crossorigin href="./assets/index-D_LD6BUw.css">
+  </head>
+  <body class="bg-bg-primary text-fg-primary antialiased">
+    <style>
+      .screenshot-protect { -webkit-user-select: none; -moz-user-select: none; user-select: none; }
+      .screenshot-protect img { -webkit-user-drag: none; pointer-events: none; }
+      body.screenshot-protect.screenshot-hidden #root,
+      body.screenshot-protect.screenshot-blurred #root {
+        filter: blur(18px);
+        -webkit-filter: blur(18px);
+        opacity: 0.35;
+        pointer-events: none;
+      }
+      @media print {
+        body.screenshot-protect { display: none !important; }
+      }
+    </style>
+    <div id="root"></div>
+  </body>
+</html>
