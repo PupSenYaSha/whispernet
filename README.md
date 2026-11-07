@@ -59,25 +59,6 @@ Pre-built binaries on [Releases](https://github.com/PupSenYaSha/whispernet/relea
 
 Every asset is published with a `.sha256`. The Windows portable zip is signed with an Ed25519 key compiled into the binary, and the in-app updater verifies the signature before installing.
 
-## Configuration
-
-Everything has a working default; nothing is required.
-
-| Variable | Default | What it does |
-|---|---|---|
-| `PORT` | `50025` | Port the messenger listens on |
-| `HOST` | `127.0.0.1` | Interface to bind |
-| `DATA_DIR` | `./data` | SQLite database, avatars, uploads |
-| `ADMIN_KEY` | *(unset)* | Extra admin credential |
-| `TRUST_PROXY` | `0` | Set to `1` behind a tunnel so `req.ip` is the real client |
-| `MEDIA_BASE_URL` | `https://img.n1ko.dev` | Upstream used for media uploads and proxy |
-| `MEDIA_STORAGE` | `remote` | `local` keeps uploads in `DATA_DIR/media` |
-| `POW_BITS` | `20` | Leading zero bits a registration proof must have |
-| `MAX_AUTH_ATTEMPTS` | `300` | Coarse per-address auth backstop |
-| `MAX_AUTH_ATTEMPTS_PER_ADDRESS` | `120` | Per-address sign-in budget |
-| `MAX_REGISTRATIONS_PER_IP` | `40` | Accounts one address may create per day |
-| `MAX_ACCOUNTS_PER_DEVICE` | `6` | Accounts one device may create per day |
-
 ## License
 
 [MIT](LICENSE)
