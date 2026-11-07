@@ -43,6 +43,7 @@ import { ProfileModal } from './components/ProfileModal';
 import { GroupCreateModal } from './components/GroupCreateModal';
 import { ReportModal } from './components/ReportModal';
 import { Avatar } from './components/Avatar';
+import { CallWindow } from './components/CallWindow';
 import { useEscapeKey } from './useEscapeKey';
 import { runTopEscapeLayer, hasEscapeLayerAtLeast, isTypingTarget } from './escapeStack';
 import { resolveBackAction } from './backNavigation';
@@ -104,6 +105,8 @@ const initialState: ConnectionState = {
   groups: [],
   currentGroup: null,
   groupMembers: [],
+  activeCall: null,
+  incomingCall: null,
 };
 
 function applyAddReaction(msg: Message, emoji: string, userId: string): Message {
@@ -452,6 +455,14 @@ export function connectionReducer(state: ConnectionState, action: ConnectionActi
           Object.entries(state.dmMessages).map(([ch, msgs]) => [ch, msgs.map(m => m.id === action.messageId ? applyRemoveReaction(m, action.emoji, action.userId) : m)])
         ),
       };
+    case 'SET_ACTIVE_CALL':
+      return { ...state, activeCall: { peerId: action.peerId, isCaller: action.isCaller, callId: action.callId } };
+    case 'CLEAR_ACTIVE_CALL':
+      return { ...state, activeCall: null };
+    case 'SET_INCOMING_CALL':
+      return { ...state, incomingCall: { peerId: action.peerId, callId: action.callId } };
+    case 'CLEAR_INCOMING_CALL':
+      return { ...state, incomingCall: null };
     default:
       return state;
   }
@@ -1839,6 +1850,21 @@ case 'typing':
                 dispatch({ type: 'SET_READ', channel: inboundDmKey(message.payload, message.payload.channel), upTo: message.payload.upTo });
               }
               break;
+            case 'webrtc_offer':
+              // Incoming call offer: the peer wants to start a call with us.
+              dispatch({ type: 'SET_INCOMING_CALL', peerId: message.payload.senderId || message.payload.userId, callId: message.payload.callId });
+              break;
+            case 'webrtc_answer':
+              // The peer accepted our call.
+              dispatch({ type: 'SET_ACTIVE_CALL', peerId: message.payload.senderId || message.payload.userId, isCaller: true, callId: message.payload.callId });
+              break;
+            case 'webrtc_candidate':
+              if (message.payload?.rejected || message.payload?.ended) {
+                dispatch({ type: 'CLEAR_ACTIVE_CALL' });
+                dispatch({ type: 'CLEAR_INCOMING_CALL' });
+              }
+              // ICE candidates are relayed to the CallWindow via the parent's onCandidate callback
+              break;
              case 'session_revoked':
               if (wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify({ type: 'get_sessions', payload: {} }));
               break;
@@ -2671,6 +2697,57 @@ const prepareEncryptedMedia = useCallback(async (
     wsRef.current.send(JSON.stringify({ type: 'group_delete', payload: { groupId } }));
   }, []);
 
+  /* Calls */
+  const startCall = useCallback(async (peerId: string, isVideo: boolean = true) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    const callId = crypto.randomUUID();
+    dispatch({ type: 'SET_ACTIVE_CALL', peerId, isCaller: true, callId });
+    wsRef.current.send(JSON.stringify({
+      type: 'webrtc_offer',
+      payload: { target: peerId, callId, isVideo },
+      timestamp: Date.now(),
+    }));
+  }, []);
+
+  const acceptCall = useCallback((callId: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    const call = state.incomingCall;
+    if (!call || call.callId !== callId) return;
+    dispatch({ type: 'SET_ACTIVE_CALL', peerId: call.peerId, isCaller: false, callId });
+    dispatch({ type: 'CLEAR_INCOMING_CALL' });
+    wsRef.current.send(JSON.stringify({
+      type: 'webrtc_answer',
+      payload: { target: call.peerId, callId },
+      timestamp: Date.now(),
+    }));
+  }, [state.incomingCall]);
+
+  const rejectCall = useCallback((callId: string) => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) throw new Error('offline');
+    const call = state.incomingCall;
+    if (!call || call.callId !== callId) return;
+    dispatch({ type: 'CLEAR_INCOMING_CALL' });
+    wsRef.current.send(JSON.stringify({
+      type: 'webrtc_candidate',
+      payload: { target: call.peerId, callId, rejected: true },
+      timestamp: Date.now(),
+    }));
+  }, [state.incomingCall]);
+
+  const endCall = useCallback(() => {
+    if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+    const call = state.activeCall;
+    if (call) {
+      wsRef.current.send(JSON.stringify({
+        type: 'webrtc_candidate',
+        payload: { target: call.peerId, callId: call.callId, ended: true },
+        timestamp: Date.now(),
+      }));
+    }
+    dispatch({ type: 'CLEAR_ACTIVE_CALL' });
+    dispatch({ type: 'CLEAR_INCOMING_CALL' });
+  }, [state.activeCall]);
+
   const subscribePush = useCallback(async (subscription: PushSubscription): Promise<void> => {
     try {
       const endpoint = subscription.endpoint;
@@ -2817,6 +2894,11 @@ const prepareEncryptedMedia = useCallback(async (
         backupHistory, restoreHistory,
         showImportModal: (data: any, mode: 'setup' | 'settings') => setImportModal({ data, mode }),
         openProfile, closeProfile, openReport, closeReport, backToProfile, setMyAvatar, removeMyAvatar,
+        // Calls
+        startCall,
+        acceptCall,
+        rejectCall,
+        endCall,
       }}>
         {children}
         <ProfileOverlay />
@@ -2825,6 +2907,61 @@ const prepareEncryptedMedia = useCallback(async (
             open={groupCreateOpen}
             onClose={() => setGroupCreateOpen(false)}
           />
+        )}
+        {state.activeCall && (
+          <CallWindow
+            peerId={state.activeCall.peerId}
+            isCaller={state.activeCall.isCaller}
+            onHangUp={endCall}
+            onOffer={(_sdp) => {
+              // The offer is already sent by startCall; this is a fallback for re-negotiation
+            }}
+            onAnswer={(sdp) => {
+              void (async () => {
+                if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+                if (!state.activeCall) return;
+                wsRef.current.send(JSON.stringify({
+                  type: 'webrtc_answer',
+                  payload: { target: state.activeCall.peerId, callId: state.activeCall.callId, sdp },
+                  timestamp: Date.now(),
+                }));
+              })();
+            }}
+            onCandidate={(candidate) => {
+              void (async () => {
+                if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) return;
+                if (!state.activeCall) return;
+                wsRef.current.send(JSON.stringify({
+                  type: 'webrtc_candidate',
+                  payload: { target: state.activeCall.peerId, callId: state.activeCall.callId, candidate },
+                  timestamp: Date.now(),
+                }));
+              })();
+            }}
+            connected={!!state.activeCall}
+          />
+        )}
+        {state.incomingCall && (
+          <div className="fixed inset-0 z-[110] flex items-center justify-center p-4 bg-black/90 backdrop-blur-sm">
+            <div className="relative bg-[#0a0a0a] border border-border-default rounded-3xl shadow-2xl w-full max-w-md p-6 text-center">
+              <h2 className="text-lg font-semibold text-fg-primary mb-2">Входящий звонок</h2>
+              <p className="text-fg-muted mb-6">@{state.incomingCall.peerId} звонит вам</p>
+              <div className="flex justify-center gap-4">
+                <button
+                  onClick={() => { acceptCall(state.incomingCall!.callId); }}
+                  className="w-20 py-3 rounded-xl bg-status-success text-bg-primary font-semibold hover:brightness-110 transition-colors"
+                >
+                  Принять
+                </button>
+                <button
+                  onClick={() => { rejectCall(state.incomingCall!.callId); }}
+                  className="w-20 py-3 rounded-xl border border-border-default text-fg-primary font-semibold hover:bg-bg-hover transition-colors"
+                >
+                  Отклонить
+                </button>
+              </div>
+            </div>
+          </div>
         )}
       </ConnectionContext.Provider>      {importModal && (
         <div className="fixed inset-0 z-[70]">

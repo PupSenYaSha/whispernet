@@ -1312,6 +1312,11 @@ export function handleConnection(ws: WebSocket, upgradeRequest?: any): void {
       case 'dm_read':
         if (userId) await handleDmRead(userId, ws, message.payload);
         break;
+      case 'webrtc_offer':
+      case 'webrtc_answer':
+      case 'webrtc_candidate':
+        if (userId) await handleWebRTCSignaling(userId, ws, message.payload, message.type);
+        break;
       case 'get_sessions':
         if (userId) await handleGetSessions(userId, ws, currentDeviceId);
         break;
@@ -2729,6 +2734,32 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
     const otherId = parts[0] === userId ? parts[1] : parts[0];
     const frame = { type: 'dm_read', payload: { channel, userId, peerId: otherId, upTo }, timestamp: Date.now() };
     for (const dev of devicesForUser(otherId)) send(dev.ws, frame);
+  }
+
+  /**
+   * Relays WebRTC signalling frames (offer/answer/candidate) device-to-device.
+   *
+   * The server never touches the SDP or ICE payload - it only routes it from
+   * one caller's socket to the callee's sockets, like a typing indicator.
+   * The payload carries a `target` user id so the server knows where to deliver it.
+   */
+  async function handleWebRTCSignaling(userId: string, ws: WebSocket, payload: {
+    target?: string;
+    sdp?: { type: string; sdp: string };
+    candidate?: { candidate: string; sdpMid?: string; sdpMLineIndex?: number };
+    type?: 'offer' | 'answer' | 'candidate';
+  }, frameType: string): Promise<void> {
+    const target = typeof payload?.target === 'string' && payload.target ? payload.target : '';
+    if (!target) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'WebRTC target required' }, timestamp: Date.now() });
+      return;
+    }
+    if (target === userId) {
+      send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'Cannot call yourself' }, timestamp: Date.now() });
+      return;
+    }
+    const frame = { type: frameType, payload, timestamp: Date.now() };
+    for (const dev of devicesForUser(target)) send(dev.ws, frame);
   }
 
   async function handleGetSessions(userId: string, ws: WebSocket, currentDeviceId: string | null): Promise<void> {

@@ -113,6 +113,10 @@ settings: AppSettings;
   groups: Group[];
   currentGroup: Group | null;
   groupMembers: GroupMember[];
+  /** An active call this device is in, or null. */
+  activeCall: { peerId: string; isCaller: boolean; callId: string } | null;
+  /** An incoming call waiting to be answered, or null. */
+  incomingCall: { peerId: string; callId: string } | null;
 }
 
 /**
@@ -199,6 +203,11 @@ export type ConnectionAction =
   | { type: 'SET_GROUPS'; groups: Group[] }
   | { type: 'SET_CURRENT_GROUP'; group: Group | null }
   | { type: 'SET_GROUP_MEMBERS'; members: GroupMember[] }
+  /* Calls */
+  | { type: 'SET_ACTIVE_CALL'; peerId: string; isCaller: boolean; callId: string }
+  | { type: 'CLEAR_ACTIVE_CALL' }
+  | { type: 'SET_INCOMING_CALL'; peerId: string; callId: string }
+  | { type: 'CLEAR_INCOMING_CALL' }
   | { type: 'RESET' };
 
 
@@ -313,6 +322,16 @@ getMyPublicKey: () => JsonWebKey | null;
   backToProfile: () => void;
   setMyAvatar: (dataUrl: string) => Promise<void>;
   removeMyAvatar: () => void;
+
+  /* Calls */
+  /** Starts a voice/video call to a peer. */
+  startCall: (peerId: string, isVideo?: boolean) => void;
+  /** Answers an incoming call. */
+  acceptCall: (callId: string) => void;
+  /** Rejects an incoming call. */
+  rejectCall: (callId: string) => void;
+  /** Ends the current call. */
+  endCall: () => void;
 }
 
 export const ConnectionContext = React.createContext<ConnectionContextType | null>(null);
