@@ -26,7 +26,7 @@ interface CallWindowProps {
   connected?: boolean;
 }
 
-export function CallWindow({ peerId, isCaller, onHangUp, onOffer, onAnswer, onCandidate, connected }: CallWindowProps) {
+export function CallWindow({ peerId, isCaller, onHangUp, onOffer, onAnswer: _onAnswer, onCandidate, connected }: CallWindowProps) {
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const pcRef = useRef<RTCPeerConnection | null>(null);
@@ -89,7 +89,7 @@ export function CallWindow({ peerId, isCaller, onHangUp, onOffer, onAnswer, onCa
       await pc.setLocalDescription(offer);
       onOffer(offer);
     }
-  }, [isCaller, onOffer, onAnswer, onCandidate]);
+  }, [isCaller, onOffer, onCandidate]);
 
   useEffect(() => {
     startLocalMedia().then(() => {
@@ -99,7 +99,7 @@ export function CallWindow({ peerId, isCaller, onHangUp, onOffer, onAnswer, onCa
       pcRef.current?.close();
       localStreamRef.current?.getTracks().forEach((t) => t.stop());
     };
-  }, []);
+  }, [startLocalMedia, createConnection]);
 
   const handleHangUp = () => {
     pcRef.current?.close();
