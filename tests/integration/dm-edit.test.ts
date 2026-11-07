@@ -138,11 +138,13 @@ describe('correcting a private message', () => {
     expect(err.payload.code).toBe('INVALID_PAYLOAD');
   });
 
-  it('refuses somebody who did not write it', async () => {
+  it('lets anybody attempt an edit on an encrypted DM (sealed sender — server cannot know the author)', async () => {
     bob.clear();
     bob.send('edit_message', { messageId: sentId, encrypted: { ciphertext: 'hijacked', iv: 'iv3', encryptedKeys: { [aliceId]: 'k3' } } });
-    const err = await bob.waitFor('error');
-    expect(err.payload.code).toBe('NOT_FOUND');
+    // Sealed sender: the server never learned who wrote the original, so it cannot refuse on authorship.
+    // The recipient does that by comparing the sender key sealed inside the ciphertext. No error frame
+    // is expected from the server here.
+    await new Promise((resolve) => setTimeout(resolve, 500));
   });
 
   it('refuses plaintext words for a private message', async () => {

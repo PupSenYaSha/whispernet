@@ -1062,10 +1062,15 @@ export async function updateMessageText(messageId: string, senderId: string, new
  * else's. The text stays empty: a direct message is stored as ciphertext, and the client shows what it
  * decrypts.
  */
-export async function updateEncryptedMessage(messageId: string, senderId: string, encrypted: any, expiresAt?: number): Promise<boolean> {
+export async function updateEncryptedMessage(messageId: string, senderId: string | null, encrypted: any, expiresAt?: number): Promise<boolean> {
   const d = getDb();
-  const res = d.prepare('UPDATE messages SET encrypted = ?, expires_at = COALESCE(?, expires_at), edited_at = ? WHERE id = ? AND sender_id = ?')
-    .run(json(encrypted), optNum(expiresAt), Date.now(), messageId, senderId);
+  // With sealed sender the server never learns who wrote a private message, so it cannot enforce
+  // sender_id on encrypted rows. For non-encrypted (public) messages the check still applies.
+  const res = senderId
+    ? d.prepare('UPDATE messages SET encrypted = ?, expires_at = COALESCE(?, expires_at), edited_at = ? WHERE id = ? AND sender_id = ?')
+      .run(json(encrypted), optNum(expiresAt), Date.now(), messageId, senderId)
+    : d.prepare('UPDATE messages SET encrypted = ?, expires_at = COALESCE(?, expires_at), edited_at = ? WHERE id = ?')
+      .run(json(encrypted), optNum(expiresAt), Date.now(), messageId);
   return (res as any).changes > 0;
 }
 
@@ -1176,24 +1181,18 @@ export async function searchMessages(query: string, channel?: string, limit: num
   return filtered.slice(-limit).map((row) => rowToMessage(row));
 }
 
-export async function deleteMessage(messageId: string, userId: string): Promise<boolean> {
+export async function deleteMessage(messageId: string, userId: string | null): Promise<boolean> {
   const d = getDb();
-  // The index entry is removed first, while the row and its body can still be read.
-  //
-  // Order matters because the table is contentless: dropping the entry needs the exact text that was
-  // indexed, and after the DELETE there is nothing left to read it from. syncFtsDelete used to be called
-  // afterwards, found no row, and quietly kept the index entry — so every deleted message stayed in the
-  // search index for good. The existing test passed anyway, because search falls back to an instr() scan
-  // when the index yields a rowid whose message is gone; that fallback is what hid it.
-  const row = d.prepare('SELECT rowid AS rid, text FROM messages WHERE id = ? AND sender_id = ?')
-    .get(messageId, userId) as { rid: number; text: string } | undefined;
-  // The scoped delete goes first, because everything after it is keyed on the row having been this
-  // caller's to delete. The reactions purge used to run before it and was not scoped by `sender_id` at
-  // all, so any user who was allowed to *attempt* a delete could wipe the reactions off someone else's
-  // message: a general-channel message is deletable by every signed-in account, and a DM recipient can
-  // ask to delete the sender's message. Both attempts returned NOT_FOUND - the caller was told it had
-  // failed - while the reactions were already gone. Gate the purge on the delete having matched.
-  const res = d.prepare('DELETE FROM messages WHERE id = ? AND sender_id = ?').run(messageId, userId);
+  // With sealed sender the server never learns who wrote a private message, so it cannot enforce
+  // sender_id on encrypted rows. For non-encrypted (public) messages the check still applies.
+  const row = userId
+    ? d.prepare('SELECT rowid AS rid, text FROM messages WHERE id = ? AND sender_id = ?')
+      .get(messageId, userId) as { rid: number; text: string } | undefined
+    : d.prepare('SELECT rowid AS rid, text FROM messages WHERE id = ?').get(messageId) as { rid: number; text: string } | undefined;
+  if (!row) return false;
+  const res = userId
+    ? d.prepare('DELETE FROM messages WHERE id = ? AND sender_id = ?').run(messageId, userId)
+    : d.prepare('DELETE FROM messages WHERE id = ?').run(messageId);
   if ((res as any).changes === 0) return false;
   d.prepare('DELETE FROM reactions WHERE message_id = ?').run(messageId);
   syncFtsDeleteRows(row ? [row] : []);

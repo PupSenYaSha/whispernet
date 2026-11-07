@@ -20,6 +20,7 @@ import {
   sealForDevices, openFor, isDmBody, flushRatchet, hasBundlesFor, forgetBundle,
   rememberOwnBundles, accountIdentityKeyBase64,
   peerIdentityChanged, clearIdentityChanged,
+  wrapSenderPlaintext, unwrapSenderPlaintext,
 } from './dmCrypto';
 import { forgetSecureKeys } from './secureStore'
 import { ConnectionContext, useConnection, type ConnectionState, type ConnectionAction, type ReplyTarget, type AdminReport, type HistoryWindow } from './context';
@@ -818,13 +819,20 @@ useEffect(() => { reportTargetRef.current = state.reportTarget; }, [state.report
    * pointing at its own ciphertext. So the key is returned alongside and kept on the message in a field
    * only the media path reads.
    */
-  const readDmText = useCallback(async (m: any): Promise<{ text: string; fileKeyEntry: string | null }> => {
+  const readDmText = useCallback(async (m: any): Promise<{ text: string; fileKeyEntry: string | null; senderKey?: string; senderNickname?: string }> => {
     let text = m.text || '';
     const peerId = peerOf(m);
+    let senderKey: string | undefined;
+    let senderNickname: string | undefined;
     if (isDmBody(m.encrypted)) {
       try {
         const opened = await openFor(peerId, m.encrypted, privateKeyRef.current);
-        if (opened !== null) text = opened;
+        if (opened !== null) {
+          const unwrapped = unwrapSenderPlaintext(opened);
+          text = unwrapped.text;
+          senderKey = unwrapped.senderKey;
+          senderNickname = unwrapped.senderNickname;
+        }
         else if (!text) text = '[encrypted]';
       } catch {
         if (!text) text = '[encrypted]';
@@ -838,7 +846,7 @@ useEffect(() => { reportTargetRef.current = state.reportTarget; }, [state.report
     }
     if (m.isOwn && (!text || text === '[encrypted]')) text = recallOwnMessageText(m.clientId) || text || '[encrypted]';
     const { text: shown, entry } = openFileKeyFromText(text);
-    return { text: shown, fileKeyEntry: entry };
+    return { text: shown, fileKeyEntry: entry, senderKey, senderNickname };
   }, []);
 
   const requestSessions = useCallback(() => {
@@ -1645,8 +1653,8 @@ const { text, fileKeyEntry } = await readDmText(m);
                 const parts = ch.split(':');
                 const otherId = parts[0] === userIdRef.current ? parts[1] : parts[0];
                 const older = await Promise.all(message.payload.messages.map(async (m: any) => {
-                  const { text, fileKeyEntry } = await readDmText(m);
-                  return { id: m.id, senderId: m.senderId, senderNickname: m.senderNickname, text, timestamp: m.timestamp, isOwn: m.senderId === userIdRef.current, channel: otherId, fileKey: m.fileKey, fileKeyEntry: fileKeyEntry ?? undefined, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined, reactions: normalizeReactions(m.reactions), encrypted: m.encrypted, clientId: m.clientId ?? undefined };
+                  const { text, fileKeyEntry, senderNickname: sealedSenderNick } = await readDmText(m);
+                  return { id: m.id, senderId: m.senderId, senderNickname: sealedSenderNick || m.senderNickname, text, timestamp: m.timestamp, isOwn: m.senderId === userIdRef.current, channel: otherId, fileKey: m.fileKey, fileKeyEntry: fileKeyEntry ?? undefined, expiresAt: m.expiresAt || undefined, quotedMessageId: m.quotedMessageId ?? undefined, quotedMessageText: m.quotedMessageText ?? undefined, quotedMessageSender: m.quotedMessageSender ?? undefined, reactions: normalizeReactions(m.reactions), encrypted: m.encrypted, clientId: m.clientId ?? undefined };
                 }));
 dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
                 dispatch({ type: 'SET_AVATARS', avatars: avatarMapFromMessages(message.payload.messages) });
@@ -1662,10 +1670,12 @@ dispatch({ type: 'PREPEND_DM_MESSAGES', channel: otherId, messages: older });
                 ? (parts[0] === userIdRef.current ? parts[1] : parts[0])
                 : message.payload.senderId || '';
 let msgFileKeyEntry: string | undefined;
+let sealedSenderNick: string | undefined;
                if (message.payload.encrypted) {
                  const opened = await readDmText(message.payload);
                  msgText = opened.text;
                  msgFileKeyEntry = opened.fileKeyEntry ?? undefined;
+                 sealedSenderNick = opened.senderNickname;
                }
                // A message that reached this conversation but carried no body for this device. The server
                // says so by sending the frame with nothing in it rather than dropping it, because a
@@ -1673,15 +1683,15 @@ let msgFileKeyEntry: string | undefined;
                // Shown as unreadable rather than blank: an empty bubble reads as a rendering fault and
                // invites a reload that will not help.
                if (!msgText && !message.payload.isOwn) msgText = t('not_for_this_device');
-               dispatch({ type: 'ADD_DM_MESSAGE', channel: otherId, message: { id: message.payload.id, senderId: message.payload.senderId, senderNickname: message.payload.senderNickname, text: msgText, timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, channel: otherId, fileKey: message.payload.fileKey, fileKeyEntry: msgFileKeyEntry, expiresAt: message.payload.expiresAt || undefined, quotedMessageId: message.payload.quotedMessageId ?? undefined, quotedMessageText: message.payload.quotedMessageText ?? undefined, quotedMessageSender: message.payload.quotedMessageSender ?? undefined, reactions: normalizeReactions(message.payload.reactions), encrypted: message.payload.encrypted, clientId: message.payload.clientId ?? undefined } });
+               // Sealed sender: the name shown comes from the encrypted body, not from the server frame.
+               // The server never learns who wrote it — only the recipient does, after decryption.
+               const displayNick = sealedSenderNick || message.payload.senderNickname || '';
+               const displaySenderId = message.payload.isOwn ? userIdRef.current || '' : message.payload.senderId || '';
+               dispatch({ type: 'ADD_DM_MESSAGE', channel: otherId, message: { id: message.payload.id, senderId: displaySenderId, senderNickname: displayNick, text: msgText, timestamp: message.payload.timestamp, isOwn: message.payload.isOwn, channel: otherId, fileKey: message.payload.fileKey, fileKeyEntry: msgFileKeyEntry, expiresAt: message.payload.expiresAt || undefined, quotedMessageId: message.payload.quotedMessageId ?? undefined, quotedMessageText: message.payload.quotedMessageText ?? undefined, quotedMessageSender: message.payload.quotedMessageSender ?? undefined, reactions: normalizeReactions(message.payload.reactions), encrypted: message.payload.encrypted, clientId: message.payload.clientId ?? undefined } });
                dispatch({ type: 'SET_AVATARS', avatars: avatarFromSender(message.payload.senderId, message.payload.senderAvatar) });
-               // Only the other person's name belongs in this conversation's title. The server sends
-               // `senderNickname` on every frame including the echoes of our own, and the echo's sender is
-               // us - so this ran for our own messages too, relabelling the peer with our name and writing
-               // that into `wn_dm_names`, where it outlived the frame. The contact refresh a moment later
-               // put it right, which is why it read as a flicker rather than a fault.
+               // Only the other person's name belongs in this conversation's title.
                if (!message.payload.isOwn) {
-                 dispatch({ type: 'SET_DM_NAME', userId: otherId, nickname: message.payload.senderNickname });
+                 dispatch({ type: 'SET_DM_NAME', userId: otherId, nickname: displayNick || message.payload.senderNickname || '' });
                  // the list is refreshed on the next tick rather than emptied here, which used to flash
                  // "No chats yet" on every incoming message
                  scheduleContactsRefresh();
@@ -1695,7 +1705,7 @@ let msgFileKeyEntry: string | undefined;
                    dispatch({ type: 'BUMP_UNREAD', channel: otherId, delta: 1 });
                    unreadCountRef.current++;
                    updateTitle();
-                   fireNotification(`@${message.payload.senderNickname}`, msgText);
+                   fireNotification(`@${displayNick || message.payload.senderNickname || 'Someone'}`, msgText);
                    playNotifSound();
                  }
                } else {
@@ -2333,6 +2343,13 @@ const cancelPow = useCallback(() => {
     if (options.fileKey) payload.fileKey = options.fileKey;
     if (options.quoted) payload.quoted = { id: options.quoted.id, text: options.quoted.text, sender: options.quoted.senderNickname };
     if (!bundleWaitersRef.current[to] && !hasBundlesFor(to)) await requestPeerBundle(to);
+    // Sealed sender: wrap the plaintext with this device's identity key and nickname so the recipient
+    // can learn who wrote it without the server ever seeing either field in the clear. The server only
+    // learns *that* a message was sent and *to whom* — never *from whom*.
+    const senderKeyB64 = accountIdentityKeyBase64();
+    if (!senderKeyB64) throw new MediaError('keys');
+    const myNick = stateRef.current.nickname || '';
+    const sealedContent = wrapSenderPlaintext(content, senderKeyB64, myNick);
     // One sealed body per device that should read this: each of the recipient's, plus each of this
     // account's other devices so a second screen is not left out of its own conversation. Nothing here
     // shares key material between devices, so taking one phone does not open the laptop.
@@ -2340,8 +2357,8 @@ const cancelPow = useCallback(() => {
     // The stateless envelope is built only as a floor, for a peer who has published no bundle at all -
     // it is no longer attached to every message, because a copy under a long-lived key meant seizing
     // the server opened the whole history regardless of what the ratchet had achieved.
-    const { payload: body, failedDevices } = await sealForDevices(to, content, () =>
-      encryptMessage(content, buildEncryptKeys(to, recipientKey)));
+    const { payload: body, failedDevices } = await sealForDevices(to, sealedContent, () =>
+      encryptMessage(sealedContent, buildEncryptKeys(to, recipientKey)));
     payload.encrypted = body;
     // Dispatched unconditionally, including with an empty list. The reducer knows how to clear a peer's
     // warning and this guard meant it never got to: the entry was only ever written, never removed, so one

@@ -88,6 +88,34 @@ export function isDmBody(value: any): value is DmBody {
   return !!value && typeof value === 'object' && typeof value.ciphertext === 'string';
 }
 
+/** The sealed-sender envelope carried inside the encrypted plaintext. Only the two ends can read it. */
+export interface SenderEnvelope {
+  senderKey: string;
+  senderNickname: string;
+  text: string;
+}
+
+/** Wraps plaintext with the sender's identity key and nickname, so the recipient learns who wrote it
+ *  without the server ever seeing either field in the clear. */
+export function wrapSenderPlaintext(text: string, senderKeyB64: string, senderNickname: string): string {
+  const envelope: SenderEnvelope = { senderKey: senderKeyB64, senderNickname: senderNickname, text };
+  return JSON.stringify(envelope);
+}
+
+/** Unwraps a SenderEnvelope from decrypted plaintext. Falls back to returning the raw string as `text`
+ *  with no sender info for messages that predate sealed sender. */
+export function unwrapSenderPlaintext(decrypted: string): { senderKey?: string; senderNickname?: string; text: string } {
+  try {
+    const parsed = JSON.parse(decrypted);
+    if (parsed && typeof parsed === 'object' && typeof parsed.text === 'string' && typeof parsed.senderKey === 'string') {
+      return { senderKey: parsed.senderKey, senderNickname: parsed.senderNickname, text: parsed.text };
+    }
+  } catch { /* not a sealed-sender envelope - treat as legacy plaintext */ }
+  return { text: decrypted };
+}
+
+
+
 /** Brings the key material up for an account, once the password is known. */
 export async function startRatchet(userId: string, password: string): Promise<void> {
   // Everything this module remembers about *other people* is dropped first, before the new account's own

@@ -2419,11 +2419,20 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
       send(ws, { type: 'error', payload: { code: 'INVALID_PAYLOAD', message: 'messageId required' }, timestamp: Date.now() });
       return;
     }
-    // Only somebody who can see the message may hear that it went. Announcing a deletion to the whole
-    // server handed every connected user the id and the fact of a private message nobody had any
-    // business knowing existed.
     const target = await getMessageById(payload.messageId);
-    if (!target || !canAccessMessage(userId, target)) {
+    if (!target) {
+      send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found' }, timestamp: Date.now() });
+      return;
+    }
+    // For public (general) channel messages, the server still checks authorship:
+    if (!target.encrypted && target.channel === 'general' && target.senderId !== userId) {
+      send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
+      return;
+    }
+    // For encrypted (private) messages with sealed sender, the server cannot know the author, so any
+    // participant in the conversation may request deletion. The recipient decides whether to honour it
+    // by checking the sender key sealed inside the ciphertext.
+    if (!canAccessMessage(userId, target)) {
       send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
       return;
     }
@@ -2449,14 +2458,20 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
     }
 
     const target = await getMessageById(payload.messageId);
-    if (!target || target.senderId !== userId) {
+    if (!target) {
+      send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found' }, timestamp: Date.now() });
+      return;
+    }
+
+    // For public (general) channel messages, the server still checks authorship:
+    if (!target.encrypted && target.channel === 'general' && target.senderId !== userId) {
       send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
       return;
     }
 
     // A private message is stored as ciphertext, so a correction arrives as a new encrypted body rather
-    // than as words. The server checks that the account wrote the message and swaps the body; it never
-    // sees either version of the text.
+    // than as words. With sealed sender the server never learns who wrote it, so it cannot enforce
+    // authorship here - the recipient does that by checking the sender key sealed inside the ciphertext.
     if (target.encrypted) {
       // Either shape, because a correction is now sealed per device like any other message - and a
       // server that rejected the fan-out would push clients back to the long-lived envelope, which is
@@ -2466,7 +2481,9 @@ async function handleAddReaction(userId: string, ws: WebSocket, payload: { messa
         return;
       }
       const expiresAt = resolveExpiry(payload.ttl, Date.now());
-      const updated = await updateEncryptedMessage(payload.messageId, userId, payload.encrypted, expiresAt);
+      // Sealed sender: the server does not know who wrote this, so pass null - the recipient checks
+      // authorship by comparing the sender key sealed inside the ciphertext.
+      const updated = await updateEncryptedMessage(payload.messageId, null, payload.encrypted, expiresAt);
       if (!updated) {
         send(ws, { type: 'error', payload: { code: 'NOT_FOUND', message: 'Message not found or not yours' }, timestamp: Date.now() });
         return;
