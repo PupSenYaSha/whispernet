@@ -23,8 +23,10 @@
 - **Grouped emoji picker** — a quick strip for one tap, or the full set behind it
 - **Profiles & avatars** — click any avatar to open a profile: avatar, nickname, online status,
   registration date, safety number; own photo upload (auto-cropped, WebP)
-- **Contact verification** — compare a safety number in person and mark the contact verified; the mark
-  clears itself if their identity key ever changes
+- **Contact verification** — compare a safety number in person or scan its QR code; mark the contact
+  verified; the mark clears itself if their identity key ever changes
+- **Voice & video calls** — WebRTC peer-to-peer calls with signalling relayed through the existing
+  websocket, microphone and camera toggles, in-call window; free STUN servers for ICE candidate gathering
 - **Chat list** — unread counts, unread-only filter, per-chat pins, per-chat draft memory. A pin is stored
   as a bare message id: it survives a reload without keeping a second copy of what was pinned, which for a
   private message would mean writing somebody's words to disk in the clear. Installing over an older
