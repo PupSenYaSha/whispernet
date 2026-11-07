@@ -1,0 +1,250 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { setDraftsPassword, getDraft, setDraft, forgetDrafts, flushDrafts, channelsWithDrafts } from '../../src/drafts';
+import { secureGet } from '../../src/secureStore';
+
+/**
+ * A draft is the one thing in the app the server never sees and the person never sent.
+ *
+ * Which is what made it the most valuable thing in a profile to steal, and it sat in `localStorage` in the
+ * clear — right next to an app whose passcode lock promises that an unlocked machine reveals nothing. The
+ * lock was not lying about the conversation on screen, but it was doing nothing about the sentence
+ * somebody had typed and not yet sent.
+ *
+ * So drafts go into the same box as the rest of the local material. These check the property rather than
+ * the mechanism: nothing readable on disk, nothing left after a sign-out, and nothing lost across a
+ * reload.
+ */
+
+const store = new Map<string, string>();
+(globalThis as any).localStorage = {
+  getItem: (k: string) => (store.has(k) ? store.get(k)! : null),
+  setItem: (k: string, v: string) => { store.set(k, v); },
+  removeItem: (k: string) => { store.delete(k); },
+  clear: () => store.clear(),
+  key: (i: number) => [...store.keys()][i] ?? null,
+  get length() { return store.size; },
+};
+
+const OLD = 'pass123456';
+const NEW = 'hunter2hunter2';
+
+beforeEach(async () => {
+  store.clear();
+  forgetDrafts();
+  setDraftsPassword('');
+});
+
+describe('a draft', () => {
+  it('is never written to storage in the clear', async () => {
+    setDraftsPassword(OLD);
+    setDraft('somebody', 'the thing I did not send yet');
+    await flushDrafts();
+
+    // nothing anywhere in the profile carries the words
+    for (const [key, value] of store) {
+      expect(value, `${key} holds the draft in the clear`).not.toContain('did not send');
+    }
+    // and there is no per-channel plaintext key left over from the version that used to
+    for (const key of store.keys()) expect(key.startsWith('wn_draft_')).toBe(false);
+  });
+
+  it('opens under the account password afterwards', async () => {
+    setDraftsPassword(OLD);
+    setDraft('somebody', 'a private half-thought');
+    await flushDrafts();
+
+    const mine = await secureGet<Record<string, string>>('wn_drafts', OLD);
+    expect(mine?.somebody).toBe('a private half-thought');
+    // the wrong password gets nothing, which is the whole point of the box
+    expect(await secureGet('wn_drafts', NEW)).toBeNull();
+  });
+
+  it('survives a reload, because that is the feature', async () => {
+    setDraftsPassword(OLD);
+    setDraft('somebody', 'still here after a restart');
+    await flushDrafts();
+    expect(getDraft('somebody')).toBe('still here after a restart');
+
+    // A reload is a fresh module over the same storage, not a sign-out — signing out is *supposed* to
+    // destroy the box, and using it here would have tested that instead of this.
+    vi.resetModules();
+    const reloaded = await import('../../src/drafts');
+    reloaded.setDraftsPassword(OLD);
+    await reloaded.whenDraftsHydrated();
+
+    expect(reloaded.getDraft('somebody'), 'a draft did not survive a restart').toBe('still here after a restart');
+  });
+
+  it('keeps conversations apart', async () => {
+    setDraftsPassword(OLD);
+    setDraft('alice', 'for alice');
+    setDraft('bob', 'for bob');
+    expect(getDraft('alice')).toBe('for alice');
+    expect(getDraft('bob')).toBe('for bob');
+    expect(channelsWithDrafts().sort()).toEqual(['alice', 'bob']);
+  });
+
+  it('takes a draft with it when it is sent, rather than leaving it behind', async () => {
+    setDraftsPassword(OLD);
+    setDraft('alice', 'sent');
+    await flushDrafts();
+    setDraft('alice', '');
+    await flushDrafts();
+
+    expect(getDraft('alice')).toBe('');
+    expect(channelsWithDrafts()).not.toContain('alice');
+    const stored = await secureGet<Record<string, string>>('wn_drafts', OLD);
+    expect(stored?.alice ?? '').toBe('');
+  });
+
+  it('goes when the account does', async () => {
+    setDraftsPassword(OLD);
+    setDraft('alice', 'never to be seen again');
+    await flushDrafts();
+
+    forgetDrafts();
+    setDraftsPassword('');
+    await flushDrafts();
+
+    expect(getDraft('alice')).toBe('');
+    expect(await secureGet('wn_drafts', OLD)).toBeNull();
+    for (const value of store.values()) expect(value).not.toContain('never to be seen');
+  });
+
+  it('follows a password change, so the old one opens nothing', async () => {
+    setDraftsPassword(OLD);
+    setDraft('alice', 'written under the old password');
+    await flushDrafts();
+
+    setDraftsPassword(NEW);
+    await flushDrafts();
+
+    expect(getDraft('alice')).toBe('written under the old password');
+    expect(await secureGet('wn_drafts', OLD)).toBeNull();
+    expect(await secureGet<Record<string, string>>('wn_drafts', NEW)).toBeTruthy();
+  });
+
+  it('writes nothing at all before the account is known', async () => {
+    // the ordering that matters: the app sets the password after sign-in, and anything typed before that
+    // would otherwise be written under no key at all
+    setDraft('alice', 'typed before sign-in finished');
+    await flushDrafts();
+    expect(store.size).toBe(0);
+    // still in the tab, which is the honest outcome: it is not persisted and not lost
+    expect(getDraft('alice')).toBe('typed before sign-in finished');
+  });
+});
+
+/**
+ * A draft that is restored into nothing.
+ *
+ * `whenDraftsHydrated` was exported and called by nobody, because the composer reads the tab synchronously
+ * and nothing re-rendered it. The box is behind the same derivation as everything else in it, so opening
+ * a chat that had a draft during sign-in showed an empty composer, and the next keystroke wrote over the
+ * saved text - a draft destroyed without ever having been seen.
+ *
+ * So the load tells whoever is listening that it has finished, and the composer looks again.
+ */
+describe('being told when the drafts have arrived', () => {
+  it('calls back with the words already in memory, not before', async () => {
+    vi.resetModules();
+    const fresh = await import('../../src/drafts');
+    fresh.setDraftsPassword(OLD);
+    await fresh.flushDrafts();
+    fresh.setDraft('alice', 'still in the box from before the restart');
+    await fresh.flushDrafts();
+
+    // a reload: the tab is empty, the storage is not
+    vi.resetModules();
+    const reloaded = await import('../../src/drafts');
+    const seen: Array<Record<string, string>> = [];
+    const off = reloaded.subscribeDrafts(() => seen.push(reloaded.draftSnapshot()));
+    try {
+      reloaded.setDraftsPassword(OLD);
+      await reloaded.whenDraftsHydrated();
+    } finally {
+      off();
+    }
+
+    expect(seen.length).toBeGreaterThan(0);
+    // and the callback saw the finished box, which is the whole point of the ordering
+    expect(seen[seen.length - 1].alice).toBe('still in the box from before the restart');
+  });
+
+  it('stops calling back once the listener has gone', async () => {
+    const fresh = await import('../../src/drafts');
+    let calls = 0;
+    const off = fresh.subscribeDrafts(() => { calls++; });
+    off();
+    fresh.setDraftsPassword(NEW);
+    await fresh.whenDraftsHydrated();
+    expect(calls).toBe(0);
+  });
+});
+
+/**
+ * Encrypting drafts protects new ones and does nothing at all for the ones already on disk.
+ *
+ * Everybody who used the app before the change still has their old `wn_draft_<channel>` entries, in the
+ * clear, and no code path was looking at them. So the fix would have been silent for exactly the people
+ * who had something to protect — which is a worse outcome than not shipping it, because it would have
+ * looked done.
+ */
+describe('drafts left behind by a build that kept them in the clear', () => {
+  /**
+   * A reload, honestly.
+   *
+   * `forgetDrafts` would not do: it deletes the encrypted box, which a page reload does not do. What a
+   * reload does is throw away the tab, so the module state goes and the storage stays.
+   */
+  const reload = async () => {
+    vi.resetModules();
+    return await import('../../src/drafts');
+  };
+
+  it('is taken into the box and deleted from where it was lying in the open', async () => {
+    store.set('wn_draft_alice', 'the password for the server is in the drawer');
+    store.set('wn_draft_general', 'does anyone still read the general channel');
+
+    setDraftsPassword(OLD);
+    await flushDrafts();
+
+    // rescued, not dropped: the user was typing these when they updated
+    expect(getDraft('alice')).toBe('the password for the server is in the drawer');
+    expect(getDraft('general')).toBe('does anyone still read the general channel');
+
+    // and nothing readable is left on disk for either
+    for (const [key, value] of store) {
+      expect(value, `${key} still holds a recovered draft in the clear`).not.toContain('drawer');
+      expect(value, `${key} still holds a recovered draft in the clear`).not.toContain('general channel');
+    }
+    for (const key of store.keys()) expect(key.startsWith('wn_draft_')).toBe(false);
+  });
+
+  it('survives a reload after being swept', async () => {
+    store.set('wn_draft_alice', 'written before the upgrade');
+    setDraftsPassword(OLD);
+    await flushDrafts();
+
+    const fresh = await reload();
+    fresh.setDraftsPassword(OLD);
+    await fresh.flushDrafts();
+
+    expect(fresh.getDraft('alice'), 'the recovered draft was dropped instead of rescued').toBe('written before the upgrade');
+  });
+
+  it('does not overwrite a draft that the encrypted box already had', async () => {
+    // a newer draft, written by a build that encrypted, is the one that should win
+    setDraftsPassword(OLD);
+    setDraft('alice', 'the newer one, already encrypted');
+    await flushDrafts();
+
+    store.set('wn_draft_alice', 'an older one left in the clear');
+    const fresh = await reload();
+    fresh.setDraftsPassword(OLD);
+    await fresh.flushDrafts();
+
+    expect(fresh.getDraft('alice')).toBe('the newer one, already encrypted');
+    expect(store.has('wn_draft_alice'), 'the stale plaintext copy was left behind').toBe(false);
+  });
+});

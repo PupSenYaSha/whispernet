@@ -12,91 +12,44 @@
 
 ## Features
 
-- **End-to-end encryption** — X3DH + Double Ratchet for direct messages, forward secrecy, break-in
-  recovery, and **a separate sealed body per device**, so a message reaches a phone and a laptop without
-  either of them sharing key material with the other
-- **E2EE private messages** + a global channel
+- **End-to-end encryption** — X3DH + Double Ratchet for direct messages, forward secrecy, per-device sealed bodies
+- **E2EE private messages** + a public `#general` channel (not E2EE — do not send secrets there)
+- **Groups** — E2EE with one symmetric AES-256 key per group; key rotates when a member joins or leaves
 - **Disappearing messages** — 24h / 7d / 30d auto-delete
-- **Media sharing** — images & videos encrypted, streamed a chunk at a time, in-app lightbox
-- **Typing indicators** and **read receipts**, neither of which the server stores
+- **Media sharing** — encrypted images & videos, streamed in chunks, up to 1 GB
+- **Typing indicators & read receipts** — optional, can be switched off in Settings
 - **Reactions, editing, deletion, quoted replies**, forward, jump-to-quoted
-- **Grouped emoji picker** — a quick strip for one tap, or the full set behind it
-- **Profiles & avatars** — click any avatar to open a profile: avatar, nickname, online status,
-  registration date, safety number; own photo upload (auto-cropped, WebP)
-- **Contact verification** — compare a safety number in person or scan its QR code; mark the contact
-  verified; the mark clears itself if their identity key ever changes
-- **Voice & video calls** — WebRTC peer-to-peer calls with signalling relayed through the existing
-  websocket, microphone and camera toggles, in-call window; free STUN servers for ICE candidate gathering
-- **Chat list** — unread counts, unread-only filter, per-chat pins, per-chat draft memory. A pin is stored
-  as a bare message id: it survives a reload without keeping a second copy of what was pinned, which for a
-  private message would mean writing somebody's words to disk in the clear. Installing over an older
-  version rewrites any pin that still carries its text.
-- **Multi-device** — up to 3 sessions (named devices, list & revoke); a 4th device is rejected. Every
-  device has its own ratchet identity, so compromising one device does not open the others
-- **Key protection** — private keys encrypted at rest (PBKDF2 600K + AES-256-GCM); encrypted key backup /
-  restore; safety numbers; **change password without losing keys**
-- **Passcode lock** — optional, with auto-lock, independent of the account password
-- **Message search** (server-side full-text over the public channel)
-- **Screenshot protection** toggle, including native window protection on the desktop shell
-- **Abuse limits** — login lockout and per-address connection caps
-- **Moderation** — admin ban & reports (grouped by user, with profile links), user blocking, rate limiting
+- **Profiles & avatars** — click any avatar for nickname, online status, registration date, safety number
+- **Contact verification** — safety number comparison + QR scanner; clears itself if their identity key changes
+- **Voice & video calls** — WebRTC peer-to-peer, signalling over the encrypted websocket
+- **Multi-device** — up to 3 sessions; each device has its own ratchet identity
+- **Key protection** — PBKDF2 600K + AES-256-GCM at rest; encrypted key backup / restore; change password without losing keys
+- **Passcode lock** — optional screen lock, independent of the account password
+- **Screenshot protection** — blocks screen capture, right-click and text selection
+- **Abuse limits** — PoW registration, login lockout, per-address connection and rate caps
+- **Moderation** — admin ban & reports, user blocking
 - **RU / EN** localization
-- **Cross-platform** — Web (PWA), Desktop (Windows / Linux, Tauri v2), Android
 
 ## Security
 
-The server never sees the plaintext of a private message, a private attachment, or any long-term key.
-Encryption happens entirely on the client. Both client and server are fully open source here.
+All encryption happens entirely on the client. The server never sees plaintext of private messages, attachments, or long-term keys.
 
 ### What the server can see
 
-Encryption is not anonymity, and it is worth being precise about which is which. A single server brokers
-every connection, so the operator can observe:
+A single server brokers every connection, so the operator necessarily observes:
 
-- **Who is connected when.** Sockets are authenticated, and the server necessarily knows which account
-  each open connection belongs to.
-- **Who talks to whom, and when.** A direct message row records both participants. Its arrival and its
-  time are visible; the message *size* is padded to a coarse bucket so exact length is hidden. The
-  sender's name is stripped from stored DM rows after `DM_METADATA_TTL_MS` (default 24 hours), so the
-  server cannot say which member of a pair wrote which stored message — only that the pair exchanged
-  messages.
-- **The global channel in full.** `#general` is not end-to-end encrypted. It is a public room. Attachments
-  posted there are not encrypted either — there is nobody to encrypt them to.
-- **Attachments, encrypted.** A private attachment is encrypted to the two participants before it leaves
-  the device. The media host stores ciphertext.
-- **Metadata about devices and addresses.** Addresses are recorded only as a daily-rotating HMAC
-  pseudonym in the security log, and a browser user agent is reduced to a coarse label such as
-  "Chrome on Windows" before it is stored. Neither can be reversed or correlated across days.
-- **Prekey material and public keys.** Not secrets by design: a server that cannot see them cannot route a
-  first message to an offline recipient.
-- **Typing and read receipts, optional.** A "still typing" or "read up to here" frame is relayed to the
-  other end and forgotten. Nothing is written down. Both can be switched off in Settings, so the server
-  never learns that a conversation is active or how far it has been read.
+- **Who is connected when** — sockets are authenticated
+- **Who talks to whom, and when** — direct channels record both participants; message size is padded to fixed buckets; sender attribution on stored DM rows is stripped after 24 hours
+- **The global channel `#general` in full** — plaintext room, not E2EE
+- **Metadata about devices and addresses** — daily-rotating HMAC pseudonyms, coarse user-agent labels
 
 ### How messages travel
 
-Private messages use Signal Protocol (X3DH + Double Ratchet) with a separate sealed body per device. The server routes bodies but cannot open them — each copy is under its own ratchet. Message plaintexts are padded to fixed-size buckets before sealing, so the server cannot read exact message length from ciphertext size. The server does see metadata: who is connected, who talks to whom, and when. It does not see plaintext.
+Private messages use Signal Protocol (X3DH + Double Ratchet) with a separate sealed body per device. Groups use one symmetric AES-256 key per group, one sealed body per message, rotated when members join or leave.
 
-Groups (except `#general`) use one symmetric AES-256 key per group. One sealed body per message reaches every member, so the server cannot count participants from body count. The group key is wrapped under each member's long-lived key and stored server-side; the server never holds the raw key. When a member joins or leaves, the group key rotates.
+## Password
 
-Public channel `#general` is a plaintext room — do not send secrets there.
-
-Devices do not share a safety number. It comes from an account-level identity key, identical on every device. When a device is replaced, the account key stays the same and the numbers still match.
-
-### The account password
-
-The password never reaches the server. It is the key every piece of local key material is sealed under —
-sessions, prekeys, and the cached copy of this account's own outgoing messages are all AES-GCM boxes under
-a PBKDF2 key derived from it. Changing it therefore rewrites those stores rather than updating a field;
-the re-wrap is done under the old password first and the switch happens last, so an interruption leaves the
-device readable with the password it was already readable with.
-`tests/unit/password-change.test.ts` pins that down, including the case that matters most: messages already
-in flight when the change happens still arrive, in order, afterwards.
-
-Two passcodes are easy to confuse. The **account password** is a crypto key and cannot be recovered or
-reset — losing it means losing the local history, which is why the encrypted key backup exists. The **app
-passcode** in Settings is only a lock on the screen: a salted hash, used for nothing cryptographic,
-forgotten by clearing it in settings.
+The password never reaches the server. It is the key every piece of local key material is sealed under. Losing it means losing local history — that's why the encrypted key backup exists.
 
 ## Download
 
@@ -104,98 +57,11 @@ Pre-built binaries on [Releases](https://github.com/PupSenYaSha/whispernet/relea
 
 | Platform | Asset |
 |---|---|
-| Windows | `WhisperNet_1.0.0_x64-setup.exe` — NSIS installer |
 | Windows | `WhisperNet_1.0.0_x64-portable.zip` — plain executable, used by the in-app updater |
 | Linux | `WhisperNet_1.0.0_amd64.deb` |
 | Android | `WhisperNet.apk` |
 
-Every asset here is built from the same commit by the same run, and the Windows portable archive is signed
-with the key compiled into the binary, so `WhisperNet_1.0.0_x64-portable.zip.sig` is published beside it
-and the in-app updater will install it.
-
-Every asset is published with a `.sha256` beside it, and you are worth checking it:
-
-```
-sha256sum WhisperNet_1.0.0_x64-portable.zip
-# compare against WhisperNet_1.0.0_x64-portable.zip.sha256
-```
-
-The in-app updater does exactly this and refuses to install anything that does not match, so a release
-without a digest produces no updates at all. That is deliberate: a checksum nobody publishes is a checksum
-nobody can check against. It is still only a checksum — it proves the file arrived intact, not who published
-it, since the digest sits next to the file it describes. The Windows build is **unsigned** in the
-Authenticode sense: CI builds it with certificate auto-discovery switched off, so the installer carries no
-Authenticode signature and SmartScreen will warn on first run. Signing it needs a code-signing certificate
-and the CI secret to hold it.
-
-Android release builds need the `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`,
-`ANDROID_KEY_ALIAS` and `ANDROID_KEY_PASSWORD` secrets; without them the workflow refuses to publish
-rather than shipping a debug-signed APK. That refusal is deliberate and it fails the whole run, so an
-Android build is all-or-nothing.
-
-The Android build has both kinds of backup switched off — Auto Backup and device-to-device transfer — via
-`android:allowBackup="false"` plus an explicit `data_extraction_rules.xml`. The WebView's storage holds an
-identity key, the app-lock verifier and a cache of decrypted messages, and copying that to a Google Drive
-account would contradict the first line of this file. Reinstalling means signing in again, which is the
-right trade for a messenger. Its `FileProvider` is also narrowed to the app's own cache and external files
-directory; the stock Capacitor template publishes the entire shared-storage root through it.
-
-### The in-app updater
-
-The desktop shell checks the GitHub releases API, downloads the portable zip, and **refuses to install
-anything it cannot check against a published digest**. A missing or unreadable `.sha256` for the exact file
-being downloaded is a hard failure, not a warning.
-
-The digest is fetched from the same place as the payload, so on its own it would catch a corrupted or stale
-download but **not** prove who published the build. So releases are also **signed**, and the signature is
-the part that proves authorship. The chain is signature → digest → file:
-`scripts/sign-update.mjs` signs the 32 digest bytes — not the 50 MB archive, which would mean hashing that
-on every build to say the same thing — and the shell verifies that signature against an **Ed25519 public
-key compiled into the binary** before it will install anything. A digest fetched from the same place as the
-payload could not do this job even in principle: the answer to "did the right person publish this" must not
-itself be editable by whoever can publish.
-
-The key pair comes from `scripts/generate-update-key.mjs`. It writes **only the private half to a file and
-prints only the public half**, so the secret never passes through a terminal, a log or a chat message. The
-public half goes into `UPDATE_PUBLIC_KEY` in `src-tauri/src/lib.rs`; the private half goes into the
-repository secret `UPDATE_SIGNING_KEY_BASE64`.
-
-> **There is no second key and no recovery path.** A key that can no longer sign is a key that can no longer
-> be used, and shipping a replacement is itself a release — one that only installs on builds already carrying
-> the new key. Back it up somewhere that is not the machine that made it. **Publishing it would let anyone
-> ship code to every user's desktop.**
-
-CI refuses to publish a Windows build without the key, rather than publishing an unsigned one: an unsigned
-release looks identical to a signed one right up until the binary is swapped, which is exactly when the
-check matters. `ALLOW_UNVERIFIED_UPDATES=1` still exists for a self-hoster whose own key they have
-deliberately removed; it is off by default, and setting it means declining to check who published what you
-install — and, as the name says, declining the digest check too.
-
-Downloading is automatic; **applying is not.** Once the update is unpacked the shell waits for the user to
-choose, and every button in that dialog — including the one in the corner — means "not now". The new version
-is installed and picked up on the next launch. The shell used to restart the app by itself a few seconds
-after unpacking, which made "dismiss" a button that hid an overlay while the app restarted underneath it,
-taking anything unsent with it. Declining or ignoring the prompt waits five minutes, then keeps the current
-version.
-
-## Hosted instance
-
-| App | URL |
-|-----|-----|
-| Messenger (Web app) | `https://rightfully-nice-ram.cloudpub.ru/` |
-
-## About the database
-
-SQLite, through Node's built-in `node:sqlite`. `PRAGMA journal_mode = WAL` and `PRAGMA busy_timeout = 5000`
-are set on open, so readers do not block the writer and a writer that arrives during a write waits instead of
-failing; the messages table is indexed on channel and timestamp, which is what both the history fetch and
-the paged backwards walk go through.
-
-There is no repository interface over it, deliberately: an abstraction introduced without a second
-implementation to validate it against is not portability, it is an untested second way to be wrong. Moving to
-a client/server database would not improve the privacy properties described above — the server holds
-plaintext message bodies either way, and that is a property of the protocol rather than of the storage
-engine.
+Every asset is published with a `.sha256` beside it. The Windows portable archive is signed with the key compiled into the binary, and the in-app updater verifies the Ed25519 signature before installing.
 
 ## Configuration
 
@@ -206,100 +72,15 @@ Everything has a working default; nothing is required.
 | `PORT` | `50025` | Port the messenger listens on |
 | `HOST` | `127.0.0.1` | Interface to bind |
 | `DATA_DIR` | `./data` | SQLite database, avatars and uploads |
-| `ADMIN_KEY` | *(unset)* | Extra admin credential; without it admin rights follow the `admin` nickname, which cannot be registered |
-| `PUBLIC_HOST` | *(request `Host`)* | Host baked into the Content-Security-Policy |
-| `TRUST_PROXY` | `0` | Set to `1` behind a tunnel so `req.ip` is the real client. Without it the forwarding headers are read from **nobody**, loopback included |
+| `ADMIN_KEY` | *(unset)* | Extra admin credential |
+| `TRUST_PROXY` | `0` | Set to `1` behind a tunnel so `req.ip` is the real client |
 | `MEDIA_BASE_URL` | `https://img.n1ko.dev` | Upstream used for media uploads and the proxy |
 | `MEDIA_STORAGE` | `remote` | `local` keeps uploads in `DATA_DIR/media` instead of forwarding them |
-| `TLS_KEY` / `TLS_CERT` | *(unset)* | Serve HTTPS/WSS directly instead of behind a proxy |
-| `MAX_CONNECTIONS` | `10000` | Hard ceiling on open sockets |
-| `MAX_UPLOAD_SIZE` | `1048576000` | Ceiling on one attachment, in bytes (1000 MiB) |
-| `MAX_REGISTRATIONS_PER_IP` | `40` | Accounts one address may create per day; `0` lifts it |
-| `MAX_ACCOUNTS_PER_DEVICE` | `6` | Accounts one device may create per day; `0` lifts it |
-| `POW_BITS` | `20` | Leading zero bits a registration proof must have; `0` lifts it |
-| `MAX_AUTH_ATTEMPTS` | `300` | Coarse per-address auth backstop, counted before anybody has proved who they are |
-| `MAX_AUTH_ATTEMPTS_PER_ADDRESS` | `120` | Per-address sign-in budget, charged on **every** `auth_login` including successful ones, because it bounds bcrypt work rather than mistakes |
-| `ALLOW_UNVERIFIED_UPDATES` | *(unset)* | Desktop only; installs a build with no valid signature — see above |
-| `UPDATE_SIGNING_KEY_BASE64` | *(unset)* | Repository secret; CI refuses to publish a Windows build without it. Despite the name it holds the private half as **64 hex characters** — what `generate-update-key.mjs` writes, and what `sign-update.mjs` accepts first. Base64 of the raw 32 bytes is the documented alternative and works too; base64 of the *hex text* is 88 characters and is rejected rather than misread |
-
-Creating an account costs a **proof-of-work search**: the client hashes until it finds a value with enough
-leading zero bits, and the server refuses anything short. Measured in a browser at roughly 330,000 hashes a
-second, the default is about **3 seconds** — one bit is twice the work, so 22 would be ~13 seconds and 24
-would be ~50. It runs in a worker, with progress and a cancel button, so the tab stays usable.
-
-This is the only one of the three brakes that cannot be sidestepped by editing a request: the address and
-device caps are both defeated by sending a different value, while the search has to actually be performed —
-so a hundred accounts cost a hundred searches. It needs no identity either, which matters here, because the
-alternative would be a database of whose hardware is whose.
-
-Proofs are single-use, and the difficulty is taken from the challenge the server issued rather than from the
-request, so a client cannot talk its way to a lower one. The format is `SHA-256(ascii(nonce) + ':' +
-ascii(challenge))`, computed with `@noble/hashes` on the client and `node:crypto` on the server; a test
-checks the two agree against an independent implementation, because nothing at runtime would notice if they
-drifted — the symptom would just be a register button that silently does nothing.
-
-Account creation counts are kept as rows in `registration_events`, so a limit survives a restart — which it
-did not when the counts were in memory, and where every deploy quietly handed everyone a fresh allowance.
-Nothing but the pseudonym is stored: an address or device id is HMAC'd with a salt that does **not** rotate
-(a rotating one would make every account look new each morning and the limit would never reach its ceiling),
-which is the opposite of the security log's salt on purpose, because that one is meant to be worthless by
-tomorrow.
-
-The device limit is the more meaningful of the two, and worth understanding honestly: a device id is
-generated by the client and sent in the clear, so it is not a credential. Anyone determined to make more
-accounts presents a new one, and clearing site data does the same for free. It is a cost, not a wall. What
-it does buy is that a person with three devices keeps the same one on each, whereas someone wanting twenty
-accounts has to work at it for every one.
-`npm start` also serves `site/` on `:3000` when that directory is present — it is tracked in this
-repository, so a fresh clone has the marketing site too. The messenger on `:50025` is unaffected either way.
-
-## Tests
-
-```
-npm run typecheck   # client, server and test projects
-npm run lint
-npm test            # unit and integration, against a real server on a real socket
-npm run test:e2e    # browser tests: real Chromium, real server, two accounts
-npm run test:all    # everything, in order
-```
-
-The integration tests exercise the actual client crypto against the actual server over a real websocket,
-because the failures worth catching in a messenger are almost never in the cipher — they are in how two
-sides disagree about which body a message carries.
-
-**What the module tests cannot reach, and the browser tests now do.** Everything above calls functions. The
-wiring between a React effect and the cryptography it calls had never once been executed, so an effect that
-never fires, a state write that never re-renders, or a message sealed correctly and then displayed from the
-wrong field would pass every one of them and ship broken. `tests/e2e/` therefore drives the built client in
-real Chromium against the real server, with two accounts in two browser contexts so the X3DH handshake and
-the decrypt actually run. It asserts that a private message is legible on both screens and that its body is
-on neither the websocket nor the console.
-
-Writing that test turned up two things reading the code would not have. Registration was refused until the
-password was given letters *and* digits, which no documentation mentioned. And `#general` — where the
-composer starts — is not end-to-end encrypted, so a "the words never hit the wire" test that forgets to
-switch channels is testing the wrong channel; the assertion passed for entirely the wrong reason until it
-was pointed at a real conversation.
-
-418 tests at the time of writing. A number of the bugs fixed in the current release were found by writing
-tests rather than by reading code, and one of them is only detectable that way: a body that no session on
-this device could open used to reset *every* session held with that sender. The commonest such body is one
-that was never addressed to this device at all — a sender deliberately makes no copy of its own message,
-and the server echoes it back — so every message a user sent tore down their own ratchet, discarded the
-out-of-order key windows, and forced a fresh handshake that spends a one-time prekey. Nothing short of
-running the real handshake twice would have shown it. `tests/unit/dm-crypto-failed-open.test.ts` pins it
-down, and was checked against the old code to confirm it fails there.
-
-`src/pbkdf2.ts` exists because the four cost figures are in one place, the production numbers are asserted
-directly by `tests/unit/pbkdf2-iterations.test.ts`, and `npm test` refuses to run with the override set —
-so nothing can quietly derive keys a thousand times and still be called a passing run.
-
-One known flake: `password-change.test.ts` fails intermittently in a full run while passing in isolation
-and while `tests/unit` runs clean on its own, so it needs the integration suite present to reproduce. It is
-not a shared database file (the test never opens SQLite) and not a stray async write racing the cleanup
-(every manager is tracked and `destroy()`d in `afterEach`); lowering the PBKDF2 cost six hundred times did
-not stop it, which rules out key derivation as the load that matters. The failing assertion has never been
-captured, and guessing further would be less useful than recording it.
+| `POW_BITS` | `20` | Leading zero bits a registration proof must have |
+| `MAX_AUTH_ATTEMPTS` | `300` | Coarse per-address auth backstop |
+| `MAX_AUTH_ATTEMPTS_PER_ADDRESS` | `120` | Per-address sign-in budget |
+| `MAX_REGISTRATIONS_PER_IP` | `40` | Accounts one address may create per day |
+| `MAX_ACCOUNTS_PER_DEVICE` | `6` | Accounts one device may create per day |
 
 ## License
 
